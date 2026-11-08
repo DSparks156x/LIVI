@@ -4031,8 +4031,10 @@ name = "livi-carpi-ui"
 version = "0.1.0"
 dependencies = [
  "carpi-proto",
+ "image",
  "serde",
  "serde_json",
+ "slint",
 ]
 
 [[package]]

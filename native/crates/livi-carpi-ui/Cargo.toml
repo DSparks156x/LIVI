@@ -10,3 +10,19 @@ license.workspace = true
 carpi-proto = { path = "../../../../crates/carpi-proto" }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+
+# The `shots` example: the pages drawn offscreen to PNGs. Off by default, so nothing else builds
+# Slint for it.
+image = { version = "0.25.10", default-features = false, features = ["png"], optional = true }
+slint = { version = "1.18.1", default-features = false, features = [
+  "std",
+  "compat-1-2",
+  "renderer-software",
+], optional = true }
+
+[features]
+shots = ["dep:image", "dep:slint"]
+
+[[example]]
+name = "shots"
+required-features = ["shots"]

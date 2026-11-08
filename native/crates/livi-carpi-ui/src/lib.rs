@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Drew Sparks
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! carpid's pages in LIVI: Data, Diagnostics and Car, and carpid's toasts.
+//! carpid's pages in LIVI: Data, Diagnostics and Car (with Light and Logging), and carpid's
+//! toasts.
 //!
 //! The pages are Slint (`ui/carpi.slint`), drawn with LIVI's own rows, header and theme, and
 //! focused the way LIVI's settings are. This crate holds everything that isn't Slint glue: its own
@@ -27,6 +28,7 @@ pub mod config;
 pub mod defs;
 pub mod diag;
 pub mod light;
+pub mod logging;
 pub mod pages;
 pub mod settings;
 pub mod slots;

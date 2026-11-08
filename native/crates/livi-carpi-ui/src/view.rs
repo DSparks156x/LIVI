@@ -58,6 +58,8 @@ pub enum Act {
     Advanced,
     /// The slot editor and the picker.
     Slots(SlotAct),
+    /// Data logging: the run and the profiles.
+    Log(crate::logging::LogAct),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +81,10 @@ pub enum CarScreen {
     /// Every `light.` value, and one point of the manual curve.
     LightValues,
     Point(usize),
+    /// Data logging: the run and the profiles, one profile, its channels.
+    Logging,
+    LogProfile,
+    LogChannels,
 }
 
 impl CarScreen {
@@ -91,6 +97,8 @@ impl CarScreen {
             S::Reading(_) => Some(S::Readings),
             S::Binding(_) => Some(S::Bindings),
             S::LightValues | S::Point(_) => Some(S::Light),
+            S::LogProfile => Some(S::Logging),
+            S::LogChannels => Some(S::LogProfile),
             _ => Some(S::Root),
         }
     }

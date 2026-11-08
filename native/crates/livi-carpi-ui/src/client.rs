@@ -8,13 +8,17 @@
 //! on screen: a subscription to every value, plus `Values` and `Bus` once a second so ages stay
 //! true, and carpid's settings each time a page comes up. The diagnostics page adds a second
 //! subscription, to the diag catalog's names it shows, and runs diag jobs on this connection.
+//! Data logging's status comes once a second too, with the values.
 //! `CARPI_UI_FIXTURE=<file.json>` shows a fixed set instead, for snapshots without carpid.
 
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use carpi_proto::{BusInfo, DiagAction, LightAction, Reading, Settings, SettingsPatch, ToastLevel};
+use carpi_proto::{
+    BusInfo, DatalogAction, DatalogStatus, DiagAction, LightAction, Reading, Settings,
+    SettingsPatch, ToastLevel,
+};
 use serde::Deserialize;
 
 use crate::diag::Diag;
@@ -61,6 +65,10 @@ pub struct Snapshot {
     pub settings_note: Option<String>,
     /// The last toast the pages raised.
     pub toast: Option<Toast>,
+    /// Data-log profiles and the run, from carpid.
+    pub datalog: Option<DatalogStatus>,
+    /// Why the last data-log ask didn't go through.
+    pub datalog_note: Option<String>,
 }
 
 impl Snapshot {
@@ -102,6 +110,8 @@ impl Default for Snapshot {
             restart_needed: Vec::new(),
             settings_note: None,
             toast: None,
+            datalog: None,
+            datalog_note: None,
         }
     }
 }
@@ -114,6 +124,7 @@ enum Ask {
     Settings(Option<Box<SettingsPatch>>),
     Light(LightAction),
     Diag(DiagAction),
+    Datalog(DatalogAction),
     /// The names to watch changed.
     Watch,
 }
@@ -222,6 +233,14 @@ impl Client {
         self.ask(Ask::Diag(action));
     }
 
+    /// A data-log ask; carpid's answer replaces [`Snapshot::datalog`].
+    pub fn datalog(&self, action: DatalogAction) {
+        if self.asks.is_none() {
+            self.snapshot().datalog_note = Some("not connected".into());
+        }
+        self.ask(Ask::Datalog(action));
+    }
+
     /// Diag catalog names to keep subscribed while a page is shown; carpid polls them for as
     /// long as they are. Asks carpid only when they change.
     pub fn watch(&self, names: Vec<String>) {
@@ -292,6 +311,7 @@ mod link {
         Settings,
         Light,
         Diag(DiagAction),
+        Datalog,
         Ok,
     }
 
@@ -343,6 +363,9 @@ mod link {
                     }
                     Ok(Ev::Ask(Ask::Diag(action))) => {
                         lock(&shared).diag.refused(action, "not connected".into())
+                    }
+                    Ok(Ev::Ask(Ask::Datalog(_))) => {
+                        lock(&shared).datalog_note = Some("not connected".into())
                     }
                     Ok(_) => {}
                     Err(RecvTimeoutError::Timeout) => break,
@@ -431,7 +454,12 @@ mod link {
                 return Ok(());
             }
             self.send(&Request::Values { prefix: "".into() }, Pending::Values)?;
-            self.send(&Request::Bus, Pending::Bus)
+            self.send(&Request::Bus, Pending::Bus)?;
+            self.datalog(DatalogAction::Status)
+        }
+
+        fn datalog(&mut self, action: DatalogAction) -> io::Result<()> {
+            self.send(&Request::Datalog { action }, Pending::Datalog)
         }
 
         fn subscribe(&mut self, on: bool) -> io::Result<()> {
@@ -531,6 +559,7 @@ mod link {
                     Ok(Ev::Ask(Ask::Diag(action))) => {
                         self.send(&Request::Diag { action }, Pending::Diag(action))
                     }
+                    Ok(Ev::Ask(Ask::Datalog(action))) => self.datalog(action),
                     Ok(Ev::Ask(Ask::Watch)) if *shown => self.rewatch(),
                     Ok(Ev::Ask(Ask::Watch)) => Ok(()),
                     Ok(Ev::Got(from, resp)) if from == id => {
@@ -604,6 +633,13 @@ mod link {
                 (Some(Pending::Diag(action)), Response::Error { message }) => {
                     s.diag.refused(action, message)
                 }
+                (_, Response::Datalog { status }) => {
+                    s.datalog = Some(*status);
+                    s.datalog_note = None;
+                }
+                (Some(Pending::Datalog), Response::Error { message }) => {
+                    s.datalog_note = Some(message)
+                }
                 (_, Response::Error { message }) => s.problem = Some(message),
                 _ => {}
             }
@@ -621,6 +657,7 @@ pub struct Fixture {
     pub values: Vec<Reading>,
     pub buses: Option<Vec<BusInfo>>,
     pub settings: Option<Settings>,
+    pub datalog: Option<DatalogStatus>,
 }
 
 impl Fixture {
@@ -636,6 +673,7 @@ impl Fixture {
             let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
             self.fill(&mut s);
             s.settings = self.settings.clone();
+            s.datalog = self.datalog.clone();
         }
         let (tx, rx) = mpsc::channel();
         let inner = shared.clone();
@@ -668,6 +706,11 @@ impl Fixture {
                 Ok(Ev::Ask(Ask::Settings(Some(patch)))) => {
                     if let Some(settings) = &mut s.settings {
                         crate::settings::apply(settings, &patch);
+                    }
+                }
+                Ok(Ev::Ask(Ask::Datalog(action))) => {
+                    if let Some(st) = &mut s.datalog {
+                        crate::logging::apply(st, &action);
                     }
                 }
                 Ok(_) | Err(RecvTimeoutError::Timeout) => {}
@@ -774,6 +817,18 @@ mod tests {
         reply(&mut s, &Response::Values { items: vec![] });
         assert_eq!(request(&mut s), Request::Bus);
         reply(&mut s, &Response::Bus { buses: vec![] });
+        assert_eq!(
+            request(&mut s),
+            Request::Datalog {
+                action: DatalogAction::Status
+            }
+        );
+        reply(
+            &mut s,
+            &Response::Datalog {
+                status: Box::new(crate::logging::tests::status()),
+            },
+        );
         reply(
             &mut s,
             &Response::Update {
@@ -786,6 +841,10 @@ mod tests {
             },
         );
         assert!(wait(&client, |s| s.values.get("engine.rpm").is_some()));
+        assert!(wait(&client, |s| s
+            .datalog
+            .as_ref()
+            .is_some_and(|d| d.profiles.len() == 2)));
         assert!(wait(&client, |s| s.settings.is_some()
             && s.restart_needed == ["tx"]));
 
@@ -803,6 +862,12 @@ mod tests {
                 }
                 Request::Values { .. } => reply(&mut s, &Response::Values { items: vec![] }),
                 Request::Bus => reply(&mut s, &Response::Bus { buses: vec![] }),
+                Request::Datalog { .. } => reply(
+                    &mut s,
+                    &Response::Datalog {
+                        status: Box::default(),
+                    },
+                ),
                 other => panic!("{other:?}"),
             }
         }
@@ -834,6 +899,12 @@ mod tests {
                 } => break,
                 Request::Values { .. } => reply(&mut s, &Response::Values { items: vec![] }),
                 Request::Bus => reply(&mut s, &Response::Bus { buses: vec![] }),
+                Request::Datalog { .. } => reply(
+                    &mut s,
+                    &Response::Datalog {
+                        status: Box::default(),
+                    },
+                ),
                 other => panic!("{other:?}"),
             }
         }
@@ -866,6 +937,37 @@ mod tests {
         assert!(wait(&client, |s| !s.diag.busy()
             && s.diag.installed.as_ref().is_some_and(|l| l.len() == 1)));
 
+        client.datalog(DatalogAction::Start {
+            profile: "Boost".into(),
+        });
+        loop {
+            match request(&mut s) {
+                Request::Datalog {
+                    action: DatalogAction::Start { profile },
+                } => {
+                    assert_eq!(profile, "Boost");
+                    break;
+                }
+                Request::Values { .. } => reply(&mut s, &Response::Values { items: vec![] }),
+                Request::Bus => reply(&mut s, &Response::Bus { buses: vec![] }),
+                Request::Datalog { .. } => reply(
+                    &mut s,
+                    &Response::Datalog {
+                        status: Box::default(),
+                    },
+                ),
+                other => panic!("{other:?}"),
+            }
+        }
+        reply(
+            &mut s,
+            &Response::Error {
+                message: "already logging 2026-11-08 #03".into(),
+            },
+        );
+        assert!(wait(&client, |s| s.datalog_note.as_deref()
+            == Some("already logging 2026-11-08 #03")));
+
         client.capture();
         // Polls may come first.
         loop {
@@ -876,6 +978,12 @@ mod tests {
                 }
                 Request::Values { .. } => reply(&mut s, &Response::Values { items: vec![] }),
                 Request::Bus => reply(&mut s, &Response::Bus { buses: vec![] }),
+                Request::Datalog { .. } => reply(
+                    &mut s,
+                    &Response::Datalog {
+                        status: Box::default(),
+                    },
+                ),
                 other => panic!("{other:?}"),
             }
         }

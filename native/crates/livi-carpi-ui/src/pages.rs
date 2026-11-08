@@ -7,8 +7,8 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use carpi_proto::{
-    BusInfo, CurveMode, DarkModeSource, DiagAction, LightAction, LightPatch, PinChange, Settings,
-    SettingsPatch, Value,
+    BusInfo, CurveMode, DarkModeSource, DiagAction, DisClaim, DisMediaLayout, DisPage, DisPatch,
+    LightAction, LightPatch, PinChange, Settings, SettingsPatch, Value,
 };
 
 use crate::PageId;
@@ -17,6 +17,7 @@ use crate::config::{self, Saved};
 use crate::defs::{BRIDGE, DEFS, hidden};
 use crate::diag::{self, NO_POLL};
 use crate::light::{self, STEP_AMBIENT, STEP_PCT};
+use crate::logging::{self, Logging};
 use crate::settings::{self as cfg, DIS_SLOTS};
 use crate::slots::{self, Board, Editor, Picked, Picker, SlotAct, polled, reading, tile};
 use crate::values::{NONE, Store, age, show};
@@ -58,6 +59,8 @@ pub struct Pages {
     confirm: Option<u8>,
     /// The picker of a cluster display reading.
     reading: Picker,
+    /// The Logging screens.
+    log: Logging,
 }
 
 impl Pages {
@@ -82,6 +85,7 @@ impl Pages {
             advanced: false,
             confirm: None,
             reading: Picker::default(),
+            log: Logging::default(),
         }
     }
 
@@ -106,7 +110,11 @@ impl Pages {
             PageId::Car => {
                 let picking =
                     matches!(self.car, CarScreen::Reading(_)) && self.reading.cat.is_some();
-                self.car.depth() + usize::from(picking)
+                let channel = match (&self.log.editor.picker, self.car) {
+                    (Some(p), CarScreen::LogChannels) => 1 + usize::from(p.cat.is_some()),
+                    _ => 0,
+                };
+                self.car.depth() + usize::from(picking) + channel
             }
         }
     }
@@ -152,11 +160,17 @@ impl Pages {
         }
     }
 
-    /// The page's first screen, or the screen `rest` names below it (`light` on the Car page).
+    /// The page's first screen, or the screen `rest` names below it (`light` or `logging` on
+    /// the Car page).
     pub fn open(&mut self, page: PageId, rest: &str) {
         self.reset(page);
-        if page == PageId::Car && rest.split('/').next() == Some("light") {
-            self.car = CarScreen::Light;
+        let screen = match rest.split('/').next() {
+            Some("light") => CarScreen::Light,
+            Some("logging") => CarScreen::Logging,
+            _ => return,
+        };
+        if page == PageId::Car {
+            self.car = screen;
             self.trail.push(0);
         }
     }
@@ -172,6 +186,7 @@ impl Pages {
             PageId::Car => {
                 self.car = CarScreen::Root;
                 self.reading = Picker::default();
+                self.log.reset();
                 self.pin.clear();
             }
         }
@@ -197,7 +212,14 @@ impl Pages {
                 if matches!(self.car, CarScreen::Reading(_)) && self.reading.back() {
                     return Some(Moved::Opened);
                 }
+                if self.car == CarScreen::LogChannels && self.log.editor.back() {
+                    return Some(Moved::Opened);
+                }
                 self.car = self.car.parent()?;
+                self.log.removing = false;
+                if self.car == CarScreen::Logging {
+                    self.log.open = None;
+                }
                 self.reading = Picker::default();
                 if self.car != CarScreen::Pin {
                     self.pin.clear();
@@ -260,7 +282,21 @@ impl Pages {
             Act::Car(screen) => {
                 self.car = screen;
                 self.reading = Picker::default();
+                if screen == CarScreen::LogChannels {
+                    self.log.editor = Editor::default();
+                }
                 screen != CarScreen::Root
+            }
+            Act::Log(a) => {
+                let st = client.snapshot().datalog.clone();
+                match self.log.apply(&a, st.as_ref(), client) {
+                    logging::Done::Stay => false,
+                    logging::Done::Opened(screen) => {
+                        self.car = screen;
+                        true
+                    }
+                    logging::Done::Back => return self.back(page).unwrap_or(Moved::Stay),
+                }
             }
             Act::Capture => {
                 client.capture();
@@ -319,6 +355,18 @@ impl Pages {
 
     /// The Data page's tabs and editor, and the cluster display's reading picker.
     fn slots(&mut self, page: PageId, a: &SlotAct, client: &Client) -> Moved {
+        if page == PageId::Car && self.car == CarScreen::LogChannels {
+            let before = self.saved.recent.clone();
+            let (focus, _) = self.log.slots(a, &mut self.saved.recent, client);
+            if self.saved.recent != before {
+                self.store();
+            }
+            return match focus {
+                slots::Focus::Start => Moved::Opened,
+                slots::Focus::Stay => Moved::Stay,
+                slots::Focus::At(i) => Moved::Focus(i),
+            };
+        }
         if page == PageId::Car {
             return self.dis_pick(a, client);
         }
@@ -672,6 +720,9 @@ fn car(
         CarScreen::Bindings => bindings(snap),
         CarScreen::Binding(i) => binding(snap, i),
         CarScreen::Pin => pin_entry(snap, pin),
+        CarScreen::Logging => logging::root(&pages.log, snap),
+        CarScreen::LogProfile => logging::profile(&pages.log, snap),
+        CarScreen::LogChannels => logging::channels(&pages.log, pages.recent(), snap, now),
     }
 }
 
@@ -736,6 +787,17 @@ fn car_root(snap: &Snapshot, note: String) -> View {
         Some(_) => "TX off",
         None => "",
     };
+    let logging = match &snap.datalog {
+        Some(st) => match &st.running {
+            Some(r) => format!("Logging {}", r.label),
+            None => match st.profiles.len() {
+                1 => "1 profile".to_string(),
+                n => format!("{n} profiles"),
+            },
+        },
+        None => String::new(),
+    };
+    v.row(Row::new(RowKind::Route, "Logging", logging).act(Act::Car(CarScreen::Logging)));
     v.row(Row::new(RowKind::Route, "Settings", tx).act(Act::Car(CarScreen::Settings)));
     v.section("Capture");
     let saving = snap.capture == Capture::Saving;
@@ -951,6 +1013,7 @@ fn settings(snap: &Snapshot) -> View {
             )
             .act(Act::Car(CarScreen::Readings)),
         );
+        dis_rows(v, &s.dis);
         v.section("Keys and portal");
         v.row(
             Row::new(
@@ -976,6 +1039,108 @@ fn settings(snap: &Snapshot) -> View {
             );
         }
     })
+}
+
+fn dis_patch(p: DisPatch) -> Act {
+    patch(
+        SettingsPatch {
+            dis: Some(p),
+            ..Default::default()
+        },
+        false,
+    )
+}
+
+/// The rest of `[dis]`, edited in place: claim, default page, auto-shows, media layout, cover
+/// flash.
+fn dis_rows(v: &mut View, d: &carpi_proto::DisSettings) {
+    let (claim, other) = match d.claim {
+        DisClaim::Always => ("Always", DisClaim::Tab),
+        DisClaim::Tab => ("Cluster menu tab", DisClaim::Always),
+    };
+    v.row(flip(
+        "Show the page",
+        claim,
+        dis_patch(DisPatch {
+            claim: Some(other),
+            ..Default::default()
+        }),
+    ));
+    const PAGES: [(DisPage, &str); 3] = [
+        (DisPage::Readings, "Readings"),
+        (DisPage::Accel, "Accel"),
+        (DisPage::Media, "Media"),
+    ];
+    let at = PAGES
+        .iter()
+        .position(|p| p.0 == d.default_page)
+        .unwrap_or(0);
+    let page = |step: usize| {
+        dis_patch(DisPatch {
+            default_page: Some(PAGES[(at + step) % PAGES.len()].0),
+            ..Default::default()
+        })
+    };
+    v.row(
+        Row::new(RowKind::Choice, "Default page", PAGES[at].1)
+            .act(page(1))
+            .side(page(PAGES.len() - 1), page(1)),
+    );
+    for (label, on, set) in [
+        (
+            "Show nav when it starts",
+            d.auto_nav,
+            DisPatch {
+                auto_nav: Some(!d.auto_nav),
+                ..Default::default()
+            },
+        ),
+        (
+            "Show calls",
+            d.auto_phone,
+            DisPatch {
+                auto_phone: Some(!d.auto_phone),
+                ..Default::default()
+            },
+        ),
+        (
+            "Show a new track",
+            d.auto_media,
+            DisPatch {
+                auto_media: Some(!d.auto_media),
+                ..Default::default()
+            },
+        ),
+    ] {
+        v.row(toggle(label, on, dis_patch(set)));
+    }
+    let (layout, other) = match d.media_layout {
+        DisMediaLayout::Stack => ("Text", DisMediaLayout::Art),
+        DisMediaLayout::Art => ("Cover + text", DisMediaLayout::Stack),
+    };
+    v.row(flip(
+        "Media layout",
+        layout,
+        dis_patch(DisPatch {
+            media_layout: Some(other),
+            ..Default::default()
+        }),
+    ));
+    let flash = |s: f64| {
+        dis_patch(DisPatch {
+            cover_flash_s: Some(s),
+            ..Default::default()
+        })
+    };
+    let shown = if d.cover_flash_s <= 0.0 {
+        "Off".to_string()
+    } else {
+        format!("{} s", d.cover_flash_s)
+    };
+    v.row(Row::new(RowKind::Step, "Cover flash", shown).side(
+        flash(cfg::flash_step(d.cover_flash_s, -1)),
+        flash(cfg::flash_step(d.cover_flash_s, 1)),
+    ));
 }
 
 fn light_patch(p: LightPatch, back: bool) -> Act {
@@ -1793,6 +1958,109 @@ mod tests {
         ));
         assert_eq!(p.car, CarScreen::Settings);
         assert!(p.pin.is_empty());
+    }
+
+    #[test]
+    fn logging_is_reached_from_the_car_page_and_edits_with_the_knob() {
+        let client = Client::offline("test");
+        client.snapshot().datalog = Some(crate::logging::tests::status());
+        let mut p = Pages::new(Saved::default(), None);
+        let mut s = snap(&[
+            ("engine.rpm", Some(Value::Num(900.0))),
+            ("vehicle.speed_kmh", Some(Value::Num(50.0))),
+        ]);
+        s.datalog = Some(crate::logging::tests::status());
+        let now = Instant::now();
+        let v = p.view(PageId::Car, &s, now);
+        let at = find(&v, "Logging");
+        assert_eq!(v.rows[at].value, "2 profiles");
+        assert_eq!(
+            p.press(PageId::Car, &v, &Hit::Row(at), 4, &client),
+            Moved::Opened
+        );
+        assert_eq!((p.car, p.depth(PageId::Car)), (CarScreen::Logging, 1));
+        let v = p.view(PageId::Car, &s, now);
+        assert_eq!(v.title, "Logging");
+
+        // Open Boost, then its channels, then the picker for a new one.
+        let boost = find(&v, "Boost");
+        p.press(PageId::Car, &v, &Hit::Row(boost), boost as i32, &client);
+        assert_eq!((p.car, p.depth(PageId::Car)), (CarScreen::LogProfile, 2));
+        let v = p.view(PageId::Car, &s, now);
+        assert_eq!(v.title, "Boost");
+        let ch = find(&v, "Channels");
+        p.press(PageId::Car, &v, &Hit::Row(ch), ch as i32, &client);
+        let v = p.view(PageId::Car, &s, now);
+        assert_eq!(v.title, "Boost channels");
+        let add = find(&v, "Add a channel");
+        p.press(PageId::Car, &v, &Hit::Row(add), 0, &client);
+        assert_eq!(p.depth(PageId::Car), 4);
+        let v = p.view(PageId::Car, &s, now);
+        assert_eq!(v.title, "New channel");
+        p.press(PageId::Car, &v, &Hit::Row(find(&v, "Driving")), 0, &client);
+        assert_eq!(p.depth(PageId::Car), 5);
+        let v = p.view(PageId::Car, &s, now);
+        let speed = v
+            .rows
+            .iter()
+            .position(|r| r.act == Act::Slots(SlotAct::Pick("vehicle.speed_kmh".into())))
+            .unwrap();
+        assert_eq!(
+            p.press(PageId::Car, &v, &Hit::Row(speed), 0, &client),
+            Moved::Opened
+        );
+        assert_eq!(p.depth(PageId::Car), 3);
+        let v = p.view(PageId::Car, &s, now);
+        assert_eq!(v.rows[3].label, "Speed");
+        assert_eq!(v.hit(v.start), Some(Hit::Row(3)));
+        assert_eq!(p.recent(), ["vehicle.speed_kmh"]);
+        // Sent to carpid (offline here).
+        assert_eq!(
+            client.snapshot().datalog_note.as_deref(),
+            Some("not connected")
+        );
+
+        // Back out: channels, profile, logging, car.
+        assert_eq!(p.back(PageId::Car), Some(Moved::Closed(ch as i32)));
+        assert_eq!(p.back(PageId::Car), Some(Moved::Closed(boost as i32)));
+        assert_eq!(p.back(PageId::Car), Some(Moved::Closed(4)));
+        assert_eq!(p.back(PageId::Car), None);
+        p.open(PageId::Car, "logging");
+        assert_eq!(p.car, CarScreen::Logging);
+    }
+
+    #[test]
+    fn the_cluster_settings_edit_in_place() {
+        let mut s = snap(&[]);
+        s.settings = Some(cfg::sample());
+        let p = Pages::new(Saved::default(), None);
+        let v = car(CarScreen::Settings, &s, Instant::now(), "", false, &p);
+        let patch_of = |act: Option<&Act>| match act {
+            Some(Act::Patch(p, false)) => p.dis.clone().unwrap(),
+            other => panic!("{other:?}"),
+        };
+        let claim = find(&v, "Show the page");
+        assert_eq!(v.rows[claim].value, "Always");
+        assert_eq!(
+            patch_of(v.side_act(Some(&Hit::Row(claim)), 1)).claim,
+            Some(DisClaim::Tab)
+        );
+        let page = find(&v, "Default page");
+        assert_eq!(v.rows[page].kind, RowKind::Choice);
+        assert_eq!(
+            patch_of(v.side_act(Some(&Hit::Row(page)), -1)).default_page,
+            Some(DisPage::Media)
+        );
+        let calls = &v.rows[find(&v, "Show calls")];
+        assert!(calls.checked && calls.kind == RowKind::Toggle);
+        assert_eq!(patch_of(Some(&calls.act)).auto_phone, Some(false));
+        assert_eq!(v.rows[find(&v, "Media layout")].value, "Text");
+        let flash = find(&v, "Cover flash");
+        assert_eq!(v.rows[flash].value, "4 s");
+        assert_eq!(
+            patch_of(v.side_act(Some(&Hit::Row(flash)), -1)).cover_flash_s,
+            Some(3.0)
+        );
     }
 
     #[test]

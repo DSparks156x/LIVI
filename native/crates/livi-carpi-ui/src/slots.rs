@@ -1,10 +1,11 @@
 // SPDX-FileCopyrightText: 2026 Drew Sparks
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The slot editor and the value picker (docs/PAGES.md 2). One component for the Data page now,
-//! and the DIS readings pages and data-log channel sets later: a [`Board`] is a list of pages
-//! with a fixed number of slots each, a [`Spec`] says what a use allows, the [`Editor`] edits a
-//! board and the [`Picker`] picks one value. Both build plain [`View`]s and take [`SlotAct`]s.
+//! The slot editor and the value picker (docs/PAGES.md 2). One component for the Data page, the
+//! DIS readings and data-log channel sets: a [`Board`] is a list of pages with a fixed number of
+//! slots each, a [`Spec`] says what a use allows, the [`Editor`] edits a board (or, for a data
+//! log, one list without pages or a cap) and the [`Picker`] picks one value. Both build plain
+//! [`View`]s and take [`SlotAct`]s.
 
 use std::time::Instant;
 
@@ -31,6 +32,8 @@ pub struct Spec {
     /// Categories this use doesn't offer.
     pub without: &'static [&'static str],
     pub max_pages: usize,
+    /// One list that grows: the picker removes instead of emptying.
+    pub list: bool,
 }
 
 impl Spec {
@@ -62,6 +65,7 @@ pub const DATA: Spec = Spec {
     without: &[crate::defs::PHONE],
     // As many tabs as fit the header at 800 px.
     max_pages: 6,
+    list: false,
 };
 
 /// The cluster display's readings: one picker per slot, everything offered.
@@ -70,6 +74,16 @@ pub const DIS: Spec = Spec {
     names: &[],
     without: &[],
     max_pages: 1,
+    list: false,
+};
+
+/// A data-log channel set: one list, no pages, no cap, everything offered.
+pub const LOG: Spec = Spec {
+    sizes: &[],
+    names: &[],
+    without: &[],
+    max_pages: 1,
+    list: true,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -422,11 +436,21 @@ fn level1(
     spec: &Spec,
 ) -> View {
     let mut v = View::new(Layout::List, title, true);
-    let empty = v.row(
-        Row::new(RowKind::Info, "Empty", "")
-            .act(act(SlotAct::Empty))
-            .checked(current.is_none()),
-    );
+    let empty = if !spec.list {
+        v.row(
+            Row::new(RowKind::Info, "Empty", "")
+                .act(act(SlotAct::Empty))
+                .checked(current.is_none()),
+        )
+    } else if current.is_some() {
+        let mut row = Row::new(RowKind::Button, "Remove this channel", "")
+            .button("Remove")
+            .act(act(SlotAct::Empty));
+        row.alert = true;
+        v.row(row)
+    } else {
+        -1
+    };
     v.start = empty;
     let here = current.map(|c| place(c).0);
     if !recent.is_empty() {
@@ -734,6 +758,122 @@ impl Editor {
     }
 }
 
+impl Editor {
+    /// Runs `a` on a list (a data-log channel set): slot `list.len()` is the "add" row, and the
+    /// picker's Empty removes. True in the second field when the list changed.
+    pub fn apply_list(
+        &mut self,
+        a: &SlotAct,
+        list: &mut Vec<String>,
+        recent: &mut Vec<String>,
+        spec: &Spec,
+    ) -> (Focus, bool) {
+        if let Some(p) = &mut self.picker {
+            return match p.apply(a, spec, recent) {
+                Picked::Moved => (Focus::Start, false),
+                Picked::Stay => (Focus::Stay, false),
+                Picked::Chose(name) => {
+                    self.picker = None;
+                    let slot = self.slot;
+                    let changed = match name {
+                        None if slot < list.len() => {
+                            list.remove(slot);
+                            self.slot = slot.min(list.len());
+                            true
+                        }
+                        None => false,
+                        Some(n) => {
+                            remember(recent, &n);
+                            match list.iter().position(|x| *x == n) {
+                                // Already in the set: go to it.
+                                Some(at) => {
+                                    self.slot = at;
+                                    false
+                                }
+                                None if slot < list.len() => {
+                                    list[slot] = n;
+                                    true
+                                }
+                                None => {
+                                    list.push(n);
+                                    self.slot = list.len() - 1;
+                                    true
+                                }
+                            }
+                        }
+                    };
+                    (Focus::Start, changed)
+                }
+            };
+        }
+        match a {
+            SlotAct::Open(i) => {
+                self.slot = (*i).min(list.len());
+                self.picker = Some(Picker::default());
+                (Focus::Start, false)
+            }
+            SlotAct::Shift { slot, by } => {
+                let to = *slot as i32 + by;
+                if *slot >= list.len() || to < 0 || to >= list.len() as i32 {
+                    return (Focus::Stay, false);
+                }
+                list.swap(*slot, to as usize);
+                self.slot = to as usize;
+                (Focus::Start, true)
+            }
+            _ => (Focus::Stay, false),
+        }
+    }
+
+    /// The list, or the picker for one of its rows. `note` goes under the header.
+    #[allow(clippy::too_many_arguments)]
+    pub fn list_view(
+        &self,
+        title: &str,
+        list: &[String],
+        note: String,
+        recent: &[String],
+        snap: &Snapshot,
+        now: Instant,
+        spec: &Spec,
+    ) -> View {
+        if let Some(p) = &self.picker {
+            let current = list.get(self.slot).map(String::as_str);
+            let title = match current {
+                Some(_) => format!("Channel {}", self.slot + 1),
+                None => "New channel".to_string(),
+            };
+            return p.view(&title, current, recent, snap, now, spec);
+        }
+        let mut v = View::new(Layout::List, title, true).note(note);
+        if list.len() > 1 {
+            v.hint = "◀ ▶ moves a channel".into();
+        }
+        for (i, name) in list.iter().enumerate() {
+            let mut row = pick_row(name, None, snap, now);
+            row.act = act(SlotAct::Open(i));
+            row.side = Some((
+                act(SlotAct::Shift { slot: i, by: -1 }),
+                act(SlotAct::Shift { slot: i, by: 1 }),
+            ));
+            let at = v.row(row);
+            if i == self.slot {
+                v.start = at;
+            }
+        }
+        if list.is_empty() {
+            v.row(Row::new(RowKind::Info, "No channels yet", "").dimmed(true));
+        }
+        v.section("");
+        let add = v
+            .row(Row::new(RowKind::Route, "Add a channel", "").act(act(SlotAct::Open(list.len()))));
+        if self.slot >= list.len() {
+            v.start = add;
+        }
+        v.finish()
+    }
+}
+
 /// Puts `name` first in `recent`, keeping [`RECENT`].
 pub fn remember(recent: &mut Vec<String>, name: &str) {
     recent.retain(|r| r != name);
@@ -1002,6 +1142,81 @@ mod tests {
         assert!(e.back());
         assert!(e.picker.is_none());
         assert!(!e.back());
+    }
+
+    #[test]
+    fn the_list_editor_adds_moves_replaces_and_removes() {
+        let s = snap(&["engine.rpm", "vehicle.speed_kmh"]);
+        let now = Instant::now();
+        let mut list = vec!["engine.rpm".to_string()];
+        let mut recent = Vec::new();
+        let mut e = Editor::default();
+        let v = e.list_view("Channels", &list, String::new(), &recent, &s, now, &LOG);
+        assert_eq!(v.rows[0].label, "Engine speed");
+        assert_eq!(v.rows.last().unwrap().label, "Add a channel");
+        assert_eq!(v.hit(v.start), Some(Hit::Row(0)));
+
+        // Add: the picker has no Empty and nothing to remove.
+        e.apply_list(&SlotAct::Open(1), &mut list, &mut recent, &LOG);
+        let v = e.list_view("Channels", &list, String::new(), &recent, &s, now, &LOG);
+        assert_eq!(v.title, "New channel");
+        assert!(
+            !v.rows
+                .iter()
+                .any(|r| r.label == "Empty" || r.act == act(SlotAct::Empty))
+        );
+        e.apply_list(
+            &SlotAct::Cat(Cat::Of("driving")),
+            &mut list,
+            &mut recent,
+            &LOG,
+        );
+        let (f, changed) = e.apply_list(
+            &SlotAct::Pick("vehicle.speed_kmh".into()),
+            &mut list,
+            &mut recent,
+            &LOG,
+        );
+        assert_eq!((f, changed), (Focus::Start, true));
+        assert_eq!(list, ["engine.rpm", "vehicle.speed_kmh"]);
+        assert_eq!(e.slot, 1);
+
+        // Picking what's already there just goes to it.
+        e.apply_list(&SlotAct::Open(2), &mut list, &mut recent, &LOG);
+        let (_, changed) = e.apply_list(
+            &SlotAct::Pick("engine.rpm".into()),
+            &mut list,
+            &mut recent,
+            &LOG,
+        );
+        assert!(!changed);
+        assert_eq!((list.len(), e.slot), (2, 0));
+
+        // The D-pad moves a channel; not past the ends.
+        e.apply_list(
+            &SlotAct::Shift { slot: 0, by: 1 },
+            &mut list,
+            &mut recent,
+            &LOG,
+        );
+        assert_eq!(list, ["vehicle.speed_kmh", "engine.rpm"]);
+        let (_, moved) = e.apply_list(
+            &SlotAct::Shift { slot: 1, by: 1 },
+            &mut list,
+            &mut recent,
+            &LOG,
+        );
+        assert!(!moved);
+
+        // Push a channel: Remove is first and takes it out.
+        e.apply_list(&SlotAct::Open(0), &mut list, &mut recent, &LOG);
+        let v = e.list_view("Channels", &list, String::new(), &recent, &s, now, &LOG);
+        assert_eq!(v.title, "Channel 1");
+        assert_eq!(v.rows[0].label, "Remove this channel");
+        e.apply_list(&SlotAct::Empty, &mut list, &mut recent, &LOG);
+        assert_eq!(list, ["engine.rpm"]);
+        assert!(e.picker.is_none());
+        assert_eq!(recent, ["engine.rpm", "vehicle.speed_kmh"]);
     }
 
     #[test]

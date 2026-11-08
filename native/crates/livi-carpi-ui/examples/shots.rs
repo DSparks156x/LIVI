@@ -255,4 +255,119 @@ fn main() {
     let v = pages.view(PageId::Car, &client.snapshot(), now);
     shots.show(&v, 0, true);
     shots.save("13-car");
+
+    // The cluster display's settings, scrolled to the new rows.
+    pages.open(PageId::Car, "");
+    let v = pages.view(PageId::Car, &client.snapshot(), now);
+    let settings = row(&v, "Settings");
+    pages.press(PageId::Car, &v, &settings, 0, &client);
+    let v = pages.view(PageId::Car, &client.snapshot(), now);
+    if let Hit::Row(i) = row(&v, "Default page") {
+        shots.show(&v, v.rows[i].focus_at, true);
+        shots.save("19-dis-settings");
+    }
+    if let Hit::Row(i) = row(&v, "Cover flash") {
+        shots.show(&v, v.rows[i].focus_at, false);
+        shots.save("20-dis-settings-day");
+    }
+
+    // Logging: idle with a last run, running, a profile, its channels, a channel's picker.
+    client.snapshot().datalog = Some(datalog());
+    pages.open(PageId::Car, "logging");
+    let v = pages.view(PageId::Car, &client.snapshot(), now);
+    shots.show(&v, v.start, true);
+    shots.save("14-logging");
+    {
+        let mut s = client.snapshot();
+        let st = s.datalog.as_mut().unwrap();
+        let mut r = st.last.take().unwrap();
+        r.label = "2026-11-08 #04".into();
+        r.elapsed_ms = 83_400;
+        r.rows = 834;
+        r.summary.clear();
+        st.running = Some(r);
+    }
+    let v = pages.view(PageId::Car, &client.snapshot(), now);
+    shots.show(&v, v.start, false);
+    shots.save("15-logging-running");
+    let boost = row(&v, "Boost");
+    pages.press(PageId::Car, &v, &boost, 0, &client);
+    let v = pages.view(PageId::Car, &client.snapshot(), now);
+    shots.show(&v, 1, true);
+    shots.save("16-log-profile");
+    let ch = row(&v, "Channels");
+    pages.press(PageId::Car, &v, &ch, 2, &client);
+    let v = pages.view(PageId::Car, &client.snapshot(), now);
+    shots.show(&v, 1, true);
+    shots.save("17-log-channels");
+    pages.press(PageId::Car, &v, &Hit::Row(1), 1, &client);
+    let v = pages.view(PageId::Car, &client.snapshot(), now);
+    shots.show(&v, v.start, true);
+    shots.save("18-log-channel-picker");
+}
+
+/// Two profiles and a run that ended, as carpid reports them.
+fn datalog() -> carpi_proto::DatalogStatus {
+    use carpi_proto::{DatalogLoad, DatalogProfile, DatalogProfileStatus, DatalogRun};
+    let p = |name: &str, values: &[&str], rate_hz, load| DatalogProfileStatus {
+        profile: DatalogProfile {
+            name: name.into(),
+            values: values.iter().map(|v| v.to_string()).collect(),
+            rate_hz,
+        },
+        load,
+    };
+    carpi_proto::DatalogStatus {
+        profiles: vec![
+            p(
+                "Boost",
+                &[
+                    "engine.rpm",
+                    "engine.boost.actual",
+                    "engine.boost.specified",
+                    "engine.n75_duty_pct",
+                    "engine.load_pct",
+                    "engine.throttle_pct",
+                    "engine.intake_temp_c",
+                    "vehicle.speed_kmh",
+                ],
+                10,
+                DatalogLoad {
+                    bus_values: 2,
+                    diag_values: 6,
+                    diag_groups: 3,
+                    diag_modules: 1,
+                    diag_hz: Some(4.4),
+                },
+            ),
+            p(
+                "Haldex",
+                &["awd.oil_temp_c", "awd.plate_temp_c", "engine.oil_temp_c"],
+                2,
+                DatalogLoad {
+                    bus_values: 0,
+                    diag_values: 3,
+                    diag_groups: 2,
+                    diag_modules: 2,
+                    diag_hz: Some(2.0),
+                },
+            ),
+        ],
+        selected: Some("Boost".into()),
+        running: None,
+        last: Some(DatalogRun {
+            label: "2026-11-08 #03".into(),
+            date: "2026-11-08".into(),
+            number: 3,
+            profile: "Boost".into(),
+            values: 8,
+            rate_hz: 10,
+            started: "2026-11-08T09:40:00".into(),
+            elapsed_ms: 481_200,
+            rows: 4812,
+            dir: "/home/pi/logs/2026-11-08/03".into(),
+            summary: "8 values, 10 Hz, 4 812 rows".into(),
+            error: None,
+        }),
+    }
 }

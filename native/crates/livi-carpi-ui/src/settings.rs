@@ -20,6 +20,7 @@ pub fn actions(table: &str) -> &'static [&'static str] {
         "save_capture",
         "brightness_up",
         "brightness_down",
+        "toggle_logging",
     ];
     const CAR: &[&str] = &[
         "open_nav",
@@ -69,6 +70,24 @@ pub fn rebound(table: &[Binding], at: usize, action: &str) -> Vec<Binding> {
         b.action = action.to_string();
     }
     out
+}
+
+/// Cover flash lengths the D-pad steps through, seconds; 0 is off.
+pub const COVER_FLASH: [f64; 8] = [0.0, 2.0, 3.0, 4.0, 5.0, 8.0, 10.0, 15.0];
+
+/// The cover flash step `d` steps from `now`, stopping at the ends. A length off the list goes
+/// to its neighbour.
+pub fn flash_step(now: f64, d: i32) -> f64 {
+    let at = if d > 0 {
+        COVER_FLASH.iter().rposition(|x| *x <= now).unwrap_or(0) as i32 + d
+    } else {
+        COVER_FLASH
+            .iter()
+            .position(|x| *x >= now)
+            .unwrap_or(COVER_FLASH.len()) as i32
+            + d
+    };
+    COVER_FLASH[at.clamp(0, COVER_FLASH.len() as i32 - 1) as usize]
 }
 
 /// About three characters for the cluster display: the value's label, shortened.
@@ -130,6 +149,30 @@ pub fn apply(s: &mut Settings, patch: &SettingsPatch) {
     }
     if let Some(v) = &patch.dis_readings {
         s.dis.readings = v.clone();
+    }
+    if let Some(d) = &patch.dis {
+        let m = &mut s.dis;
+        if let Some(v) = d.claim {
+            m.claim = v;
+        }
+        if let Some(v) = d.default_page {
+            m.default_page = v;
+        }
+        if let Some(v) = d.auto_nav {
+            m.auto_nav = v;
+        }
+        if let Some(v) = d.auto_phone {
+            m.auto_phone = v;
+        }
+        if let Some(v) = d.auto_media {
+            m.auto_media = v;
+        }
+        if let Some(v) = d.media_layout {
+            m.media_layout = v;
+        }
+        if let Some(v) = d.cover_flash_s {
+            m.cover_flash_s = v;
+        }
     }
     if let Some(v) = &patch.bindings {
         s.bindings = v.clone();
@@ -244,6 +287,13 @@ pub(crate) fn sample() -> Settings {
                 decimals: 0,
                 scale: 1.0,
             }],
+            claim: carpi_proto::DisClaim::Always,
+            default_page: carpi_proto::DisPage::Readings,
+            auto_nav: true,
+            auto_phone: true,
+            auto_media: true,
+            media_layout: carpi_proto::DisMediaLayout::Stack,
+            cover_flash_s: 4.0,
         },
         bindings: vec![
             Binding {
@@ -319,5 +369,31 @@ mod tests {
         assert!(s.tx_enabled && s.portal_pin_set);
         assert_eq!(s.bindings[1].action, "select");
         assert!(s.light.learned.is_empty());
+        apply(
+            &mut s,
+            &SettingsPatch {
+                dis: Some(carpi_proto::DisPatch {
+                    claim: Some(carpi_proto::DisClaim::Tab),
+                    auto_phone: Some(false),
+                    cover_flash_s: Some(0.0),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        assert_eq!(s.dis.claim, carpi_proto::DisClaim::Tab);
+        assert!(!s.dis.auto_phone && s.dis.auto_nav);
+        assert_eq!(s.dis.cover_flash_s, 0.0);
+    }
+
+    #[test]
+    fn cover_flash_steps_and_stops() {
+        assert_eq!(flash_step(4.0, 1), 5.0);
+        assert_eq!(flash_step(4.0, -1), 3.0);
+        assert_eq!(flash_step(0.0, -1), 0.0);
+        assert_eq!(flash_step(15.0, 1), 15.0);
+        assert_eq!(flash_step(6.0, 1), 8.0);
+        assert_eq!(flash_step(6.0, -1), 5.0);
+        assert_eq!(flash_step(60.0, -1), 15.0);
     }
 }

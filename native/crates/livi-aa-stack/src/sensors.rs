@@ -3,9 +3,9 @@
 // Additional terms: see NOTICE
 
 use livi_aa_proto::{
-    BatteryConfig, CarLocation, ChargingPrefs, CurrentGear, DrivingStatus, EnergyConsumption,
-    EnergyRate, EnergyValue, EngineRpm, EnvironmentConditions, FuelLevel, LightStates,
-    NightModeData, Odometer, ParkingBrake, SensorBatchNotification, TirePressures,
+    BatteryConfig, CarLocation, ChargingPrefs, CurrentGear, DoorStates, DrivingStatus,
+    EnergyConsumption, EnergyRate, EnergyValue, EngineRpm, EnvironmentConditions, FuelLevel,
+    LightStates, NightModeData, Odometer, ParkingBrake, SensorBatchNotification, TirePressures,
     VehicleEnergyModel, VehicleSpeed,
 };
 use prost::Message;
@@ -48,6 +48,13 @@ pub enum Sensor {
         trip_km_e1: Option<i32>,
     },
     DrivingStatus(i32),
+    /// Front left, front right, rear left, rear right. The phone gets the doors up to the first
+    /// unknown one.
+    Doors {
+        hood_open: Option<bool>,
+        trunk_open: Option<bool>,
+        doors_open: [Option<bool>; 4],
+    },
     TirePressure([i32; 4]),
     Gps(GpsFix),
     VehicleEnergyModel {
@@ -177,6 +184,21 @@ pub fn batch(sensor: &Sensor) -> Option<Vec<u8>> {
         Sensor::DrivingStatus(restrictions) => {
             b.driving_statuses.push(DrivingStatus { restrictions })
         }
+        Sensor::Doors {
+            hood_open,
+            trunk_open,
+            doors_open,
+        } => {
+            let doors_open: Vec<bool> = doors_open.iter().map_while(|d| *d).collect();
+            if hood_open.is_none() && trunk_open.is_none() && doors_open.is_empty() {
+                return None;
+            }
+            b.door_states.push(DoorStates {
+                hood_open,
+                trunk_open,
+                doors_open,
+            });
+        }
         Sensor::TirePressure(pressures) => b.tire_pressures.push(TirePressures {
             pressures_e2: pressures.to_vec(),
         }),
@@ -236,6 +258,22 @@ mod tests {
                 pressure_e3: None
             }),
             None
+        );
+        assert_eq!(
+            batch(&Sensor::Doors {
+                hood_open: None,
+                trunk_open: None,
+                doors_open: [None, Some(true), None, None]
+            }),
+            None
+        );
+        assert_eq!(
+            batch(&Sensor::Doors {
+                hood_open: Some(false),
+                trunk_open: None,
+                doors_open: [Some(true), Some(false), None, Some(true)]
+            }),
+            Some(vec![0x82, 0x01, 0x06, 0x08, 0x00, 0x18, 0x01, 0x18, 0x00])
         );
         let gps = GpsFix {
             lat_deg: 48.1,

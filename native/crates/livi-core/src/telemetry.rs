@@ -31,11 +31,12 @@ const FROM_OUTSIDE: &str = "external";
 const FROM_DEFAULTS: &str = "default";
 const FROM_LAST_RUN: &str = "saved";
 const RENAMED: [(&str, &str); 1] = [("turn", "turnSignal")];
-const NESTED: [&str; 6] = [
+const NESTED: [&str; 7] = [
     "gps",
     "can",
     CLIMATE,
     "tirePressure",
+    "doors",
     NOTIFICATION,
     "telltales",
 ];

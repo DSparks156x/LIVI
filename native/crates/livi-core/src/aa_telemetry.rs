@@ -14,6 +14,8 @@ pub const LOW_FUEL_PCT: f64 = 10.0;
 pub const REVERSE: i64 = 102;
 
 const TIRE_PRESSURE: &str = "tirePressure";
+const DOORS: &str = "doors";
+const DOOR_NAMES: [&str; 4] = ["frontLeft", "frontRight", "rearLeft", "rearRight"];
 const WHEELS: [&str; 4] = [
     "frontLeftKpa",
     "frontRightKpa",
@@ -75,6 +77,7 @@ struct Sent {
     fuel: Option<(i32, Option<i32>, Option<bool>)>,
     odometer: Option<(i32, Option<i32>)>,
     environment: Option<(Option<i32>, Option<i32>)>,
+    doors: Option<(Option<bool>, Option<bool>, [Option<bool>; 4])>,
     tire_pressure: Option<[i32; 4]>,
     gps: Option<GpsFix>,
     energy_model_at: Option<Instant>,
@@ -225,6 +228,25 @@ impl AaTelemetry {
             }
         }
 
+        if changed(DOORS)
+            && let Some(doors) = next.get(DOORS).and_then(Value::as_object)
+        {
+            let open = (
+                flag(doors, "hood"),
+                flag(doors, "trunk"),
+                DOOR_NAMES.map(|d| flag(doors, d)),
+            );
+            if sent.doors != Some(open) {
+                sent.doors = Some(open);
+                let (hood_open, trunk_open, doors_open) = open;
+                out.push(Sensor::Doors {
+                    hood_open,
+                    trunk_open,
+                    doors_open,
+                });
+            }
+        }
+
         if changed(TIRE_PRESSURE)
             && let Some(tires) = next.get(TIRE_PRESSURE).and_then(Value::as_object)
             && let [Some(fl), Some(fr), Some(rl), Some(rr)] =
@@ -351,6 +373,38 @@ mod tests {
             "frontLeftKpa": 240, "frontRightKpa": 245, "rearLeftKpa": 230, "rearRightKpa": 0
         } }));
         assert!(t.sensors(&four, &same, now).is_empty());
+    }
+
+    #[test]
+    fn doors_go_out_when_one_opens_or_closes() {
+        let mut t = AaTelemetry::default();
+        let now = Instant::now();
+        let shut = map(json!({ "doors": {
+            "frontLeft": false, "frontRight": false, "hood": false
+        } }));
+        assert_eq!(
+            t.sensors(&Map::new(), &shut, now),
+            [Sensor::Doors {
+                hood_open: Some(false),
+                trunk_open: None,
+                doors_open: [Some(false), Some(false), None, None]
+            }]
+        );
+        let open = map(json!({ "doors": {
+            "frontLeft": true, "frontRight": false, "hood": false
+        } }));
+        assert_eq!(
+            t.sensors(&shut, &open, now),
+            [Sensor::Doors {
+                hood_open: Some(false),
+                trunk_open: None,
+                doors_open: [Some(true), Some(false), None, None]
+            }]
+        );
+        let reordered = map(json!({ "doors": {
+            "hood": false, "frontRight": false, "frontLeft": true
+        } }));
+        assert!(t.sensors(&open, &reordered, now).is_empty());
     }
 
     #[test]

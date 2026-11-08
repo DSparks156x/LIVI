@@ -10,8 +10,8 @@
 //! does it, `livi-core telemetry set speedKph=73 gps.lat=53.59`, `livi-core telemetry help`
 //! lists the rest.
 //!
-//! A push may carry any subset of the fields. `gps`, `can`, `climate`, `tirePressure` and
-//! `notification` merge
+//! A push may carry any subset of the fields. `gps`, `can`, `climate`, `tirePressure`, `doors`
+//! and `notification` merge
 //! field by field, so `{ gps: { lat: 50 } }` keeps the last `lng`, every other field is replaced
 //! whole. LIVI sends the merged snapshot to every client as `telemetry:update`.
 //!
@@ -59,6 +59,7 @@
 //! | drivingStatus                       | ✓    | ✓            | ·               | ·             |
 //! | gps                                 | ✓    | ✓            | ✓               | ✓             |
 //! | tirePressure                        | ✓    | ✓            | ·               | ✓             |
+//! | doors                               | ✓    | ✓            | ·               | ·             |
 //! | can                                 | ✓    | ·            | ·               | ·             |
 //! | gnss                                | ✓    | ·            | ·               | ·             |
 //! | climate                             | ✓    | ·            | ·               | ✓             |
@@ -177,6 +178,7 @@ pub struct TelemetrySnapshot {
     /// Only LIVI's own receiver sends it, a push replaces it whole.
     pub gnss: Option<GnssInfo>,
     pub tire_pressure: Option<TirePressure>,
+    pub doors: Option<Doors>,
     pub telltales: Option<Telltales>,
     pub dash_test: Option<bool>,
     /// No receiver uses it, it is for tooling and diagnostics.
@@ -201,6 +203,18 @@ pub struct TirePressure {
     pub front_right_kpa: Option<f64>,
     pub rear_left_kpa: Option<f64>,
     pub rear_right_kpa: Option<f64>,
+}
+
+/// True while open. A sensor may push one door at a time.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Doors {
+    pub front_left: Option<bool>,
+    pub front_right: Option<bool>,
+    pub rear_left: Option<bool>,
+    pub rear_right: Option<bool>,
+    pub hood: Option<bool>,
+    pub trunk: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -311,6 +325,10 @@ mod tests {
                 rear_left_kpa: Some(230.0),
                 ..Default::default()
             }),
+            doors: Some(Doors {
+                front_left: Some(true),
+                ..Default::default()
+            }),
             climate: Some(Climate {
                 driver_target_c: Some(21.5),
                 ..Default::default()
@@ -327,6 +345,7 @@ mod tests {
         assert_eq!(named["iatC"], 30.0);
         assert_eq!(named["turnSignal"], "left");
         assert_eq!(named["tirePressure"]["rearLeftKpa"], 230.0);
+        assert_eq!(named["doors"]["frontLeft"], true);
         assert_eq!(
             (&named["can"]["id"], &named["can"]["data"]),
             (&json!(1), &json!([2]))

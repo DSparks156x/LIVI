@@ -345,6 +345,7 @@ mod tests {
             now_playing: Default::default(),
             video_playback: None,
             navigation: Default::default(),
+            calls: Vec::new(),
             system: Default::default(),
             devices: Default::default(),
             telemetry: Default::default(),

@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Additional terms: see NOTICE
 
+use livi_aa_stack::protocol::{CallState as AaCallState, PhoneCall as AaCall};
 use livi_core_proto::aa_events::AaHelperEvent;
 use livi_core_proto::ids::same_mac;
+use livi_core_proto::state::CallStatus;
 
 use super::*;
 
@@ -65,6 +67,7 @@ impl Projection {
                 self.devices.registry.note_status(&ids, &status);
                 self.publish();
             }
+            AaEvent::Calls { id, calls } => self.aa_calls(id, calls),
             AaEvent::Disconnected { id } => {
                 self.aa_spawned.remove(&id);
                 self.close_by_link(Link::Aa(id));
@@ -314,6 +317,21 @@ impl Projection {
         }
     }
 
+    pub(super) fn aa_calls(&mut self, id: AaId, from: Vec<AaCall>) {
+        let link = Link::Aa(id);
+        let Some(entry) = self.by_link(link) else {
+            return;
+        };
+        let calls: Vec<Call> = from.into_iter().filter_map(call).collect();
+        if entry.calls == calls {
+            return;
+        }
+        entry.calls = calls;
+        if self.is_active(link) {
+            self.publish();
+        }
+    }
+
     pub(super) fn aa_navigation(&mut self, id: AaId, from: AaNavigation) {
         let link = Link::Aa(id);
         let Some(entry) = self.by_link(link) else {
@@ -346,4 +364,24 @@ impl Projection {
             self.publish();
         }
     }
+}
+
+fn call(from: AaCall) -> Option<Call> {
+    let status = match from.state {
+        AaCallState::Inactive => return None,
+        AaCallState::Unknown => CallStatus::Unknown,
+        AaCallState::Incoming => CallStatus::Incoming,
+        AaCallState::InCall => CallStatus::Active,
+        AaCallState::OnHold => CallStatus::Held,
+        AaCallState::Muted => CallStatus::Muted,
+        AaCallState::Conferenced => CallStatus::Conference,
+    };
+    let given = |v: Option<String>| v.filter(|v| !v.is_empty());
+    Some(Call {
+        status,
+        number: given(from.number),
+        name: given(from.caller_id),
+        number_label: given(from.number_type),
+        duration_s: from.duration_s,
+    })
 }

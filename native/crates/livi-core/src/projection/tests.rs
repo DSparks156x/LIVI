@@ -71,6 +71,7 @@ impl Rig {
             video_playback: None,
             telemetry: Default::default(),
             navigation: Default::default(),
+            calls: Vec::new(),
             system: Default::default(),
             devices: Default::default(),
             update: Default::default(),
@@ -199,6 +200,10 @@ impl Rig {
 
     fn navigation(&self) -> Navigation {
         self.hub.watch().borrow().navigation.clone()
+    }
+
+    fn calls(&self) -> Vec<Call> {
+        self.hub.watch().borrow().calls.clone()
     }
 
     fn meta(&mut self, id: SessionId, event: Value) {
@@ -1738,6 +1743,47 @@ async fn android_auto_media_and_guidance_reach_the_state_of_the_phone_in_front()
         id: 7,
         image: vec![1],
     });
+}
+
+#[tokio::test]
+async fn android_auto_calls_reach_the_state_of_the_phone_in_front() {
+    use livi_aa_stack::protocol::{CallState, PhoneCall};
+    use livi_core_proto::state::CallStatus;
+
+    let mut rig = Rig::new();
+    rig.aa_connect(5, true);
+    let ringing = PhoneCall {
+        state: CallState::Incoming,
+        duration_s: 0,
+        number: Some("+49170123".into()),
+        caller_id: Some("Anna".into()),
+        number_type: Some(String::new()),
+        thumbnail: None,
+    };
+    let over = PhoneCall {
+        state: CallState::Inactive,
+        ..ringing.clone()
+    };
+    rig.p.on_aa(AaEvent::Calls {
+        id: 5,
+        calls: vec![ringing, over],
+    });
+    assert_eq!(
+        rig.calls(),
+        [Call {
+            status: CallStatus::Incoming,
+            number: Some("+49170123".into()),
+            name: Some("Anna".into()),
+            number_label: None,
+            duration_s: 0,
+        }]
+    );
+
+    rig.p.on_aa(AaEvent::Calls {
+        id: 5,
+        calls: Vec::new(),
+    });
+    assert!(rig.calls().is_empty());
 }
 
 #[tokio::test]

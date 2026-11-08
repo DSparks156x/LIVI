@@ -125,6 +125,7 @@ impl Hub {
 macro_rules! sections {
     ($then:ident) => {
         $then!(
+            calls "calls",
             cameras "cameras",
             cluster "cluster",
             config "config",
@@ -195,6 +196,7 @@ mod tests {
             video_playback: None,
             telemetry: Default::default(),
             navigation: Default::default(),
+            calls: Vec::new(),
             system: Default::default(),
             devices: Default::default(),
             update: Default::default(),

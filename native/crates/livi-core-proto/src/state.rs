@@ -19,6 +19,8 @@ pub struct State {
     #[serde(default)]
     pub video_playback: Option<VideoPlayback>,
     pub navigation: Navigation,
+    #[serde(default)]
+    pub calls: Vec<Call>,
     pub system: System,
     pub devices: Vec<DeviceView>,
     pub cameras: Vec<CameraView>,
@@ -43,6 +45,7 @@ impl State {
             "nowPlaying" => self.now_playing = read(value)?,
             "videoPlayback" => self.video_playback = read(value)?,
             "navigation" => self.navigation = read(value)?,
+            "calls" => self.calls = read(value)?,
             "system" => self.system = read(value)?,
             "devices" => self.devices = read(value)?,
             "cameras" => self.cameras = read(value)?,
@@ -371,6 +374,31 @@ pub struct Lane {
     pub status: Option<u32>,
     pub angles: Vec<i32>,
     pub highlight_angle: Option<i32>,
+}
+
+/// A call on the phone of the active session, as the phone reports it.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Call {
+    pub status: CallStatus,
+    pub number: Option<String>,
+    pub name: Option<String>,
+    /// How the phone labels the number, for example "Mobile".
+    pub number_label: Option<String>,
+    /// Seconds since the call started, as of the phone's last report.
+    pub duration_s: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CallStatus {
+    #[default]
+    Unknown,
+    Incoming,
+    Active,
+    Held,
+    Muted,
+    Conference,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]

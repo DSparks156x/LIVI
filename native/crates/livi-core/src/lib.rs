@@ -144,6 +144,7 @@ pub async fn run(
         video_playback: None,
         telemetry: Default::default(),
         navigation: Default::default(),
+        calls: Vec::new(),
         system: livi_core_proto::state::System {
             start_page: start,
             ..Default::default()

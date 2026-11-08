@@ -42,6 +42,7 @@ impl Projection {
                     now_playing: NowPlaying::default(),
                     video_playback: None,
                     navigation: Navigation::default(),
+                    calls: Vec::new(),
                 };
                 entry.device.merge(device);
                 self.sessions.push(entry);
@@ -312,13 +313,14 @@ impl Projection {
             position: position.map_or(0, |i| i as u32 + 1),
             total: self.sessions.len() as u32,
         };
-        let (now_playing, video_playback, mut navigation) = self
+        let (now_playing, video_playback, mut navigation, calls) = self
             .active()
             .map(|s| {
                 (
                     s.now_playing.clone(),
                     s.video_playback,
                     s.navigation.clone(),
+                    s.calls.clone(),
                 )
             })
             .unwrap_or_default();
@@ -347,6 +349,7 @@ impl Projection {
             s.now_playing = now_playing;
             s.video_playback = video_playback;
             s.navigation = navigation;
+            s.calls = calls;
             s.devices = list;
             s.cluster = self.cluster.clone();
         });

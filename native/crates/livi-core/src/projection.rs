@@ -21,7 +21,8 @@ use livi_core_proto::ids::Ids;
 use livi_core_proto::input::{Input, Phase, Point};
 use livi_core_proto::message::{MediaControl, Radio};
 use livi_core_proto::state::{
-    Front, Navigation, NowPlaying, PerScreen, Protocol, Screen, Sessions, State, VideoPlayback,
+    Call, Front, Navigation, NowPlaying, PerScreen, Protocol, Screen, Sessions, State,
+    VideoPlayback,
 };
 use livi_core_proto::theme::{AppearancePreference, Cluster, LayoutSlot, Theme, livi_theme};
 use livi_cp::hid::{KnobState, media_button, telephony_button};
@@ -156,6 +157,7 @@ struct Entry {
     now_playing: NowPlaying,
     video_playback: Option<VideoPlayback>,
     navigation: Navigation,
+    calls: Vec<Call>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

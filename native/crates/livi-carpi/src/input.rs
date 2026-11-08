@@ -28,9 +28,10 @@ pub fn aa(action: &InputAction) -> Vec<Command> {
     let c = match action {
         A::Up => Command::Up,
         A::Down => Command::Down,
-        // D-pad, not the rotary: LIVI's Left/Right are rotary steps.
-        A::Left => Command::DpadLeft,
-        A::Right => Command::DpadRight,
+        // D-pad, not the rotary (LIVI's Left/Right are rotary steps), as a
+        // down then an up: AA ignored it as one click (bench, 2026-11-08).
+        A::Left => return vec![Command::DpadLeftDown, Command::DpadLeftUp],
+        A::Right => return vec![Command::DpadRightDown, Command::DpadRightUp],
         A::Rotate { steps: n } => {
             let c = if *n > 0 {
                 Command::KnobRight
@@ -175,8 +176,20 @@ mod tests {
                 }
             ]
         );
-        assert_eq!(key(A::Left), click(Keycode::DpadLeft));
-        assert_eq!(key(A::Right), click(Keycode::DpadRight));
+        let press = |k: Keycode| {
+            vec![
+                Action::Key {
+                    code: k as u32,
+                    down: true,
+                },
+                Action::Key {
+                    code: k as u32,
+                    down: false,
+                },
+            ]
+        };
+        assert_eq!(key(A::Left), press(Keycode::DpadLeft));
+        assert_eq!(key(A::Right), press(Keycode::DpadRight));
         assert_eq!(key(A::Home), click(Keycode::Home));
         assert_eq!(key(A::Up), click(Keycode::DpadUp));
         assert_eq!(key(A::Down), click(Keycode::DpadDown));

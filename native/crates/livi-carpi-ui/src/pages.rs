@@ -1055,11 +1055,28 @@ fn light_page(snap: &Snapshot, advanced: bool) -> View {
     }
 
     v.section("Dark mode");
-    let by = match l.dark_mode_source {
-        DarkModeSource::Headlights => "headlights; the clock with the ignition off",
-        DarkModeSource::Ambient => "ambient; the clock while it's stale",
+    let (by, other) = match l.dark_mode_source {
+        DarkModeSource::Headlights => (
+            "headlights; the clock with the ignition off",
+            DarkModeSource::Ambient,
+        ),
+        DarkModeSource::Ambient => (
+            "light sensor; the clock while it's stale",
+            DarkModeSource::Headlights,
+        ),
     };
-    v.row(Row::new(RowKind::Info, "Decided by", by));
+    v.row(button(
+        "Decided by",
+        by,
+        "Change",
+        light_patch(
+            LightPatch {
+                dark_mode_source: Some(other),
+                ..Default::default()
+            },
+            false,
+        ),
+    ));
     v.row(Row::new(
         RowKind::Info,
         "Night threshold",
@@ -1549,6 +1566,14 @@ mod tests {
         let trim = v.rows.iter().find(|r| r.label == "Scroll trim").unwrap();
         assert!(trim.checked);
         assert!(v.rows.iter().any(|r| r.label == "Night threshold"));
+        let by = v.rows.iter().find(|r| r.label == "Decided by").unwrap();
+        let Act::Patch(patch, false) = &by.act else {
+            panic!("{:?}", by.act)
+        };
+        assert_eq!(
+            patch.light.as_ref().unwrap().dark_mode_source,
+            Some(DarkModeSource::Ambient)
+        );
         let edit = v.rows.iter().position(|r| r.act == Act::Advanced).unwrap();
         p.press(PageId::Car, &v, &Hit::Row(edit), 0, &client);
         let v = p.view(PageId::Car, &s, now);

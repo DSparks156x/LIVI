@@ -60,7 +60,8 @@ pub const DATA: Spec = Spec {
         "Custom 4",
     ],
     without: &[crate::defs::PHONE],
-    max_pages: 8,
+    // As many tabs as fit the header at 800 px.
+    max_pages: 6,
 };
 
 /// The cluster display's readings: one picker per slot, everything offered.

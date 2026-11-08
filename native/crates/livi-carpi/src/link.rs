@@ -43,14 +43,17 @@ pub struct Hooks {
     pub telemetry: mpsc::UnboundedSender<Value>,
     /// The core's switch that holds paging while the hotspot is down.
     pub ap_ready: watch::Sender<bool>,
+    /// The UI path livi-ui reports, which says when one of our pages is shown.
+    pub ui_path: watch::Receiver<String>,
     /// Shows a UI path, like the core's `open_page`.
     pub open_page: broadcast::Sender<String>,
     /// Hands an input action to the projection, which maps it for the active session.
     pub input: Box<dyn Fn(InputAction) + Send + Sync>,
 }
 
-/// Where carpid's input actions go.
+/// The UI path, and where carpid's input actions go.
 struct Outlets {
+    ui_path: watch::Receiver<String>,
     open_page: broadcast::Sender<String>,
     input: Box<dyn Fn(InputAction) + Send + Sync>,
 }
@@ -61,10 +64,15 @@ pub async fn run(hooks: Hooks) {
         mut state,
         telemetry,
         ap_ready,
+        ui_path,
         open_page,
         input,
     } = hooks;
-    let out = Outlets { open_page, input };
+    let out = Outlets {
+        ui_path,
+        open_page,
+        input,
+    };
     let path = socket();
     let tank_l = values::tank_l();
     let mut ap = Ap::new(
@@ -211,8 +219,11 @@ async fn follow(
     out: &Outlets,
 ) -> io::Result<Ended> {
     let mut sent = Sent::default();
+    let mut ui_path = out.ui_path.clone();
+    let mut ui_live = true;
     loop {
-        let updates = sent.updates(&state.borrow_and_update());
+        let path = ui_path.borrow_and_update().clone();
+        let updates = sent.updates(&state.borrow_and_update(), &path);
         for update in updates {
             send(
                 writer,
@@ -229,6 +240,7 @@ async fn follow(
                     return Ok(Ended::StateGone);
                 }
             }
+            changed = ui_path.changed(), if ui_live => ui_live = changed.is_ok(),
             () = tokio::time::sleep_until(overdue.unwrap_or_else(far)), if overdue.is_some() => {
                 eprintln!("[carpi] hotspot suspended too long, bringing it back");
                 if let Err(e) = ap.resume().await {
@@ -349,6 +361,7 @@ mod tests {
             state: rx,
             telemetry,
             ap_ready: ready,
+            ui_path: watch::channel(String::new()).1,
             open_page: broadcast::channel(1).0,
             input: Box::new(|_| {}),
         }));
@@ -363,6 +376,7 @@ mod tests {
         let (tx, given) = std::sync::mpsc::channel();
         let tx = std::sync::Mutex::new(tx);
         let out = Outlets {
+            ui_path: watch::channel(String::new()).1,
             open_page,
             input: Box::new(move |a| {
                 let _ = tx.lock().unwrap().send(a);

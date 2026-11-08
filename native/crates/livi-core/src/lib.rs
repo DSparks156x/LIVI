@@ -186,6 +186,7 @@ pub async fn run(
         state: core.hub.watch(),
         telemetry: inside.clone(),
         ap_ready: core.ap_ready().clone(),
+        ui_path: core.ui_path.subscribe(),
         open_page: core.open_page.clone(),
         input: Box::new({
             let core = core.clone();

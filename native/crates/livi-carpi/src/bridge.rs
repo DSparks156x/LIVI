@@ -37,7 +37,8 @@ fn changed<T: PartialEq + Clone>(slot: &mut Option<T>, now: T) -> Option<T> {
 }
 
 impl Sent {
-    pub fn updates(&mut self, state: &State) -> Vec<BridgeUpdate> {
+    /// `ui_path` is the path livi-ui reports, `/carpi/<page>` for one of ours.
+    pub fn updates(&mut self, state: &State, ui_path: &str) -> Vec<BridgeUpdate> {
         let mut out = Vec::new();
         if let Some(projection) = changed(&mut self.projection, projection(state)) {
             out.push(BridgeUpdate::Projection { projection });
@@ -62,7 +63,7 @@ impl Sent {
         if let Some(phone) = changed(&mut self.phone, phone(state)) {
             out.push(BridgeUpdate::Phone { phone });
         }
-        if let Some(focus) = changed(&mut self.focus, focus(state.front.main)) {
+        if let Some(focus) = changed(&mut self.focus, focus(state.front.main, ui_path)) {
             out.push(BridgeUpdate::Focus { focus });
         }
         out
@@ -86,12 +87,11 @@ fn projection(state: &State) -> Option<Projection> {
     })
 }
 
-fn focus(front: Front) -> String {
+fn focus(front: Front, ui_path: &str) -> String {
     match front {
-        Front::Projection => "projection",
-        _ => "livi",
+        Front::Projection => "projection".into(),
+        _ => livi_carpi_ui::focus(ui_path).unwrap_or_else(|| "livi".into()),
     }
-    .into()
 }
 
 /// A maneuver as Android Auto names it, with its side.
@@ -333,7 +333,7 @@ mod tests {
     fn the_first_round_sends_every_section_then_only_changes() {
         let mut sent = Sent::default();
         let mut state = guided();
-        let first = sent.updates(&state);
+        let first = sent.updates(&state, "/media");
         assert_eq!(first.len(), 7);
         assert!(first.contains(&BridgeUpdate::Projection {
             projection: Some(Projection {
@@ -357,14 +357,14 @@ mod tests {
         assert!(first.contains(&BridgeUpdate::Focus {
             focus: "livi".into()
         }));
-        assert!(sent.updates(&state).is_empty());
+        assert!(sent.updates(&state, "/media").is_empty());
 
         state.telemetry.insert("speedKph".into(), 50.into());
-        assert!(sent.updates(&state).is_empty());
+        assert!(sent.updates(&state, "/media").is_empty());
         state.front.main = Front::Projection;
         state.navigation.active = Some(false);
         assert_eq!(
-            sent.updates(&state),
+            sent.updates(&state, "/media"),
             [
                 BridgeUpdate::Nav { nav: None },
                 BridgeUpdate::NavIcon { png_base64: None },
@@ -372,6 +372,34 @@ mod tests {
                     focus: "projection".into()
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn our_pages_report_their_focus() {
+        let mut sent = Sent::default();
+        let state = State::default();
+        sent.updates(&state, "/settings");
+        assert_eq!(
+            sent.updates(&state, "/carpi/diagnostics"),
+            [BridgeUpdate::Focus {
+                focus: "page:diagnostics".into()
+            }]
+        );
+        assert!(sent.updates(&state, "/carpi/diagnostics").is_empty());
+        let mut shown = State::default();
+        shown.front.main = Front::Projection;
+        assert_eq!(
+            sent.updates(&shown, "/carpi/diagnostics"),
+            [BridgeUpdate::Focus {
+                focus: "projection".into()
+            }]
+        );
+        assert_eq!(
+            sent.updates(&state, "/media"),
+            [BridgeUpdate::Focus {
+                focus: "livi".into()
+            }]
         );
     }
 

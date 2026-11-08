@@ -262,7 +262,10 @@ fn main() {
     let settings = row(&v, "Settings");
     pages.press(PageId::Car, &v, &settings, 0, &client);
     let v = pages.view(PageId::Car, &client.snapshot(), now);
-    if let Hit::Row(i) = row(&v, "Default page") {
+    if let Hit::Row(i) = row(&v, "Units") {
+        // The list's height is only known once it's drawn: draw, then focus again to scroll.
+        shots.show(&v, v.rows[i].focus_at, true);
+        shots.save("19-dis-settings");
         shots.show(&v, v.rows[i].focus_at, true);
         shots.save("19-dis-settings");
     }

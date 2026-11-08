@@ -173,6 +173,12 @@ pub fn apply(s: &mut Settings, patch: &SettingsPatch) {
         if let Some(v) = d.cover_flash_s {
             m.cover_flash_s = v;
         }
+        if let Some(v) = d.units {
+            m.units = v;
+        }
+        if let Some(v) = d.clock {
+            m.clock = v;
+        }
     }
     if let Some(v) = &patch.bindings {
         s.bindings = v.clone();
@@ -294,6 +300,8 @@ pub(crate) fn sample() -> Settings {
             auto_media: true,
             media_layout: carpi_proto::DisMediaLayout::Stack,
             cover_flash_s: 4.0,
+            units: carpi_proto::DisUnits::Auto,
+            clock: carpi_proto::DisClock::Auto,
         },
         bindings: vec![
             Binding {
@@ -376,6 +384,8 @@ mod tests {
                     claim: Some(carpi_proto::DisClaim::Tab),
                     auto_phone: Some(false),
                     cover_flash_s: Some(0.0),
+                    units: Some(carpi_proto::DisUnits::Imperial),
+                    clock: Some(carpi_proto::DisClock::H12),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -384,6 +394,8 @@ mod tests {
         assert_eq!(s.dis.claim, carpi_proto::DisClaim::Tab);
         assert!(!s.dis.auto_phone && s.dis.auto_nav);
         assert_eq!(s.dis.cover_flash_s, 0.0);
+        assert_eq!(s.dis.units, carpi_proto::DisUnits::Imperial);
+        assert_eq!(s.dis.clock, carpi_proto::DisClock::H12);
     }
 
     #[test]

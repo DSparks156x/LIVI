@@ -7,8 +7,8 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use carpi_proto::{
-    BusInfo, CurveMode, DarkModeSource, DiagAction, DisClaim, DisMediaLayout, DisPage, DisPatch,
-    LightAction, LightPatch, PinChange, Settings, SettingsPatch, Value,
+    BusInfo, CurveMode, DarkModeSource, DiagAction, DisClaim, DisClock, DisMediaLayout, DisPage,
+    DisPatch, DisUnits, LightAction, LightPatch, PinChange, Settings, SettingsPatch, Value,
 };
 
 use crate::PageId;
@@ -1126,6 +1126,40 @@ fn dis_rows(v: &mut View, d: &carpi_proto::DisSettings) {
             ..Default::default()
         }),
     ));
+    const UNITS: [(DisUnits, &str); 3] = [
+        (DisUnits::Auto, "As the phone"),
+        (DisUnits::Metric, "Metric"),
+        (DisUnits::Imperial, "Imperial"),
+    ];
+    let u = UNITS.iter().position(|x| x.0 == d.units).unwrap_or(0);
+    let units = |step: usize| {
+        dis_patch(DisPatch {
+            units: Some(UNITS[(u + step) % UNITS.len()].0),
+            ..Default::default()
+        })
+    };
+    v.row(
+        Row::new(RowKind::Choice, "Units", UNITS[u].1)
+            .act(units(1))
+            .side(units(UNITS.len() - 1), units(1)),
+    );
+    const CLOCKS: [(DisClock, &str); 3] = [
+        (DisClock::Auto, "Auto"),
+        (DisClock::H12, "12 h"),
+        (DisClock::H24, "24 h"),
+    ];
+    let c = CLOCKS.iter().position(|x| x.0 == d.clock).unwrap_or(0);
+    let clock = |step: usize| {
+        dis_patch(DisPatch {
+            clock: Some(CLOCKS[(c + step) % CLOCKS.len()].0),
+            ..Default::default()
+        })
+    };
+    v.row(
+        Row::new(RowKind::Choice, "ETA clock", CLOCKS[c].1)
+            .act(clock(1))
+            .side(clock(CLOCKS.len() - 1), clock(1)),
+    );
     let flash = |s: f64| {
         dis_patch(DisPatch {
             cover_flash_s: Some(s),
@@ -2055,6 +2089,18 @@ mod tests {
         assert!(calls.checked && calls.kind == RowKind::Toggle);
         assert_eq!(patch_of(Some(&calls.act)).auto_phone, Some(false));
         assert_eq!(v.rows[find(&v, "Media layout")].value, "Text");
+        let units = find(&v, "Units");
+        assert_eq!(v.rows[units].value, "As the phone");
+        assert_eq!(
+            patch_of(v.side_act(Some(&Hit::Row(units)), -1)).units,
+            Some(DisUnits::Imperial)
+        );
+        let clock = find(&v, "ETA clock");
+        assert_eq!(v.rows[clock].value, "Auto");
+        assert_eq!(
+            patch_of(v.side_act(Some(&Hit::Row(clock)), 1)).clock,
+            Some(DisClock::H12)
+        );
         let flash = find(&v, "Cover flash");
         assert_eq!(v.rows[flash].value, "4 s");
         assert_eq!(

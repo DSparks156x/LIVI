@@ -16,10 +16,10 @@ import { Dashboard, DashState, GaugeData, CapData, TrailData, LabelData, LaneDat
 import { LevelOverlay, PhoneOverlay, OverlayState } from "overlays.slint";
 import { MaskData } from "mask.slint";
 import { TouchCalibration, TouchCalibrationState } from "touch_calibration.slint";
-import { CarpiView, CarpiState, CarpiLayout, CarpiPill, CarpiRow, CarpiCell } from "../../livi-carpi-ui/ui/carpi.slint";
+import { CarpiView, CarpiState, CarpiLayout, CarpiPill, CarpiRow, CarpiCell, CarpiPoint, CarpiTick } from "../../livi-carpi-ui/ui/carpi.slint";
 
 export { Theme, Focus, FocusZone, Page, PhoneState, TabData, TouchPhase, SettingsState, ScreenKind, RowData, RowKind, PickData, KnobData, MediaSource, MediaText, Press, DabState, StationData, DashState, GaugeData, CapData, TrailData, LabelData, LaneData, LaneArrowData, LampData, OverlayState, MaskData, TouchCalibrationState }
-export { CarpiState, CarpiLayout, CarpiPill, CarpiRow, CarpiCell }
+export { CarpiState, CarpiLayout, CarpiPill, CarpiRow, CarpiCell, CarpiPoint, CarpiTick }
 
 export component AppWindow inherits Window {
     in-out property <Page> page: Page.media;

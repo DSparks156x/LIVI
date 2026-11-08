@@ -13,7 +13,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use carpi_proto::{BusInfo, Reading, Settings, SettingsPatch};
+use carpi_proto::{BusInfo, LightAction, Reading, Settings, SettingsPatch};
 use serde::Deserialize;
 
 use crate::diag::Diag;
@@ -71,6 +71,7 @@ enum Ask {
     SaveCapture,
     /// `None` asks for the settings, a patch changes them.
     Settings(Option<Box<SettingsPatch>>),
+    Light(LightAction),
 }
 
 #[derive(Clone)]
@@ -154,6 +155,14 @@ impl Client {
         self.ask(Ask::Settings(Some(Box::new(patch))));
     }
 
+    /// A brightness nudge or "reset learned" for the light model.
+    pub fn light(&self, action: LightAction) {
+        if self.asks.is_none() {
+            self.snapshot().settings_note = Some("not connected".into());
+        }
+        self.ask(Ask::Light(action));
+    }
+
     /// A note the pages show with the settings.
     pub fn note(&self, note: impl Into<String>) {
         self.snapshot().settings_note = Some(note.into());
@@ -209,6 +218,7 @@ mod link {
         Bus,
         Capture,
         Settings,
+        Light,
         Ok,
     }
 
@@ -247,7 +257,7 @@ mod link {
                     Ok(Ev::Ask(Ask::SaveCapture)) => {
                         lock(&shared).capture = Capture::Failed("not connected".into())
                     }
-                    Ok(Ev::Ask(Ask::Settings(Some(_)))) => {
+                    Ok(Ev::Ask(Ask::Settings(Some(_)) | Ask::Light(_))) => {
                         lock(&shared).settings_note = Some("not connected".into())
                     }
                     Ok(_) => {}
@@ -396,6 +406,9 @@ mod link {
                         self.send(&Request::SaveCapture { path: None }, Pending::Capture)
                     }
                     Ok(Ev::Ask(Ask::Settings(patch))) => self.settings(patch),
+                    Ok(Ev::Ask(Ask::Light(action))) => {
+                        self.send(&Request::Light { action }, Pending::Light)
+                    }
                     Ok(Ev::Got(from, resp)) if from == id => {
                         if let Err(why) = self.got(shared, *resp) {
                             return why;
@@ -458,7 +471,7 @@ mod link {
                     s.restart_needed = restart_needed;
                     s.settings_note = None;
                 }
-                (Some(Pending::Settings), Response::Error { message }) => {
+                (Some(Pending::Settings | Pending::Light), Response::Error { message }) => {
                     s.settings_note = Some(message)
                 }
                 (_, Response::Error { message }) => s.problem = Some(message),
@@ -562,6 +575,11 @@ mod tests {
         assert_eq!(s.values.get("wheels.rl_pulses").unwrap().value, None);
         assert_eq!(s.buses.as_ref().unwrap()[0].ring.len(), 4);
         assert_eq!(s.settings.as_ref().unwrap().bindings.len(), 6);
+        let Some(carpi_proto::Value::Text(curve)) = &s.values.get("light.curve").unwrap().value
+        else {
+            panic!("the fixture has a curve")
+        };
+        assert_eq!(crate::light::parse(curve).unwrap().points.len(), 7);
         drop(s);
         client.save_capture();
         assert!(wait(&client, |s| matches!(

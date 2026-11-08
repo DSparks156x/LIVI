@@ -124,6 +124,10 @@ pub const DEFS: &[Def] = &[
     flag("light.night", "Night", YES.0, YES.1),
     flag("light.lights_on", "Lights on", YES.0, YES.1),
     num("light.panel_level", "Panel level", "", 0),
+    num("light.ambient", "Ambient", "", 2),
+    num("light.panel_pct", "RNS-E panel", "%", 0),
+    num("light.target_pct", "Panel target", "%", 0),
+    num("light.trim_pct", "Scroll trim", "%", 0),
     // Diagnostics catalog. Nothing until carpid reads diag.
     num("engine.maf_gs", "Air mass", "g/s", 1),
     num("engine.throttle_pct", "Throttle", "%", 0),

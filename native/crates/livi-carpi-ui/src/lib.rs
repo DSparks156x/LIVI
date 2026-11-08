@@ -20,12 +20,13 @@
 //! LIVI_UI_SIZE=800x480 LIVI_UI_PAGE=carpi/data LIVI_UI_SNAPSHOT=/tmp/data.png LIVI
 //! ```
 //!
-//! `LIVI_UI_PAGE` takes `carpi/data`, `carpi/diagnostics` or `carpi/car`.
+//! `LIVI_UI_PAGE` takes `carpi/data`, `carpi/diagnostics`, `carpi/car` or `carpi/car/light`.
 
 pub mod client;
 pub mod config;
 pub mod defs;
 pub mod diag;
+pub mod light;
 pub mod pages;
 pub mod settings;
 pub mod values;
@@ -77,10 +78,17 @@ impl PageId {
     }
 }
 
+/// The light page: a screen of the Car page, reached from it or by carpid's `OpenPage`, with a
+/// focus of its own.
+pub const LIGHT_PATH: &str = "/carpi/car/light";
+
 /// carpid's focus for a UI path: `page:<name>` for one of ours, `None` for anything else.
 ///
 /// For livi-carpi's bridge, which sees the path through the core's `ui_path`.
 pub fn focus(ui_path: &str) -> Option<String> {
+    if ui_path.starts_with(LIGHT_PATH) {
+        return Some("page:light".into());
+    }
     let name = ui_path.strip_prefix("/carpi/")?;
     let name = name.split('/').next()?;
     PageId::from_name(name).map(|p| format!("page:{}", p.name()))
@@ -88,6 +96,9 @@ pub fn focus(ui_path: &str) -> Option<String> {
 
 /// LIVI's UI path for one of our pages by name, as carpid's `OpenPage` names them.
 pub fn page_path(name: &str) -> Option<String> {
+    if name == "light" {
+        return Some(LIGHT_PATH.into());
+    }
     PageId::from_name(name).map(|p| p.path().to_string())
 }
 
@@ -105,6 +116,8 @@ mod tests {
         assert_eq!(focus("/carpi/nope"), None);
         assert_eq!(PageId::from_name("diagnostics"), Some(PageId::Diagnostics));
         assert_eq!(page_path("car").as_deref(), Some("/carpi/car"));
+        assert_eq!(page_path("light").as_deref(), Some(LIGHT_PATH));
+        assert_eq!(focus(LIGHT_PATH), Some("page:light".into()));
         assert_eq!(page_path("nope"), None);
     }
 }

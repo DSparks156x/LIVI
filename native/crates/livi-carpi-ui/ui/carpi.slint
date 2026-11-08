@@ -1,8 +1,9 @@
 // SPDX-FileCopyrightText: 2026 Drew Sparks
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// carpid's pages: one view for all three, filled from livi-ui's carpi_ui.rs. Rows, header,
-// buttons, theme and focus are LIVI's own, so the pages look and steer like its settings.
+// carpid's pages: one view for all of them, filled from livi-ui's carpi_ui.rs. Rows, header,
+// buttons, theme and focus are LIVI's own, so the pages look and steer like its settings. The
+// light page adds a plot left of its rows.
 
 import { Theme, Ui } from "../../livi-ui/ui/theme.slint";
 import { Focus, FocusZone } from "../../livi-ui/ui/focus.slint";
@@ -28,6 +29,17 @@ export struct CarpiRow {
     data: RowData,
 }
 
+// A point in the light plot, both 0..1, y up.
+export struct CarpiPoint {
+    x: float,
+    y: float,
+}
+
+export struct CarpiTick {
+    at: float,
+    label: string,
+}
+
 export struct CarpiCell {
     label: string,
     name: string,
@@ -49,6 +61,15 @@ export global CarpiState {
     in property <int> row-base;
     in property <[int]> scroll-rows;
     in property <[int]> scroll-sections;
+    // The light plot: curve as SVG path commands in a 1000x1000 box, y down.
+    in property <bool> plot-shown;
+    in property <string> plot-curve;
+    in property <[CarpiPoint]> plot-learned;
+    in property <[CarpiPoint]> plot-manual;
+    in property <bool> plot-now-shown;
+    in property <CarpiPoint> plot-now;
+    in property <[CarpiTick]> plot-ticks;
+    in property <string> plot-caption;
 
     callback back();
     callback pill(int);
@@ -124,6 +145,99 @@ component CarpiGrid inherits Rectangle {
     }
 }
 
+// Ambient across on a log scale (ticks are raw sensor values), RNS-E panel % up.
+component CarpiPlot inherits Rectangle {
+    property <length> gutter: 40px;
+    property <length> head: 10px;
+    property <length> foot: 38px;
+    property <length> pw: root.width - root.gutter - 10px;
+    property <length> ph: root.height - root.head - root.foot;
+    property <length> dot: 8px;
+
+    border-radius: 10px;
+    background: Theme.paper;
+
+    area := Rectangle {
+        x: root.gutter;
+        y: root.head;
+        width: root.pw;
+        height: root.ph;
+        border-width: 1px;
+        border-color: Theme.divider;
+
+        for f in [0.25, 0.5, 0.75]: Rectangle {
+            y: parent.height * (1 - f);
+            width: parent.width;
+            height: 1px;
+            background: Theme.divider;
+        }
+        if CarpiState.plot-curve != "": Path {
+            width: parent.width;
+            height: parent.height;
+            viewbox-width: 1000;
+            viewbox-height: 1000;
+            commands: CarpiState.plot-curve;
+            stroke: Theme.primary;
+            stroke-width: 2px;
+            fill: transparent;
+        }
+        for p in CarpiState.plot-manual: Rectangle {
+            x: p.x * parent.width - root.dot;
+            y: (1 - p.y) * parent.height - root.dot;
+            width: root.dot * 2;
+            height: root.dot * 2;
+            border-radius: root.dot;
+            border-width: 2px;
+            border-color: Theme.primary;
+        }
+        for p in CarpiState.plot-learned: Rectangle {
+            x: p.x * parent.width - root.dot / 2;
+            y: (1 - p.y) * parent.height - root.dot / 2;
+            width: root.dot;
+            height: root.dot;
+            border-radius: root.dot / 2;
+            background: Theme.text-secondary;
+        }
+        if CarpiState.plot-now-shown: Rectangle {
+            x: CarpiState.plot-now.x * parent.width - root.dot;
+            y: (1 - CarpiState.plot-now.y) * parent.height - root.dot;
+            width: root.dot * 2;
+            height: root.dot * 2;
+            border-radius: root.dot;
+            background: Theme.primary;
+            border-width: 2px;
+            border-color: Theme.paper;
+        }
+    }
+    for t[i] in [{ f: 1.0, l: "100 %" }, { f: 0.5, l: "50 %" }, { f: 0.0, l: "0" }]: Text {
+        x: 0;
+        width: root.gutter - 6px;
+        y: area.y + area.height * (1 - t.f) - self.height / 2;
+        text: t.l;
+        color: Theme.text-secondary;
+        font-size: 11px;
+        horizontal-alignment: right;
+    }
+    for t in CarpiState.plot-ticks: Text {
+        x: area.x + t.at * area.width - 24px;
+        width: 48px;
+        y: area.y + area.height + 2px;
+        text: t.label;
+        color: Theme.text-secondary;
+        font-size: 11px;
+        horizontal-alignment: center;
+    }
+    Text {
+        x: area.x;
+        width: area.width;
+        y: root.height - self.height - 4px;
+        text: CarpiState.plot-caption;
+        color: Theme.text-disabled;
+        font-size: 11px;
+        overflow: elide;
+    }
+}
+
 export component CarpiView inherits Rectangle {
     background: Theme.background;
 
@@ -188,7 +302,15 @@ export component CarpiView inherits Rectangle {
 
         Rectangle {
             vertical-stretch: 1;
+            if CarpiState.plot-shown && CarpiState.layout == CarpiLayout.list: CarpiPlot {
+                x: 0;
+                width: parent.width * 0.46;
+                height: parent.height;
+            }
             flick := Flickable {
+                x: CarpiState.plot-shown ? parent.width * 0.46 + 8px : 0;
+                width: parent.width - self.x;
+                height: parent.height;
                 visible: CarpiState.layout == CarpiLayout.list;
                 content-height: list.preferred-height;
                 list := VerticalLayout {

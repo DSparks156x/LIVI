@@ -39,6 +39,10 @@ pub enum Act {
     PinDigit(u8),
     PinDelete,
     PinSave,
+    /// A brightness nudge or "reset learned".
+    Light(carpi_proto::LightAction),
+    /// Shows or hides the manual curve's points.
+    Advanced,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +61,9 @@ pub enum CarScreen {
     Binding(usize),
     /// Entering a new portal PIN.
     Pin,
+    /// Every `light.` value, and one point of the manual curve.
+    LightValues,
+    Point(usize),
 }
 
 impl CarScreen {
@@ -68,6 +75,7 @@ impl CarScreen {
             S::Readings | S::Bindings | S::Pin => Some(S::Settings),
             S::Reading(_) => Some(S::Readings),
             S::Binding(_) => Some(S::Bindings),
+            S::LightValues | S::Point(_) => Some(S::Light),
             _ => Some(S::Root),
         }
     }
@@ -165,6 +173,8 @@ pub struct View {
     pub pills: Vec<Pill>,
     pub rows: Vec<Row>,
     pub cells: Vec<Cell>,
+    /// Drawn left of the rows, on the light page.
+    pub plot: Option<crate::light::Plot>,
     /// For each focusable row in order: plain rows and sections above it, to scroll it into view.
     pub scroll: Vec<(i32, i32)>,
     targets: i32,
@@ -188,6 +198,7 @@ impl View {
             pills: Vec::new(),
             rows: Vec::new(),
             cells: Vec::new(),
+            plot: None,
             scroll: Vec::new(),
             targets: i32::from(back),
         }

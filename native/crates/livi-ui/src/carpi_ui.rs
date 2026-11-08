@@ -15,8 +15,8 @@ use livi_core_proto::state::Front;
 use slint::{ComponentHandle, Model, ModelRc, Timer, TimerMode, VecModel};
 
 use crate::{
-    AppWindow, CarpiCell, CarpiLayout, CarpiPill, CarpiRow, CarpiState, Focus, FocusZone, Page,
-    RowData, RowKind,
+    AppWindow, CarpiCell, CarpiLayout, CarpiPill, CarpiPoint, CarpiRow, CarpiState, CarpiTick,
+    Focus, FocusZone, Page, RowData, RowKind,
 };
 
 /// How often a shown page redraws from carpid's values.
@@ -32,12 +32,17 @@ struct Ours {
     cells: Rc<VecModel<CarpiCell>>,
     scroll_rows: Rc<VecModel<i32>>,
     scroll_sections: Rc<VecModel<i32>>,
+    plot_learned: Rc<VecModel<CarpiPoint>>,
+    plot_manual: Rc<VecModel<CarpiPoint>>,
+    plot_ticks: Rc<VecModel<CarpiTick>>,
     no_tools: ModelRc<crate::ToolData>,
 }
 
 thread_local! {
     static OURS: RefCell<Option<Ours>> = const { RefCell::new(None) };
     static TIMER: RefCell<Option<Timer>> = const { RefCell::new(None) };
+    /// The screen an opened path names below its page (`light` in `/carpi/car/light`).
+    static WANT: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 pub fn page_of(id: PageId) -> Page {
@@ -61,10 +66,14 @@ pub fn ours(page: Page) -> bool {
     id_of(page).is_some()
 }
 
-/// Our page for a UI path or `LIVI_UI_PAGE` value: `/carpi/data`, `carpi/car`, ...
+/// Our page for a UI path or `LIVI_UI_PAGE` value: `/carpi/data`, `carpi/car/light`, ... The
+/// rest of the path picks the screen when the page is reported next.
 pub fn named(path: &str) -> Option<Page> {
     let name = path.trim_start_matches('/').strip_prefix("carpi/")?;
-    PageId::from_name(name.split('/').next()?).map(page_of)
+    let (first, rest) = name.split_once('/').unwrap_or((name, ""));
+    let page = PageId::from_name(first).map(page_of)?;
+    WANT.with_borrow_mut(|w| *w = Some(rest.to_string()));
+    Some(page)
 }
 
 /// What lib.rs reports to the core for one of our pages. A page shown anew starts on its first
@@ -73,15 +82,21 @@ pub fn reported(ui: &AppWindow, page: Page) -> (Front, &'static str) {
     let Some(id) = id_of(page) else {
         return (Front::Livi, "/");
     };
-    with(|o| {
-        if o.shown != Some(id) {
+    let want = WANT.with_borrow_mut(Option::take);
+    let path = with(|o| {
+        if let Some(rest) = &want {
+            o.pages.open(id, rest);
+        } else if o.shown != Some(id) {
             o.pages.reset(id);
+        }
+        if o.shown != Some(id) {
             o.shown = Some(id);
             o.client.shown(true);
         }
         render(ui, o);
+        o.pages.path(id)
     });
-    (Front::Livi, id.path())
+    (Front::Livi, path.unwrap_or(id.path()))
 }
 
 fn with<R>(f: impl FnOnce(&mut Ours) -> R) -> Option<R> {
@@ -100,6 +115,9 @@ pub fn wire(ui: &AppWindow) {
         cells: Rc::new(VecModel::default()),
         scroll_rows: Rc::new(VecModel::default()),
         scroll_sections: Rc::new(VecModel::default()),
+        plot_learned: Rc::new(VecModel::default()),
+        plot_manual: Rc::new(VecModel::default()),
+        plot_ticks: Rc::new(VecModel::default()),
         no_tools: ModelRc::from(Rc::new(VecModel::<crate::ToolData>::default())),
     };
     st.set_pills(ModelRc::from(ours.pills.clone()));
@@ -107,6 +125,9 @@ pub fn wire(ui: &AppWindow) {
     st.set_cells(ModelRc::from(ours.cells.clone()));
     st.set_scroll_rows(ModelRc::from(ours.scroll_rows.clone()));
     st.set_scroll_sections(ModelRc::from(ours.scroll_sections.clone()));
+    st.set_plot_learned(ModelRc::from(ours.plot_learned.clone()));
+    st.set_plot_manual(ModelRc::from(ours.plot_manual.clone()));
+    st.set_plot_ticks(ModelRc::from(ours.plot_ticks.clone()));
     OURS.with_borrow_mut(|o| *o = Some(ours));
 
     let weak = ui.as_weak();
@@ -193,12 +214,18 @@ fn press(ui: &AppWindow, hit: Hit) {
     let from = focus.get_main_index();
     let moved = with(|o| {
         let view = fresh(ui, o)?.clone();
+        let was = o.pages.path(id);
         let moved = o.pages.press(id, &view, &hit, from, &o.client);
         render(ui, o);
         let first = o.view.as_ref().map_or(0, |(_, v)| v.first_row());
-        Some((moved, first))
+        Some((moved, first, was != o.pages.path(id)))
     })
     .flatten();
+    // The light screens have a focus of their own for carpid.
+    if moved.is_some_and(|m| m.2) {
+        crate::report_page(ui);
+    }
+    let moved = moved.map(|(m, first, _)| (m, first));
     match moved {
         Some((Moved::Opened, first)) => {
             focus.set_editing(false);
@@ -269,12 +296,44 @@ fn render(ui: &AppWindow, o: &mut Ours) {
         &o.scroll_sections,
         view.scroll.iter().map(|s| s.1).collect(),
     );
+    plot(&st, o, view.plot.as_ref());
     let f = ui.global::<Focus>();
     let n = view.targets() as i32;
     if f.get_zone() == FocusZone::Main && n > 0 && f.get_main_index() >= n {
         f.set_main_index(n - 1);
     }
     o.view = Some((id, view));
+}
+
+fn point((x, y): (f32, f32)) -> CarpiPoint {
+    CarpiPoint { x, y }
+}
+
+fn plot(st: &CarpiState<'_>, o: &Ours, plot: Option<&livi_carpi_ui::light::Plot>) {
+    st.set_plot_shown(plot.is_some());
+    let Some(p) = plot else { return };
+    st.set_plot_curve(p.curve.as_str().into());
+    st.set_plot_caption(p.caption.as_str().into());
+    st.set_plot_now_shown(p.now.is_some());
+    st.set_plot_now(point(p.now.unwrap_or_default()));
+    sync(
+        &o.plot_learned,
+        p.learned.iter().copied().map(point).collect(),
+    );
+    sync(
+        &o.plot_manual,
+        p.manual.iter().copied().map(point).collect(),
+    );
+    sync(
+        &o.plot_ticks,
+        p.ticks
+            .iter()
+            .map(|(at, label)| CarpiTick {
+                at: *at,
+                label: label.as_str().into(),
+            })
+            .collect(),
+    );
 }
 
 fn row(r: &Row, no_tools: &ModelRc<crate::ToolData>) -> CarpiRow {

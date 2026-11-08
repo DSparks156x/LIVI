@@ -6,16 +6,23 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use carpi_proto::{BusInfo, PinChange, Settings, SettingsPatch, Value};
+use carpi_proto::{
+    BusInfo, CurveMode, DarkModeSource, LightAction, LightPatch, PinChange, Settings,
+    SettingsPatch, Value,
+};
 
 use crate::PageId;
 use crate::client::{Capture, Client, Snapshot};
 use crate::config::{self, Saved};
 use crate::defs::{DEFS, GROUPS, MAX_CELLS, section};
 use crate::diag::GROUP_SLOTS;
+use crate::light::{self, STEP_AMBIENT, STEP_PCT};
 use crate::settings::{self as cfg, DIS_SLOTS};
 use crate::values::{NONE, Store, age, show};
 use crate::view::{Act, CarScreen, Cell, Hit, Layout, Row, RowKind, View};
+
+/// The light model's curve, JSON for the plot: no use as a reading.
+const CURVE: &str = "light.curve";
 
 /// Where the bridge's sections land in carpid's store.
 const BRIDGE: [&str; 6] = ["projection.", "nav.", "media.", "call.", "phone.", "ui."];
@@ -55,6 +62,8 @@ pub struct Pages {
     trail: Vec<i32>,
     /// The portal PIN being entered.
     pin: String,
+    /// The light page shows the manual curve's points.
+    advanced: bool,
 }
 
 impl Pages {
@@ -75,6 +84,7 @@ impl Pages {
             car: CarScreen::Root,
             trail: Vec::new(),
             pin: String::new(),
+            advanced: false,
         }
     }
 
@@ -99,6 +109,25 @@ impl Pages {
         }
         if self.car != CarScreen::Pin {
             self.pin.clear();
+        }
+    }
+
+    /// The UI path while `page` is shown. The light screens count as a page of their own.
+    pub fn path(&self, page: PageId) -> &'static str {
+        match (page, self.car) {
+            (PageId::Car, CarScreen::Light | CarScreen::LightValues | CarScreen::Point(_)) => {
+                crate::LIGHT_PATH
+            }
+            _ => page.path(),
+        }
+    }
+
+    /// The page's first screen, or the screen `rest` names below it (`light` on the Car page).
+    pub fn open(&mut self, page: PageId, rest: &str) {
+        self.reset(page);
+        if page == PageId::Car && rest.split('/').next() == Some("light") {
+            self.car = CarScreen::Light;
+            self.trail.push(0);
         }
     }
 
@@ -187,6 +216,14 @@ impl Pages {
                 self.pin.pop();
                 false
             }
+            Act::Light(action) => {
+                client.light(*action);
+                false
+            }
+            Act::Advanced => {
+                self.advanced = !self.advanced;
+                false
+            }
             Act::PinSave => {
                 let pin = std::mem::take(&mut self.pin);
                 client.set(SettingsPatch {
@@ -219,7 +256,7 @@ impl Pages {
                 Some(i) => module(snap, i),
                 None => modules(snap),
             },
-            PageId::Car => car(self.car, snap, now, &self.pin),
+            PageId::Car => car(self.car, snap, now, &self.pin, self.advanced),
         }
     }
 
@@ -317,7 +354,7 @@ fn candidates(store: &Store) -> Vec<String> {
     names.extend(
         store
             .names()
-            .filter(|n| !BRIDGE.iter().any(|p| n.starts_with(p)))
+            .filter(|n| !BRIDGE.iter().any(|p| n.starts_with(p)) && *n != CURVE)
             .filter(|n| !DEFS.iter().any(|d| d.name == *n))
             .map(str::to_string),
     );
@@ -455,7 +492,7 @@ fn module(snap: &Snapshot, i: usize) -> View {
     v.finish()
 }
 
-fn car(screen: CarScreen, snap: &Snapshot, now: Instant, pin: &str) -> View {
+fn car(screen: CarScreen, snap: &Snapshot, now: Instant, pin: &str, advanced: bool) -> View {
     let note = if snap.connected {
         String::new()
     } else {
@@ -468,7 +505,9 @@ fn car(screen: CarScreen, snap: &Snapshot, now: Instant, pin: &str) -> View {
             bus_rows(&mut v, snap.buses.as_deref());
             v.finish()
         }
-        CarScreen::Light => listed(snap, now, note, "Light", &["light."]),
+        CarScreen::Light => light_page(snap, advanced),
+        CarScreen::LightValues => listed(snap, now, note, "Light values", &["light."]),
+        CarScreen::Point(i) => curve_point(snap, i),
         CarScreen::Rnse => listed(snap, now, note, "RNS-E", &["rnse."]),
         CarScreen::Bridge => bridge(snap, now, note),
         CarScreen::Settings => settings(snap),
@@ -477,6 +516,20 @@ fn car(screen: CarScreen, snap: &Snapshot, now: Instant, pin: &str) -> View {
         CarScreen::Bindings => bindings(snap),
         CarScreen::Binding(i) => binding(snap, i),
         CarScreen::Pin => pin_entry(snap, pin),
+    }
+}
+
+fn num(snap: &Snapshot, name: &str) -> Option<f64> {
+    match snap.values.get(name)?.value.as_ref()? {
+        Value::Num(n) if n.is_finite() => Some(*n),
+        _ => None,
+    }
+}
+
+fn text_of<'a>(snap: &'a Snapshot, name: &str) -> Option<&'a str> {
+    match snap.values.get(name)?.value.as_ref()? {
+        Value::Text(t) => Some(t),
+        _ => None,
     }
 }
 
@@ -755,6 +808,241 @@ fn settings(snap: &Snapshot) -> View {
     })
 }
 
+fn light_patch(p: LightPatch, back: bool) -> Act {
+    patch(
+        SettingsPatch {
+            light: Some(p),
+            ..Default::default()
+        },
+        back,
+    )
+}
+
+/// An ambient estimate with the sensor reading it stands for.
+fn ambient_text(a: f64) -> String {
+    format!("{a:.2} (sensor {:.0})", light::raw(a))
+}
+
+fn button(label: &str, value: impl Into<String>, text: &str, act: Act) -> Row {
+    let mut row = Row::new(RowKind::Button, label, value).act(act);
+    row.button = text.into();
+    row
+}
+
+/// PLAN.md 2.6: the plot and the nudge first, the options after, manual editing behind a switch.
+fn light_page(snap: &Snapshot, advanced: bool) -> View {
+    let settings = snap.settings.as_ref().map(|s| &s.light);
+    let ambient = num(snap, "light.ambient");
+    let pct = num(snap, "light.panel_pct");
+    let curve = text_of(snap, CURVE).and_then(light::parse);
+    let auto = settings.is_none_or(|l| l.auto_brightness);
+    let mut v = View::new(Layout::List, "Light", true).note(settings_note(snap));
+    let nudge = |delta_pct| Act::Light(LightAction::Nudge { delta_pct });
+    let can = snap.connected && auto;
+    v.pill("Darker", false, can, nudge(-(STEP_PCT as i8)));
+    v.pill("Brighter", false, can, nudge(STEP_PCT as i8));
+    v.plot = Some(light::plot(
+        curve.as_ref(),
+        settings,
+        ambient,
+        pct,
+        advanced,
+    ));
+
+    v.section("Now");
+    v.row(Row::new(
+        RowKind::Info,
+        "Ambient",
+        ambient.map_or_else(|| NONE.to_string(), ambient_text),
+    ));
+    let panel = match pct {
+        Some(p) if auto => format!("{p:.0} %"),
+        Some(p) => format!("{p:.0} %, the car's dimming"),
+        None => NONE.to_string(),
+    };
+    v.row(Row::new(RowKind::Info, "RNS-E panel", panel));
+    let night = match flag(snap, "light.night") {
+        Some(true) => "Night",
+        Some(false) => "Day",
+        None => NONE,
+    };
+    let dark = match text_of(snap, "light.night_source") {
+        Some(by) => format!("{night}, by the {by}"),
+        None => night.to_string(),
+    };
+    v.row(Row::new(RowKind::Info, "Dark mode", dark));
+
+    let Some(l) = settings else {
+        v.row(Row::new(RowKind::Info, "Settings", "not from carpid yet").dimmed(true));
+        return v.finish();
+    };
+    v.section("Brightness");
+    v.row(toggle(
+        "Auto brightness",
+        l.auto_brightness,
+        light_patch(
+            LightPatch {
+                auto_brightness: Some(!l.auto_brightness),
+                ..Default::default()
+            },
+            false,
+        ),
+    ));
+    v.row(toggle(
+        "Scroll trim",
+        l.scroll_trim,
+        light_patch(
+            LightPatch {
+                scroll_trim: Some(!l.scroll_trim),
+                ..Default::default()
+            },
+            false,
+        ),
+    ));
+    v.row(button(
+        "Ambient sensor",
+        light::source_name(l.ambient_source),
+        "Change",
+        light_patch(
+            LightPatch {
+                ambient_source: Some(light::next_source(l.ambient_source)),
+                ..Default::default()
+            },
+            false,
+        ),
+    ));
+    let other = match l.curve_mode {
+        CurveMode::Manual => CurveMode::Learned,
+        CurveMode::Learned => CurveMode::Manual,
+    };
+    v.row(button(
+        "Curve",
+        light::mode_name(l.curve_mode),
+        "Change",
+        light_patch(
+            LightPatch {
+                curve_mode: Some(other),
+                ..Default::default()
+            },
+            false,
+        ),
+    ));
+    let learned = l
+        .learned
+        .iter()
+        .filter(|p| p.source == l.ambient_source)
+        .count();
+    v.row(
+        button(
+            "Learned points",
+            format!("{learned} for this sensor"),
+            "Reset",
+            Act::Light(LightAction::ResetLearned { source: None }),
+        )
+        .enabled(snap.connected && learned > 0),
+    );
+    v.row(toggle("Edit the manual curve", advanced, Act::Advanced));
+    if advanced {
+        v.section("Manual curve");
+        for (i, p) in l.manual_curve.iter().enumerate() {
+            v.row(
+                Row::new(
+                    RowKind::Route,
+                    format!("Point {}", i + 1),
+                    format!("sensor {:.0} → {} %", light::raw(p.ambient), p.pct),
+                )
+                .act(Act::Car(CarScreen::Point(i))),
+            );
+        }
+        let here = ambient.unwrap_or(0.0);
+        let level = pct.map_or(50, |p| p.round().clamp(0.0, 100.0) as u8);
+        v.row(
+            button(
+                "Add a point at the current ambient",
+                format!("{level} %"),
+                "Add",
+                light_patch(
+                    LightPatch {
+                        manual_curve: Some(light::added(&l.manual_curve, here, level)),
+                        ..Default::default()
+                    },
+                    false,
+                ),
+            )
+            .enabled(ambient.is_some()),
+        );
+    }
+
+    v.section("Dark mode");
+    let by = match l.dark_mode_source {
+        DarkModeSource::Headlights => "headlights; the clock with the ignition off",
+        DarkModeSource::Ambient => "ambient; the clock while it's stale",
+    };
+    v.row(Row::new(RowKind::Info, "Decided by", by));
+    v.row(Row::new(
+        RowKind::Info,
+        "Night threshold",
+        format!(
+            "{} ± {:.2}",
+            ambient_text(l.night_threshold),
+            l.night_hysteresis
+        ),
+    ));
+    let clock = match (l.latitude, l.longitude) {
+        (Some(la), Some(lo)) => format!("sunset to sunrise at {la:.1}, {lo:.1}"),
+        _ => format!("night {} to {}", l.night_from, l.day_from),
+    };
+    v.row(Row::new(RowKind::Info, "Clock", clock));
+    v.section("Values");
+    v.row(Row::new(RowKind::Route, "All light values", "").act(Act::Car(CarScreen::LightValues)));
+    v.finish()
+}
+
+fn curve_point(snap: &Snapshot, at: usize) -> View {
+    with_settings(snap, &format!("Curve point {}", at + 1), |v, s| {
+        let c = &s.light.manual_curve;
+        let Some(p) = c.get(at) else {
+            v.row(Row::new(RowKind::Info, "No such point", NONE));
+            return;
+        };
+        v.row(Row::new(RowKind::Info, "Ambient", ambient_text(p.ambient)));
+        v.row(Row::new(
+            RowKind::Info,
+            "RNS-E panel",
+            format!("{} %", p.pct),
+        ));
+        let edit = |pct: i16, ambient: f64| {
+            light_patch(
+                LightPatch {
+                    manual_curve: Some(light::moved(c, at, pct, ambient)),
+                    ..Default::default()
+                },
+                false,
+            )
+        };
+        v.section("Change");
+        v.row(button("Panel", "brighter", "+5 %", edit(STEP_PCT, 0.0)));
+        v.row(button("Panel", "darker", "−5 %", edit(-STEP_PCT, 0.0)));
+        v.row(button("Ambient", "brighter", "+0.1", edit(0, STEP_AMBIENT)));
+        v.row(button("Ambient", "darker", "−0.1", edit(0, -STEP_AMBIENT)));
+        v.row(
+            button(
+                "Remove this point",
+                "",
+                "Remove",
+                light_patch(
+                    LightPatch {
+                        manual_curve: Some(light::removed(c, at)),
+                        ..Default::default()
+                    },
+                    true,
+                ),
+            )
+            .enabled(c.len() > 2),
+        );
+    })
+}
+
 /// Left column top to bottom, then right.
 fn slot_name(i: usize) -> String {
     let half = DIS_SLOTS / 2;
@@ -1008,19 +1296,19 @@ mod tests {
             }],
         }]);
         let now = Instant::now();
-        let v = car(CarScreen::Root, &s, now, "");
+        let v = car(CarScreen::Root, &s, now, "", false);
         let values: Vec<&str> = v.rows.iter().map(|r| r.value.as_str()).collect();
         assert!(values.contains(&"ican awake"));
         assert!(values.contains(&"Night"));
         assert!(values.contains(&"On TV"));
         assert!(values.contains(&"Android Auto"));
-        let v = car(CarScreen::Buses, &s, now, "");
+        let v = car(CarScreen::Buses, &s, now, "", false);
         assert!(v.rows.iter().any(|r| r.value == "1234"));
         assert!(v.rows.iter().any(|r| r.label == "Node 0x20"));
-        let v = car(CarScreen::Bridge, &s, now, "");
+        let v = car(CarScreen::Bridge, &s, now, "", false);
         assert!(v.rows.iter().any(|r| r.label.contains("nav.road")));
         assert!(!v.rows.iter().any(|r| r.label.contains("base64")));
-        let v = car(CarScreen::Settings, &s, now, "");
+        let v = car(CarScreen::Settings, &s, now, "", false);
         assert!(v.rows.iter().any(|r| r.value == "not from carpid yet"));
     }
 
@@ -1031,7 +1319,7 @@ mod tests {
         let mut s = snap(&[("engine.rpm", Some(Value::Num(800.0)))]);
         s.settings = Some(cfg::sample());
         let now = Instant::now();
-        let v = car(CarScreen::Settings, &s, now, "");
+        let v = car(CarScreen::Settings, &s, now, "", false);
         let tx = v.rows.iter().find(|r| r.label == "TX enabled").unwrap();
         assert!(!tx.checked);
         let Act::Patch(patch, false) = &tx.act else {
@@ -1081,6 +1369,69 @@ mod tests {
         );
         p.reset(PageId::Car);
         assert_eq!(p.depth(PageId::Car), 0);
+    }
+
+    #[test]
+    fn the_light_page_plots_nudges_and_edits_the_curve() {
+        let client = Client::offline("test");
+        let mut p = Pages::new(Saved::default(), None);
+        let curve = r#"{"source":"cluster","mode":"learned","trim":0.0,"points":[[0.00,12],[2.40,100]],"learned":[[0.60,18]]}"#;
+        let mut s = snap(&[
+            ("light.ambient", Some(Value::Num(1.2))),
+            ("light.panel_pct", Some(Value::Num(44.0))),
+            ("light.night", Some(Value::Bool(false))),
+            ("light.night_source", Some(Value::Text("headlights".into()))),
+            ("light.curve", Some(Value::Text(curve.into()))),
+        ]);
+        let now = Instant::now();
+        p.open(PageId::Car, "light");
+        assert_eq!(p.path(PageId::Car), crate::LIGHT_PATH);
+        assert_eq!(p.depth(PageId::Car), 1);
+        let v = p.view(PageId::Car, &s, now);
+        let plot = v.plot.as_ref().unwrap();
+        assert_eq!(plot.curve, "M 0 880 L 960 0");
+        assert_eq!(plot.now, Some((0.48, 0.44)));
+        assert!(v.rows.iter().any(|r| r.value == "Day, by the headlights"));
+        assert!(v.rows.iter().any(|r| r.value == "not from carpid yet"));
+        assert_eq!(
+            v.pills[1].act,
+            Act::Light(LightAction::Nudge { delta_pct: 5 })
+        );
+        p.press(PageId::Car, &v, &Hit::Pill(1), 1, &client);
+        assert_eq!(
+            client.snapshot().settings_note.as_deref(),
+            Some("not connected")
+        );
+
+        s.settings = Some(cfg::sample());
+        let v = p.view(PageId::Car, &s, now);
+        let trim = v.rows.iter().find(|r| r.label == "Scroll trim").unwrap();
+        assert!(trim.checked);
+        assert!(v.rows.iter().any(|r| r.label == "Night threshold"));
+        let edit = v.rows.iter().position(|r| r.act == Act::Advanced).unwrap();
+        p.press(PageId::Car, &v, &Hit::Row(edit), 0, &client);
+        let v = p.view(PageId::Car, &s, now);
+        assert_eq!(v.plot.as_ref().unwrap().manual.len(), 3);
+        let second = v
+            .rows
+            .iter()
+            .position(|r| r.act == Act::Car(CarScreen::Point(1)))
+            .unwrap();
+        assert_eq!(
+            p.press(PageId::Car, &v, &Hit::Row(second), 4, &client),
+            Moved::Opened
+        );
+        assert_eq!(p.path(PageId::Car), crate::LIGHT_PATH);
+        let v = p.view(PageId::Car, &s, now);
+        let up = v.rows.iter().find(|r| r.button == "+5 %").unwrap();
+        let Act::Patch(patch, false) = &up.act else {
+            panic!("{:?}", up.act)
+        };
+        let points = patch.light.as_ref().unwrap().manual_curve.as_ref().unwrap();
+        assert_eq!(points[1].pct, 55);
+        assert_eq!(p.back(PageId::Car), Some(4));
+        assert_eq!(p.back(PageId::Car), Some(0));
+        assert_eq!(p.path(PageId::Car), "/carpi/car");
     }
 
     #[test]

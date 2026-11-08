@@ -8,12 +8,14 @@
 //! - pushes what LIVI knows that the car needs, projection, guidance, turn icon, media, calls,
 //!   phone and focus, each time it changes,
 //! - subscribes to the car values LIVI uses and hands them to the core as telemetry, which feeds
-//!   Android Auto's sensors and LIVI's own look (`light.night` sets night and dark mode).
+//!   Android Auto's sensors and LIVI's own look (`light.night` sets night and dark mode),
+//! - takes carpid's commands: suspending and resuming the hotspot while carpid fetches an update.
 //!
 //! Without carpid it retries with a backoff and LIVI runs as without it.
 
 #![cfg_attr(not(unix), allow(dead_code))]
 
+mod ap;
 mod bridge;
 #[cfg(unix)]
 mod link;

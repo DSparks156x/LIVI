@@ -6,12 +6,12 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-# The sibling pq35-carpi checkout. This path changes when the fork becomes a submodule of
-# pq35-carpi.
+# From the pq35-carpi superproject: this fork is its livi/ submodule.
 carpi-proto = { path = "../../../../crates/carpi-proto" }
 livi-core-proto.workspace = true
+livi-wifi.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = ["net", "io-util", "sync", "time", "macros", "rt"] }
+tokio = { workspace = true, features = ["net", "io-util", "sync", "time", "macros", "rt", "process"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }

@@ -7,7 +7,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use carpi_proto::{PROTOCOL_VERSION, Request, Response};
+use carpi_proto::{ApAction, Command, PROTOCOL_VERSION, Request, Response};
 use livi_core_proto::state::State;
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -15,6 +15,7 @@ use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{mpsc, watch};
 
+use crate::ap::{Ap, Service, Systemd};
 use crate::bridge::Sent;
 use crate::values::{self, Values};
 
@@ -34,10 +35,21 @@ fn socket() -> PathBuf {
     PathBuf::from(dir).join("carpid.sock")
 }
 
-/// Runs until the core's state goes away. `telemetry` is the core's own telemetry input.
-pub async fn run(mut state: watch::Receiver<State>, telemetry: mpsc::UnboundedSender<Value>) {
+/// Runs until the core's state goes away. `telemetry` is the core's own telemetry input;
+/// `ap_ready` is the core's switch that holds paging while the hotspot is down.
+pub async fn run(
+    mut state: watch::Receiver<State>,
+    telemetry: mpsc::UnboundedSender<Value>,
+    ap_ready: watch::Sender<bool>,
+) {
     let path = socket();
     let tank_l = values::tank_l();
+    let mut ap = Ap::new(
+        Systemd {
+            state: state.clone(),
+        },
+        Some(ap_ready),
+    );
     let mut retry = RETRY_FIRST;
     let mut last_error = String::new();
     loop {
@@ -50,10 +62,15 @@ pub async fn run(mut state: watch::Receiver<State>, telemetry: mpsc::UnboundedSe
             &mut values,
             tank_l,
             &mut connected,
+            &mut ap,
         )
         .await;
         if let Some(patch) = values.forget() {
             let _ = telemetry.send(patch);
+        }
+        // carpid can't tell us to resume any more.
+        if let Err(e) = ap.resume().await {
+            eprintln!("[carpi] hotspot: {e}");
         }
         if connected {
             retry = RETRY_FIRST;
@@ -98,6 +115,7 @@ async fn session(
     values: &mut Values,
     tank_l: f64,
     connected: &mut bool,
+    ap: &mut Ap<impl Service>,
 ) -> io::Result<Ended> {
     let stream = UnixStream::connect(path).await?;
     let (mut reader, mut writer) = stream.into_split();
@@ -128,6 +146,7 @@ async fn session(
         },
     )
     .await?;
+    send(&mut writer, &Request::Commands).await?;
 
     let (frames, mut incoming) = mpsc::unbounded_channel();
     let reading = tokio::spawn(async move {
@@ -139,7 +158,16 @@ async fn session(
             }
         }
     });
-    let ended = follow(state, telemetry, values, tank_l, &mut writer, &mut incoming).await;
+    let ended = follow(
+        state,
+        telemetry,
+        values,
+        tank_l,
+        &mut writer,
+        &mut incoming,
+        ap,
+    )
+    .await;
     reading.abort();
     ended
 }
@@ -151,6 +179,7 @@ async fn follow(
     tank_l: f64,
     writer: &mut OwnedWriteHalf,
     incoming: &mut mpsc::UnboundedReceiver<io::Result<Response>>,
+    ap: &mut Ap<impl Service>,
 ) -> io::Result<Ended> {
     let mut sent = Sent::default();
     loop {
@@ -164,10 +193,17 @@ async fn follow(
             )
             .await?;
         }
+        let overdue = ap.deadline();
         tokio::select! {
             changed = state.changed() => {
                 if changed.is_err() {
                     return Ok(Ended::StateGone);
+                }
+            }
+            () = tokio::time::sleep_until(overdue.unwrap_or_else(far)), if overdue.is_some() => {
+                eprintln!("[carpi] hotspot suspended too long, bringing it back");
+                if let Err(e) = ap.resume().await {
+                    eprintln!("[carpi] hotspot: {e}");
                 }
             }
             frame = incoming.recv() => match frame {
@@ -176,6 +212,10 @@ async fn follow(
                     if let Some(patch) = values.patch(tank_l) {
                         let _ = telemetry.send(patch);
                     }
+                }
+                Some(Ok(Response::Command { id, command })) => {
+                    let error = obey(ap, command).await.err();
+                    send(writer, &Request::CommandDone { id, error }).await?;
                 }
                 Some(Ok(Response::Error { message })) => eprintln!("[carpi] carpid: {message}"),
                 Some(Ok(_)) => {}
@@ -187,6 +227,21 @@ async fn follow(
             },
         }
     }
+}
+
+async fn obey(ap: &mut Ap<impl Service>, command: Command) -> Result<(), String> {
+    match command {
+        Command::Ap {
+            ap: ApAction::Suspend,
+        } => ap.suspend().await,
+        Command::Ap {
+            ap: ApAction::Resume,
+        } => ap.resume().await,
+    }
+}
+
+fn far() -> tokio::time::Instant {
+    tokio::time::Instant::now() + Duration::from_secs(24 * 3600)
 }
 
 async fn send(writer: &mut OwnedWriteHalf, msg: &Request) -> io::Result<()> {
@@ -208,6 +263,7 @@ mod tests {
     use tokio::net::UnixListener;
 
     use super::*;
+    use crate::ap::tests::Fake;
 
     async fn reply(stream: &mut UnixStream, msg: &Response) {
         stream.write_all(&carpi_proto::encode(msg)).await.unwrap();
@@ -226,7 +282,8 @@ mod tests {
         fn send<T: Send + 'static>(_: T) {}
         let (_state, rx) = watch::channel(State::default());
         let (telemetry, _pushed) = mpsc::unbounded_channel();
-        send(run(rx, telemetry));
+        let (ready, _) = watch::channel(true);
+        send(run(rx, telemetry, ready));
     }
 
     #[tokio::test]
@@ -238,11 +295,15 @@ mod tests {
         let listener = UnixListener::bind(&path).unwrap();
         let (state_tx, mut state) = watch::channel(State::default());
         let (telemetry, mut pushed) = mpsc::unbounded_channel();
+        let hotspot = Fake::default();
+        *hotspot.on.lock().unwrap() = true;
         let client = {
             let path = path.clone();
+            let hotspot = hotspot.clone();
             tokio::spawn(async move {
                 let mut values = Values::default();
                 let mut connected = false;
+                let mut ap = Ap::new(hotspot, None);
                 session(
                     &path,
                     &mut state,
@@ -250,6 +311,7 @@ mod tests {
                     &mut values,
                     55.0,
                     &mut connected,
+                    &mut ap,
                 )
                 .await
             })
@@ -274,6 +336,7 @@ mod tests {
             request(&mut daemon).await,
             Request::Subscribe { sub: SUB, .. }
         ));
+        assert_eq!(request(&mut daemon).await, Request::Commands);
         for _ in 0..7 {
             assert!(matches!(request(&mut daemon).await, Request::Bridge { .. }));
         }
@@ -293,6 +356,21 @@ mod tests {
             pushed.recv().await,
             Some(serde_json::json!({ "speedKph": 42.0 }))
         );
+        for (id, action, on) in [(1, ApAction::Suspend, false), (2, ApAction::Resume, true)] {
+            reply(
+                &mut daemon,
+                &Response::Command {
+                    id,
+                    command: Command::Ap { ap: action },
+                },
+            )
+            .await;
+            assert_eq!(
+                request(&mut daemon).await,
+                Request::CommandDone { id, error: None }
+            );
+            assert_eq!(*hotspot.on.lock().unwrap(), on);
+        }
         drop(daemon);
         assert!(matches!(client.await.unwrap(), Ok(Ended::Closed)));
         drop(state_tx);

@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use carpi_proto::{
-    BusInfo, CurveMode, DarkModeSource, LightAction, LightPatch, PinChange, Settings,
+    BusInfo, CurveMode, DarkModeSource, DiagAction, LightAction, LightPatch, PinChange, Settings,
     SettingsPatch, Value,
 };
 
@@ -15,7 +15,7 @@ use crate::PageId;
 use crate::client::{Capture, Client, Snapshot};
 use crate::config::{self, Saved};
 use crate::defs::{DEFS, GROUPS, MAX_CELLS, section};
-use crate::diag::GROUP_SLOTS;
+use crate::diag::{self, NO_POLL};
 use crate::light::{self, STEP_AMBIENT, STEP_PCT};
 use crate::settings::{self as cfg, DIS_SLOTS};
 use crate::values::{NONE, Store, age, show};
@@ -64,6 +64,8 @@ pub struct Pages {
     pin: String,
     /// The light page shows the manual curve's points.
     advanced: bool,
+    /// Clearing this module's fault codes waits for a confirm.
+    confirm: Option<u8>,
 }
 
 impl Pages {
@@ -85,6 +87,7 @@ impl Pages {
             trail: Vec::new(),
             pin: String::new(),
             advanced: false,
+            confirm: None,
         }
     }
 
@@ -104,12 +107,31 @@ impl Pages {
     fn close(&mut self, page: PageId) {
         match page {
             PageId::Data => self.editing = false,
-            PageId::Diagnostics => self.module = None,
+            PageId::Diagnostics => {
+                self.module = None;
+                self.confirm = None;
+            }
             PageId::Car => self.car = self.car.parent().unwrap_or(CarScreen::Root),
         }
         if self.car != CarScreen::Pin {
             self.pin.clear();
         }
+    }
+
+    /// Diag catalog names to keep subscribed: the shown module's measuring values.
+    pub fn watching(&self, page: PageId, snap: &Snapshot) -> Vec<String> {
+        let Some(i) = self.module.filter(|_| page == PageId::Diagnostics) else {
+            return Vec::new();
+        };
+        snap.diag
+            .modules()
+            .get(i)
+            .map(|m| {
+                diag::measured(m.module.tp2)
+                    .map(|v| v.0.to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// The UI path while `page` is shown. The light screens count as a page of their own.
@@ -165,6 +187,9 @@ impl Pages {
             return Moved::Stay;
         };
         let group = self.saved.group();
+        if !matches!(act, Act::ClearAsk(_)) {
+            self.confirm = None;
+        }
         let opened = match act {
             Act::None => false,
             Act::Group(id) => {
@@ -216,6 +241,15 @@ impl Pages {
                 self.pin.pop();
                 false
             }
+            Act::Diag(action) => {
+                client.diag(*action);
+                false
+            }
+            Act::ClearAsk(module) => {
+                self.confirm = Some(*module);
+                false
+            }
+            Act::ClearCancel => false,
             Act::Light(action) => {
                 client.light(*action);
                 false
@@ -253,7 +287,7 @@ impl Pages {
             PageId::Data if self.editing => self.edit(snap, now),
             PageId::Data => self.grid(snap, now),
             PageId::Diagnostics => match self.module {
-                Some(i) => module(snap, i),
+                Some(i) => module(snap, now, i, self.confirm),
                 None => modules(snap),
             },
             PageId::Car => car(self.car, snap, now, &self.pin, self.advanced),
@@ -399,25 +433,36 @@ fn names_under(prefix: &str, store: &Store) -> Vec<String> {
     names
 }
 
+/// The note over a diagnostics screen: no connection, or the job running or last run.
+fn diag_note(snap: &Snapshot, module: Option<u8>) -> String {
+    if !snap.connected {
+        return problem(snap);
+    }
+    snap.diag.line(module).unwrap_or_default()
+}
+
 fn modules(snap: &Snapshot) -> View {
     let diag = &snap.diag;
-    let note = if diag.available() {
-        String::new()
-    } else {
-        "Not available yet: carpid has no diagnostics API. Default module list.".into()
-    };
+    let mut note = diag_note(snap, None);
+    if note.is_empty() && diag.installed.is_none() {
+        note = "Default module list. Scan reads the gateway's install list.".into();
+    }
     let mut v = View::new(Layout::List, "Diagnostics", false).note(note);
-    v.pill("Scan", false, false, Act::None);
-    v.section(if diag.available() {
+    let free = snap.connected && !diag.busy();
+    v.pill("Scan", false, free, Act::Diag(DiagAction::InstallList));
+    v.section(if diag.installed.is_some() {
         "Install list"
     } else {
         "Modules"
     });
     for (i, m) in diag.modules().iter().enumerate() {
-        let value = match m.faults {
-            Some(0) => "OK".to_string(),
-            Some(n) => format!("{n} faults"),
-            None => NONE.to_string(),
+        let faults = diag.dtcs.get(&m.module.tp2).map(Vec::len);
+        let value = match (faults, m.coded) {
+            (Some(0), _) => "OK".to_string(),
+            (Some(1), _) => "1 fault".to_string(),
+            (Some(n), _) => format!("{n} faults"),
+            (None, Some(false)) => "not coded".to_string(),
+            (None, _) => NONE.to_string(),
         };
         let mut row = Row::new(
             RowKind::Route,
@@ -425,69 +470,105 @@ fn modules(snap: &Snapshot) -> View {
             value,
         )
         .act(Act::Module(i));
-        row.alert = m.faults.is_some_and(|n| n > 0);
+        row.alert = faults.is_some_and(|n| n > 0);
         v.row(row);
     }
     v.finish()
 }
 
-fn module(snap: &Snapshot, i: usize) -> View {
+fn module(snap: &Snapshot, now: Instant, i: usize, confirm: Option<u8>) -> View {
     let diag = &snap.diag;
     let list = diag.modules();
     let Some(m) = list.get(i) else {
         return View::new(Layout::List, "Diagnostics", true).finish();
     };
-    let on = diag.available();
-    let not_yet = || "not available yet".to_string();
-    let addr = m.module.address;
-    let note = if on {
-        String::new()
-    } else {
-        "Not available yet: carpid has no diagnostics API.".into()
-    };
+    let (addr, tp2) = (m.module.address, m.module.tp2);
+    let note = diag_note(snap, Some(tp2));
     let mut v = View::new(Layout::List, format!("{addr:02X} {}", m.module.name), true).note(note);
+    let free = snap.connected && !diag.busy();
+
     v.section("Identification");
-    let or_none = |s: &Option<String>| s.clone().unwrap_or_else(|| NONE.into());
-    v.row(Row::new(RowKind::Info, "Part number", or_none(&m.part)));
-    v.row(Row::new(RowKind::Info, "Component", or_none(&m.component)));
-    v.row(Row::new(RowKind::Info, "Coding", or_none(&m.coding)));
-    let mut tp2 = Row::new(RowKind::Info, "TP2 ID", format!("0x{:02X}", m.module.tp2));
-    tp2.mono = true;
-    v.row(tp2);
+    let mut id = Row::new(
+        RowKind::Info,
+        "VCDS address, TP2 ID",
+        format!("{addr:02X}, 0x{tp2:02X}"),
+    );
+    id.mono = true;
+    v.row(id);
+    let coded = match m.coded {
+        Some(true) => "yes",
+        Some(false) => "no",
+        None => NONE,
+    };
+    v.row(Row::new(RowKind::Info, "Coded", coded));
+    let mut status = Row::new(
+        RowKind::Info,
+        "Install list status",
+        m.status
+            .map_or_else(|| NONE.to_string(), |s| format!("0x{s:02X}")),
+    );
+    status.mono = true;
+    v.row(status);
+
     v.section("Fault codes");
-    match diag.dtcs.get(&addr) {
+    match diag.dtcs.get(&tp2) {
         Some(codes) if codes.is_empty() => v.row(Row::new(RowKind::Info, "No faults", "")),
         Some(codes) => {
             for c in codes {
-                let mut row = Row::new(RowKind::Info, format!("{} {}", c.code, c.text), &c.status);
+                let mut row = Row::new(
+                    RowKind::Info,
+                    c.code.clone(),
+                    format!("status 0x{:02X}", c.status),
+                );
                 row.alert = true;
+                row.mono = true;
                 v.row(row);
             }
         }
-        None => v.row(Row::new(RowKind::Info, "Fault codes", not_yet())),
+        None => v.row(Row::new(RowKind::Info, "Fault codes", "not read")),
     }
-    let mut read = Row::new(RowKind::Button, "Read fault codes", "").enabled(false);
+    let mut read = Row::new(RowKind::Button, "Read fault codes", "")
+        .enabled(free)
+        .act(Act::Diag(DiagAction::ReadDtcs { module: tp2 }));
     read.button = "Read".into();
     v.row(read);
-    let mut clear = Row::new(RowKind::Button, "Clear fault codes", "").enabled(false);
-    clear.button = "Clear".into();
-    v.row(clear);
+    if confirm == Some(tp2) {
+        let mut sure = Row::new(RowKind::Button, "Clear all of this module's codes?", "")
+            .enabled(free)
+            .act(Act::Diag(DiagAction::ClearDtcs {
+                module: tp2,
+                confirm: true,
+            }));
+        sure.button = "Confirm".into();
+        sure.alert = true;
+        v.row(sure);
+        let mut keep = Row::new(RowKind::Button, "Keep them", "").act(Act::ClearCancel);
+        keep.button = "Cancel".into();
+        v.row(keep);
+    } else {
+        let mut clear = Row::new(RowKind::Button, "Clear fault codes", "")
+            .enabled(free)
+            .act(Act::ClearAsk(tp2));
+        clear.button = "Clear".into();
+        v.row(clear);
+    }
+
     v.section("Measuring groups");
-    let shown: Vec<(&(u8, u8), _)> = diag.groups.range((addr, 0)..=(addr, u8::MAX)).collect();
-    for slot in 0..GROUP_SLOTS {
-        let row = match shown.get(slot) {
-            Some(((_, g), fields)) => Row::new(
-                RowKind::Info,
-                format!("Group {g:03}"),
-                fields
-                    .iter()
-                    .map(|f| reading(&f.value, &f.unit))
-                    .collect::<Vec<_>>()
-                    .join("  ·  "),
-            ),
-            None => Row::new(RowKind::Info, format!("Group slot {}", slot + 1), not_yet()),
+    let mut any = false;
+    for &(name, _, group, field) in diag::measured(tp2) {
+        any = true;
+        let mut row = value_row(name, snap, now);
+        let label = show(name, None, now).label;
+        row.label = format!("{group:03}.{field} {label}");
+        v.row(row);
+    }
+    if !any {
+        let why = if tp2 == NO_POLL {
+            "never polled: it upsets ESP and the Haldex"
+        } else {
+            "none in carpid's catalog"
         };
-        v.row(row.enabled(on));
+        v.row(Row::new(RowKind::Info, "Values", why).dimmed(true));
     }
     v.finish()
 }
@@ -1250,27 +1331,87 @@ mod tests {
     }
 
     #[test]
-    fn diagnostics_say_not_available() {
+    fn diagnostics_run_jobs_and_watch_the_module() {
         let client = Client::offline("test");
         let mut p = Pages::new(Saved::default(), None);
-        let s = snap(&[]);
-        let v = p.view(PageId::Diagnostics, &s, Instant::now());
-        assert!(v.note.contains("not available") || v.note.contains("Not available"));
-        assert!(!v.pills[0].enabled);
+        let mut s = snap(&[("engine.maf_gs", Some(Value::Num(4.5)))]);
+        let now = Instant::now();
+        let v = p.view(PageId::Diagnostics, &s, now);
+        assert!(v.note.contains("Default module list"));
+        assert_eq!(v.pills[0].act, Act::Diag(DiagAction::InstallList));
+        assert!(v.pills[0].enabled);
         assert_eq!(v.rows[1].label, "01 Engine");
+        assert!(p.watching(PageId::Diagnostics, &s).is_empty());
         assert_eq!(
             p.press(PageId::Diagnostics, &v, &Hit::Row(1), 1, &client),
             Moved::Opened
         );
-        let v = p.view(PageId::Diagnostics, &s, Instant::now());
+        let names = p.watching(PageId::Diagnostics, &s);
+        assert_eq!(names.len(), 21);
+        assert!(names.contains(&"engine.boost.actual".to_string()));
+        let v = p.view(PageId::Diagnostics, &s, now);
         assert_eq!(v.title, "01 Engine");
-        assert!(v.rows.iter().any(|r| r.value == "not available yet"));
+        let maf = v
+            .rows
+            .iter()
+            .find(|r| r.label.starts_with("003.2 "))
+            .unwrap();
+        assert_eq!(maf.value, "4.5 g/s");
+
+        // Clear asks first, then sends confirm: true.
+        let at = v
+            .rows
+            .iter()
+            .position(|r| r.act == Act::ClearAsk(1))
+            .unwrap();
+        assert_eq!(
+            p.press(PageId::Diagnostics, &v, &Hit::Row(at), 9, &client),
+            Moved::Stay
+        );
+        let v = p.view(PageId::Diagnostics, &s, now);
+        let sure = v.rows.iter().find(|r| r.button == "Confirm").unwrap();
+        assert_eq!(
+            sure.act,
+            Act::Diag(DiagAction::ClearDtcs {
+                module: 1,
+                confirm: true
+            })
+        );
+        let cancel = v.rows.iter().position(|r| r.button == "Cancel").unwrap();
+        p.press(PageId::Diagnostics, &v, &Hit::Row(cancel), 9, &client);
+        let v = p.view(PageId::Diagnostics, &s, now);
+        assert!(!v.rows.iter().any(|r| r.button == "Confirm"));
+        let read = v.rows.iter().position(|r| r.button == "Read").unwrap();
+        p.press(PageId::Diagnostics, &v, &Hit::Row(read), 9, &client);
+        assert_eq!(
+            client.snapshot().diag.line(Some(1)).as_deref(),
+            Some("Reading fault codes failed: not connected")
+        );
+
+        s.diag.started(3, DiagAction::ReadDtcs { module: 1 });
+        s.diag.event(
+            3,
+            carpi_proto::JobEvent::Dtcs {
+                module: 1,
+                dtcs: vec![carpi_proto::Dtc {
+                    code: 16684,
+                    status: 0x23,
+                }],
+            },
+        );
+        let v = p.view(PageId::Diagnostics, &s, now);
+        assert!(v.note.starts_with("Reading fault codes"));
+        assert!(v.rows.iter().any(|r| r.label == "16684" && r.alert));
         assert!(
             v.rows
                 .iter()
                 .filter(|r| r.kind == RowKind::Button)
                 .all(|r| !r.enabled)
         );
+        p.back(PageId::Diagnostics);
+        assert!(p.watching(PageId::Diagnostics, &s).is_empty());
+        let v = p.view(PageId::Diagnostics, &s, now);
+        assert_eq!(v.rows[1].value, "1 fault");
     }
 
     #[test]

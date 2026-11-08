@@ -39,6 +39,11 @@ pub enum Act {
     PinDigit(u8),
     PinDelete,
     PinSave,
+    /// Starts a diag job.
+    Diag(carpi_proto::DiagAction),
+    /// Asks to confirm clearing a module's fault codes, or doesn't.
+    ClearAsk(u8),
+    ClearCancel,
     /// A brightness nudge or "reset learned".
     Light(carpi_proto::LightAction),
     /// Shows or hides the manual curve's points.

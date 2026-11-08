@@ -6,14 +6,15 @@
 //! Same socket and protocol as livi-carpi (`$CARPID_SOCKET` or `$XDG_RUNTIME_DIR/carpid.sock`,
 //! length-prefixed JSON). It stays connected, but only asks for anything while one of our pages is
 //! on screen: a subscription to every value, plus `Values` and `Bus` once a second so ages stay
-//! true, and carpid's settings each time a page comes up. `CARPI_UI_FIXTURE=<file.json>` shows a
-//! fixed set instead, for snapshots without carpid.
+//! true, and carpid's settings each time a page comes up. The diagnostics page adds a second
+//! subscription, to the diag catalog's names it shows, and runs diag jobs on this connection.
+//! `CARPI_UI_FIXTURE=<file.json>` shows a fixed set instead, for snapshots without carpid.
 
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use carpi_proto::{BusInfo, LightAction, Reading, Settings, SettingsPatch};
+use carpi_proto::{BusInfo, DiagAction, LightAction, Reading, Settings, SettingsPatch};
 use serde::Deserialize;
 
 use crate::diag::Diag;
@@ -38,7 +39,7 @@ pub struct Snapshot {
     pub values: Store,
     pub buses: Option<Vec<BusInfo>>,
     pub capture: Capture,
-    /// Empty until carpid has a diag API.
+    /// The install list, fault codes and diag jobs.
     pub diag: Diag,
     /// carpid's settings, from the last `Settings` reply.
     pub settings: Option<Settings>,
@@ -72,12 +73,17 @@ enum Ask {
     /// `None` asks for the settings, a patch changes them.
     Settings(Option<Box<SettingsPatch>>),
     Light(LightAction),
+    Diag(DiagAction),
+    /// The names to watch changed.
+    Watch,
 }
 
 #[derive(Clone)]
 pub struct Client {
     shared: Arc<Mutex<Snapshot>>,
     asks: Option<Sender<Ev>>,
+    /// Diag catalog names subscribed while a page is shown.
+    watch: Arc<Mutex<Vec<String>>>,
 }
 
 impl Client {
@@ -90,6 +96,7 @@ impl Client {
         Self {
             shared: Arc::new(Mutex::new(snap)),
             asks: None,
+            watch: Arc::default(),
         }
     }
 
@@ -111,16 +118,19 @@ impl Client {
     #[cfg(unix)]
     pub fn connect(socket: std::path::PathBuf) -> Self {
         let shared = Arc::new(Mutex::new(Snapshot::default()));
+        let watch = Arc::new(Mutex::new(Vec::new()));
         let (tx, rx) = mpsc::channel();
         let inner = shared.clone();
+        let names = watch.clone();
         let ev = tx.clone();
         let spawned = std::thread::Builder::new()
             .name("carpi-ui".into())
-            .spawn(move || link::run(&socket, inner, ev, rx));
+            .spawn(move || link::run(&socket, inner, names, ev, rx));
         match spawned {
             Ok(_) => Self {
                 shared,
                 asks: Some(tx),
+                watch,
             },
             Err(e) => Self::offline(&format!("no thread: {e}")),
         }
@@ -161,6 +171,27 @@ impl Client {
             self.snapshot().settings_note = Some("not connected".into());
         }
         self.ask(Ask::Light(action));
+    }
+
+    /// Starts a diag job; its events land in [`Snapshot::diag`].
+    pub fn diag(&self, action: DiagAction) {
+        if self.asks.is_none() {
+            self.snapshot().diag.refused(action, "not connected".into());
+        }
+        self.ask(Ask::Diag(action));
+    }
+
+    /// Diag catalog names to keep subscribed while a page is shown; carpid polls them for as
+    /// long as they are. Asks carpid only when they change.
+    pub fn watch(&self, names: Vec<String>) {
+        {
+            let mut w = self.watch.lock().unwrap_or_else(|e| e.into_inner());
+            if *w == names {
+                return;
+            }
+            *w = names;
+        }
+        self.ask(Ask::Watch);
     }
 
     /// A note the pages show with the settings.
@@ -219,12 +250,18 @@ mod link {
         Capture,
         Settings,
         Light,
+        Diag(DiagAction),
         Ok,
     }
+
+    /// The diag catalog names the diagnostics page shows.
+    const WATCH: u32 = 2;
+    const WATCH_MS: u32 = 500;
 
     pub(super) fn run(
         socket: &Path,
         shared: Arc<Mutex<Snapshot>>,
+        watch: Arc<Mutex<Vec<String>>>,
         tx: Sender<Ev>,
         rx: Receiver<Ev>,
     ) {
@@ -236,7 +273,7 @@ mod link {
             let why = match UnixStream::connect(socket) {
                 Ok(stream) => {
                     retry = RETRY_FIRST;
-                    session(id, stream, &shared, &tx, &rx, &mut shown)
+                    session(id, stream, &shared, &watch, &tx, &rx, &mut shown)
                 }
                 Err(e) => format!("carpid not running ({e})"),
             };
@@ -246,6 +283,9 @@ mod link {
                 s.problem = Some(why);
                 if s.capture == Capture::Saving {
                     s.capture = Capture::Failed("carpid went away".into());
+                }
+                if let Some(crate::diag::Job::Running { action, .. }) = s.diag.job {
+                    s.diag.refused(action, "carpid went away".into());
                 }
             }
             let until = Instant::now() + retry;
@@ -259,6 +299,9 @@ mod link {
                     }
                     Ok(Ev::Ask(Ask::Settings(Some(_)) | Ask::Light(_))) => {
                         lock(&shared).settings_note = Some("not connected".into())
+                    }
+                    Ok(Ev::Ask(Ask::Diag(action))) => {
+                        lock(&shared).diag.refused(action, "not connected".into())
                     }
                     Ok(_) => {}
                     Err(RecvTimeoutError::Timeout) => break,
@@ -286,6 +329,7 @@ mod link {
         id: u64,
         stream: UnixStream,
         shared: &Mutex<Snapshot>,
+        watch: &Arc<Mutex<Vec<String>>>,
         tx: &Sender<Ev>,
         rx: &Receiver<Ev>,
         shown: &mut bool,
@@ -318,6 +362,8 @@ mod link {
         let mut link = Link {
             stream,
             pending: VecDeque::new(),
+            watch: watch.clone(),
+            watching: false,
         };
         let why = link.drive(id, shared, rx, shown);
         let _ = link.stream.shutdown(std::net::Shutdown::Both);
@@ -327,6 +373,9 @@ mod link {
     struct Link {
         stream: UnixStream,
         pending: VecDeque<Pending>,
+        watch: Arc<Mutex<Vec<String>>>,
+        /// The watch subscription is on.
+        watching: bool,
     }
 
     impl Link {
@@ -353,10 +402,36 @@ mod link {
                 };
                 self.send(&req, Pending::Ok)?;
                 self.settings(None)?;
+                self.rewatch()?;
                 self.poll()
             } else {
-                self.send(&Request::Unsubscribe { sub: SUB }, Pending::Ok)
+                self.send(&Request::Unsubscribe { sub: SUB }, Pending::Ok)?;
+                self.unwatch()
             }
+        }
+
+        fn unwatch(&mut self) -> io::Result<()> {
+            if std::mem::take(&mut self.watching) {
+                self.send(&Request::Unsubscribe { sub: WATCH }, Pending::Ok)?;
+            }
+            Ok(())
+        }
+
+        /// The watch subscription again, for the names now wanted.
+        fn rewatch(&mut self) -> io::Result<()> {
+            self.unwatch()?;
+            let names = self.watch.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            if names.is_empty() {
+                return Ok(());
+            }
+            let req = Request::Subscribe {
+                sub: WATCH,
+                prefixes: names,
+                period_ms: WATCH_MS,
+            };
+            self.send(&req, Pending::Ok)?;
+            self.watching = true;
+            Ok(())
         }
 
         fn settings(&mut self, patch: Option<Box<SettingsPatch>>) -> io::Result<()> {
@@ -409,6 +484,11 @@ mod link {
                     Ok(Ev::Ask(Ask::Light(action))) => {
                         self.send(&Request::Light { action }, Pending::Light)
                     }
+                    Ok(Ev::Ask(Ask::Diag(action))) => {
+                        self.send(&Request::Diag { action }, Pending::Diag(action))
+                    }
+                    Ok(Ev::Ask(Ask::Watch)) if *shown => self.rewatch(),
+                    Ok(Ev::Ask(Ask::Watch)) => Ok(()),
                     Ok(Ev::Got(from, resp)) if from == id => {
                         if let Err(why) = self.got(shared, *resp) {
                             return why;
@@ -432,8 +512,12 @@ mod link {
                     s.values.take(items, now);
                     return Ok(());
                 }
-                // Not ours: only the bridge asks for commands or starts jobs.
-                Response::Command { .. } | Response::Job { .. } => return Ok(()),
+                Response::Job { job, event } => {
+                    s.diag.event(job, event);
+                    return Ok(());
+                }
+                // Not ours: only the bridge asks for commands.
+                Response::Command { .. } => return Ok(()),
                 _ => {}
             }
             let pending = self.pending.pop_front();
@@ -473,6 +557,12 @@ mod link {
                 }
                 (Some(Pending::Settings | Pending::Light), Response::Error { message }) => {
                     s.settings_note = Some(message)
+                }
+                (Some(Pending::Diag(action)), Response::JobStarted { job }) => {
+                    s.diag.started(job, action)
+                }
+                (Some(Pending::Diag(action)), Response::Error { message }) => {
+                    s.diag.refused(action, message)
                 }
                 (_, Response::Error { message }) => s.problem = Some(message),
                 _ => {}
@@ -515,6 +605,7 @@ impl Fixture {
         Client {
             shared,
             asks: Some(tx),
+            watch: Arc::default(),
         }
     }
 
@@ -683,6 +774,58 @@ mod tests {
             },
         );
         assert!(wait(&client, |s| s.settings_note.as_deref() == Some("dis: bad")));
+
+        // The diagnostics page: its catalog names, and a job with its events.
+        client.watch(vec!["engine.maf_gs".into()]);
+        client.watch(vec!["engine.maf_gs".into()]);
+        client.diag(carpi_proto::DiagAction::InstallList);
+        let mut watched = false;
+        loop {
+            match request(&mut s) {
+                Request::Subscribe {
+                    sub: 2, prefixes, ..
+                } => {
+                    assert!(!watched, "asked once for the same names");
+                    assert_eq!(prefixes, ["engine.maf_gs"]);
+                    watched = true;
+                    reply(&mut s, &Response::Ok);
+                }
+                Request::Diag {
+                    action: carpi_proto::DiagAction::InstallList,
+                } => break,
+                Request::Values { .. } => reply(&mut s, &Response::Values { items: vec![] }),
+                Request::Bus => reply(&mut s, &Response::Bus { buses: vec![] }),
+                other => panic!("{other:?}"),
+            }
+        }
+        assert!(watched);
+        reply(&mut s, &Response::JobStarted { job: 7 });
+        reply(
+            &mut s,
+            &Response::Job {
+                job: 7,
+                event: carpi_proto::JobEvent::InstallList {
+                    modules: vec![carpi_proto::InstalledModule {
+                        vcds: 0x01,
+                        tp2: 0x01,
+                        coded: true,
+                        status: 0,
+                    }],
+                },
+            },
+        );
+        reply(
+            &mut s,
+            &Response::Job {
+                job: 7,
+                event: carpi_proto::JobEvent::Finished {
+                    ok: true,
+                    message: String::new(),
+                },
+            },
+        );
+        assert!(wait(&client, |s| !s.diag.busy()
+            && s.diag.installed.as_ref().is_some_and(|l| l.len() == 1)));
 
         client.save_capture();
         // Polls may come first.

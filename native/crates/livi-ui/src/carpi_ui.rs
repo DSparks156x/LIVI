@@ -243,10 +243,14 @@ fn render(ui: &AppWindow, o: &mut Ours) {
     let Some(id) = id_of(ui.get_page()) else {
         return;
     };
-    let view = {
+    let (view, watch) = {
         let snap = o.client.snapshot();
-        o.pages.view(id, &snap, Instant::now())
+        (
+            o.pages.view(id, &snap, Instant::now()),
+            o.pages.watching(id, &snap),
+        )
     };
+    o.client.watch(watch);
     let st = ui.global::<CarpiState>();
     st.set_layout(match view.layout {
         Layout::List => CarpiLayout::List,

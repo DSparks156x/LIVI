@@ -1679,7 +1679,8 @@ impl Pages {
                     name: cfg::free_name(&pages),
                     cells: Vec::new(),
                 });
-                self.trail.push(-1);
+                // Back lands on the new page's row (LIVI's back button comes first).
+                self.trail.push(pages.len() as i32);
                 self.car = S::ReadingPage(pages.len() - 1);
                 moved = Moved::Opened;
             }

@@ -1685,8 +1685,13 @@ async fn android_auto_media_and_guidance_reach_the_state_of_the_phone_in_front()
         turn_side: Some(DrivingSide::Left),
         turn_angle: Some(90),
         remain_distance: Some(120),
+        time_to_turn: Some(14),
+        display_distance_e3: Some(120_000),
+        display_distance_unit: Some(1),
         destination_name: Some("Home".into()),
         distance_to_destination: Some(5_000),
+        destination_distance_display: Some("5.0 km".into()),
+        destination_distance_unit: Some(3),
         time_to_destination: Some(600),
         eta: Some("21:58".into()),
         steps: vec![
@@ -1695,12 +1700,14 @@ async fn android_auto_media_and_guidance_reach_the_state_of_the_phone_in_front()
                 road_name: Some("Main St".into()),
                 lanes: vec![
                     AaLane {
-                        angles: vec![-90],
+                        angles: vec![-90, 0],
                         highlighted: Some(-90),
+                        highlights: vec![-90, 0],
                     },
                     AaLane {
                         angles: vec![0],
                         highlighted: None,
+                        highlights: vec![],
                     },
                 ],
                 ..Default::default()
@@ -1751,7 +1758,24 @@ async fn android_auto_media_and_guidance_reach_the_state_of_the_phone_in_front()
             .iter()
             .map(|l| (l.index, l.angles.clone(), l.highlight_angle))
             .collect::<Vec<_>>(),
-        [(0, vec![-90], Some(-90)), (1, vec![0], None)]
+        [(0, vec![-90, 0], Some(-90)), (1, vec![0], None)]
+    );
+    assert_eq!(lanes[0].highlight_angles, [-90, 0]);
+    assert_eq!(nav.time_to_maneuver, Some(14.0));
+    // The phone's numbers in CarPlay's units: 2 m, 0 km.
+    assert_eq!(
+        (
+            nav.remain_distance_display.as_deref(),
+            nav.remain_distance_units
+        ),
+        (Some("120"), Some(2))
+    );
+    assert_eq!(
+        (
+            nav.distance_to_destination_display.as_deref(),
+            nav.distance_to_destination_units
+        ),
+        (Some("5.0 km"), Some(0))
     );
 
     rig.p.on_aa(AaEvent::NavigationImage {

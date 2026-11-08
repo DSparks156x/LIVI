@@ -165,6 +165,7 @@ pub struct NavigationLaneDirection {
 pub struct NavigationPositionUpdate {
     pub step_distance_meters: Option<u32>,
     pub step_distance_display: Option<String>,
+    pub step_distance_units: Option<u32>,
     pub time_to_step_seconds: Option<u32>,
     pub destination_meters: Option<u32>,
     pub destination_display: Option<String>,
@@ -424,6 +425,7 @@ pub fn decode_position(payload: &[u8]) -> NavigationPositionUpdate {
                     let d = decode_distance(s.bytes);
                     out.step_distance_meters = d.meters;
                     out.step_distance_display = d.display;
+                    out.step_distance_units = d.units;
                 } else if s.field == 2 && s.wire == WIRE_VARINT {
                     out.time_to_step_seconds = Some(decode_varint_value(s.bytes));
                 }
@@ -638,6 +640,7 @@ mod tests {
             NavigationPositionUpdate {
                 step_distance_meters: Some(300),
                 step_distance_display: Some("300 m".into()),
+                step_distance_units: Some(1),
                 time_to_step_seconds: Some(25),
                 destination_meters: Some(12000),
                 destination_display: Some("12 km".into()),

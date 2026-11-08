@@ -321,6 +321,7 @@ fn lane_guidance(g: &LaneGuidanceInformation) -> LaneGuidance {
                 status: l.status.map(u32::from),
                 angles: l.angles.iter().map(|&a| i32::from(a)).collect(),
                 highlight_angle: l.highlight_angle.map(i32::from),
+                highlight_angles: Vec::new(),
             })
             .collect(),
     }

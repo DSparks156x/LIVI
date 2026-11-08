@@ -3,7 +3,9 @@
 
 //! LIVI's state as carpid's bridge sections. Each section goes out only when it changed.
 
-use carpi_proto::{BridgeUpdate, CallState, Lane, MediaState, NavState, PhoneState, Projection};
+use carpi_proto::{
+    BridgeUpdate, CallState, Lane, LaneArrow, MediaState, NavState, PhoneState, Projection,
+};
 use livi_core_proto::state::{
     Call, CallStatus, DeviceStatus, Front, Navigation, NowPlaying, Protocol, State,
 };
@@ -150,6 +152,43 @@ fn shape(angle: i32) -> &'static str {
     }
 }
 
+/// CarPlay's verdict on a lane.
+fn lane_status(code: u32) -> Option<&'static str> {
+    match code {
+        0 => Some("not_good"),
+        1 => Some("good"),
+        2 => Some("preferred"),
+        _ => None,
+    }
+}
+
+fn lane(l: &livi_core_proto::state::Lane) -> Lane {
+    let mut arrows: Vec<LaneArrow> = l
+        .angles
+        .iter()
+        .map(|&a| LaneArrow {
+            shape: shape(a).to_string(),
+            highlighted: false,
+        })
+        .collect();
+    // Each highlight marks the arrow it points along, or the nearest one.
+    for h in l.highlight_angles.iter().chain(&l.highlight_angle) {
+        let nearest = l
+            .angles
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, a)| (**a - h).abs())
+            .map(|(i, _)| i);
+        if let Some(i) = nearest {
+            arrows[i].highlighted = true;
+        }
+    }
+    Lane {
+        arrows,
+        status: l.status.and_then(lane_status).map(str::to_string),
+    }
+}
+
 fn lanes(n: &Navigation) -> Vec<Lane> {
     if n.lane_guidance_shown != Some(true) {
         return Vec::new();
@@ -157,16 +196,32 @@ fn lanes(n: &Navigation) -> Vec<Lane> {
     n.lane_guidance
         .iter()
         .find(|g| Some(g.index) == n.lane_guidance_index)
-        .map(|g| {
-            g.lanes
-                .iter()
-                .map(|l| Lane {
-                    shapes: l.angles.iter().map(|&a| shape(a).to_string()).collect(),
-                    highlighted: l.highlight_angle.is_some(),
-                })
-                .collect()
-        })
+        .map(|g| g.lanes.iter().map(lane).collect())
         .unwrap_or_default()
+}
+
+/// LIVI keeps distance units as CarPlay counts them, for both protocols.
+fn unit(code: Option<u32>) -> Option<&'static str> {
+    match code? {
+        0 => Some("km"),
+        1 => Some("mi"),
+        2 => Some("m"),
+        3 => Some("yd"),
+        4 => Some("ft"),
+        _ => None,
+    }
+}
+
+/// The phone's display text, with the unit added where it sends the number alone.
+fn shown(display: &Option<String>, unit: Option<&str>) -> Option<String> {
+    let d = display
+        .as_deref()
+        .map(str::trim)
+        .filter(|d| !d.is_empty())?;
+    Some(match unit {
+        Some(u) if !d.chars().any(char::is_alphabetic) => format!("{d} {u}"),
+        _ => d.to_string(),
+    })
 }
 
 fn nav(n: &Navigation) -> Option<NavState> {
@@ -184,6 +239,8 @@ fn nav(n: &Navigation) -> Option<NavState> {
     let roundabout = n
         .maneuver_type
         .filter(|t| (ROUNDABOUT_EXIT_FIRST..=ROUNDABOUT_EXIT_LAST).contains(t));
+    let distance_unit = unit(n.remain_distance_units);
+    let destination_unit = unit(n.distance_to_destination_units);
     let next = n
         .current_maneuvers
         .first()
@@ -194,12 +251,23 @@ fn nav(n: &Navigation) -> Option<NavState> {
         roundabout_exit: roundabout.map(|t| t - ROUNDABOUT_EXIT_FIRST + 1),
         roundabout_angle: roundabout.and(n.turn_angle),
         distance_m: n.remain_distance,
-        distance_text: text(&n.remain_distance_display).or_else(|| text(&n.maneuver_distance_text)),
-        time_to_maneuver_s: None,
+        distance_text: shown(&n.remain_distance_display, distance_unit)
+            .or_else(|| text(&n.maneuver_distance_text)),
+        distance_unit: distance_unit.map(str::to_string),
+        time_to_maneuver_s: n.time_to_maneuver,
         road: text(&n.road_name),
         cue: next.and_then(|m| text(&m.description)),
         destination: text(&n.destination_name),
+        destination_distance_m: n.distance_to_destination,
+        destination_distance_text: shown(&n.distance_to_destination_display, destination_unit)
+            .or_else(|| text(&n.destination_distance_text)),
+        destination_distance_unit: destination_unit.map(str::to_string),
+        time_to_destination_s: n.time_to_destination,
         eta: text(&n.eta_text),
+        eta_unix_s: n
+            .eta
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .map(|v| v as i64),
         lanes: lanes(n),
     })
 }
@@ -403,6 +471,84 @@ mod tests {
         );
     }
 
+    fn arrow(shape: &str, highlighted: bool) -> LaneArrow {
+        LaneArrow {
+            shape: shape.into(),
+            highlighted,
+        }
+    }
+
+    #[test]
+    fn android_auto_sends_times_phone_text_and_every_highlighted_arrow() {
+        let mut n = guided().navigation;
+        n.time_to_maneuver = Some(21.0);
+        n.remain_distance_display = Some("250 m".into());
+        n.remain_distance_units = Some(2);
+        n.distance_to_destination = Some(12_000.0);
+        n.distance_to_destination_display = Some("12".into());
+        n.distance_to_destination_units = Some(0);
+        n.time_to_destination = Some(900.0);
+        n.eta_text = Some("21:58".into());
+        n.lane_guidance[0].lanes[1].highlight_angles = vec![45, 180];
+        let nav = nav(&n).unwrap();
+        assert_eq!(nav.time_to_maneuver_s, Some(21.0));
+        assert_eq!(nav.distance_text.as_deref(), Some("250 m"));
+        assert_eq!(nav.distance_unit.as_deref(), Some("m"));
+        assert_eq!(nav.destination_distance_m, Some(12_000.0));
+        assert_eq!(nav.destination_distance_text.as_deref(), Some("12 km"));
+        assert_eq!(nav.destination_distance_unit.as_deref(), Some("km"));
+        assert_eq!(nav.time_to_destination_s, Some(900.0));
+        assert_eq!(nav.eta.as_deref(), Some("21:58"));
+        assert_eq!(nav.eta_unix_s, None);
+        assert_eq!(
+            nav.lanes[1].arrows,
+            [arrow("slight_right", true), arrow("uturn_right", true)]
+        );
+        assert!(nav.lanes[1].highlighted());
+    }
+
+    #[test]
+    fn carplay_sends_its_units_epoch_eta_and_lane_status() {
+        let mut state = guided();
+        state.sessions.active = Some(Protocol::Carplay);
+        let n = &mut state.navigation;
+        n.maneuver_type = Some(2);
+        n.remain_distance_display = Some("0.2".into());
+        n.remain_distance_units = Some(1);
+        n.distance_to_destination = Some(8_000.0);
+        n.distance_to_destination_display = Some("5".into());
+        n.distance_to_destination_units = Some(1);
+        n.time_to_destination = Some(600.0);
+        n.eta = Some(1_762_600_000.0);
+        let lanes = &mut n.lane_guidance[0].lanes;
+        lanes[0].status = Some(2);
+        lanes[0].highlight_angle = Some(-85);
+        lanes[1].status = Some(0);
+        lanes[1].highlight_angle = None;
+        let nav = nav(&state.navigation).unwrap();
+        assert_eq!(nav.maneuver.as_deref(), Some("turn"));
+        assert_eq!(nav.roundabout_exit, None);
+        assert_eq!(nav.distance_text.as_deref(), Some("0.2 mi"));
+        assert_eq!(nav.distance_unit.as_deref(), Some("mi"));
+        assert_eq!(nav.destination_distance_text.as_deref(), Some("5 mi"));
+        assert_eq!(nav.time_to_destination_s, Some(600.0));
+        assert_eq!(nav.time_to_maneuver_s, None);
+        assert_eq!(nav.eta_unix_s, Some(1_762_600_000));
+        assert_eq!(
+            nav.lanes,
+            [
+                Lane {
+                    arrows: vec![arrow("normal_left", true), arrow("straight", false)],
+                    status: Some("preferred".into()),
+                },
+                Lane {
+                    arrows: vec![arrow("slight_right", false), arrow("uturn_right", false)],
+                    status: Some("not_good".into()),
+                },
+            ]
+        );
+    }
+
     #[test]
     fn guidance_reads_as_android_auto_names_it() {
         let nav = nav(&guided().navigation).unwrap();
@@ -415,21 +561,19 @@ mod tests {
                 roundabout_angle: Some(270),
                 distance_m: Some(250.0),
                 distance_text: Some("250 m".into()),
-                time_to_maneuver_s: None,
                 road: Some("Ring".into()),
                 cue: Some("Third exit".into()),
-                destination: None,
-                eta: None,
                 lanes: vec![
                     Lane {
-                        shapes: vec!["normal_left".into(), "straight".into()],
-                        highlighted: true,
+                        arrows: vec![arrow("normal_left", false), arrow("straight", true)],
+                        status: None,
                     },
                     Lane {
-                        shapes: vec!["slight_right".into(), "uturn_right".into()],
-                        highlighted: false,
+                        arrows: vec![arrow("slight_right", false), arrow("uturn_right", false)],
+                        status: None,
                     },
                 ],
+                ..Default::default()
             }
         );
         assert_eq!(maneuver(49, None), ("slight_turn", Some("left")));

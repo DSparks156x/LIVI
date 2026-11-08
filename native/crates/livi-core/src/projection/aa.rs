@@ -346,6 +346,16 @@ impl Projection {
             }
         } else {
             let has_lanes = from.steps.first().is_some_and(|s| !s.lanes.is_empty());
+            let (remain_distance_display, remain_distance_units) = match from.step_distance_display
+            {
+                Some(text) => (Some(text), from.step_distance_unit.and_then(units)),
+                None => (
+                    from.display_distance_e3
+                        .zip(from.display_distance_unit)
+                        .map(|(e3, unit)| shown(e3, unit)),
+                    from.display_distance_unit.and_then(units),
+                ),
+            };
             Navigation {
                 active: from.active,
                 road_name: from.road_name,
@@ -353,6 +363,11 @@ impl Projection {
                 time_to_destination: from.time_to_destination.map(f64::from),
                 distance_to_destination: from.distance_to_destination.map(f64::from),
                 remain_distance: from.remain_distance.map(f64::from),
+                remain_distance_display,
+                remain_distance_units,
+                time_to_maneuver: from.time_to_turn.map(f64::from),
+                distance_to_destination_display: from.destination_distance_display,
+                distance_to_destination_units: from.destination_distance_unit.and_then(units),
                 maneuver_type: from.maneuver_type.map(|m| m as u32),
                 turn_side: from.turn_side.map(|s| s as u32),
                 turn_angle: from.turn_angle.and_then(|a| i32::try_from(a).ok()),
@@ -427,8 +442,50 @@ fn lane_guidance(steps: &[AaStep]) -> Vec<LaneGuidance> {
                     status: None,
                     angles: lane.angles.clone(),
                     highlight_angle: lane.highlighted,
+                    highlight_angles: lane.highlights.clone(),
                 })
                 .collect(),
         })
         .collect()
+}
+
+/// An Android Auto distance unit as CarPlay's, which [`Navigation`] keeps:
+/// 0 km, 1 mi, 2 m, 3 yd, 4 ft.
+fn units(aa: u32) -> Option<u32> {
+    Some(match aa {
+        1 => 2,
+        2 | 3 => 0,
+        4 | 5 => 1,
+        6 => 4,
+        7 => 3,
+        _ => return None,
+    })
+}
+
+/// Android Auto's thousandths of a display unit as the number the phone shows,
+/// with one decimal for the `_P1` units (km, mi) or where it isn't whole.
+fn shown(e3: u32, unit: u32) -> String {
+    let v = f64::from(e3) / 1000.0;
+    if matches!(unit, 3 | 5) || !e3.is_multiple_of(1000) {
+        format!("{v:.1}")
+    } else {
+        format!("{v:.0}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn phone_distances_read_as_shown() {
+        assert_eq!(shown(350_000, 1), "350");
+        assert_eq!(shown(12_000, 2), "12");
+        assert_eq!(shown(1_500, 3), "1.5");
+        assert_eq!(shown(2_000, 5), "2.0");
+        assert_eq!(shown(250, 4), "0.2");
+        assert_eq!(units(3), Some(0));
+        assert_eq!(units(6), Some(4));
+        assert_eq!(units(0), None);
+    }
 }

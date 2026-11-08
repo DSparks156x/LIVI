@@ -325,6 +325,9 @@ pub struct Navigation {
     pub distance_to_destination_units: Option<u32>,
     pub remain_distance_display: Option<String>,
     pub remain_distance_units: Option<u32>,
+    /// Seconds to the next maneuver; Android Auto only.
+    #[serde(default)]
+    pub time_to_maneuver: Option<f64>,
     pub maneuver_count: Option<u32>,
     pub visible_in_app: Option<bool>,
     pub lane_guidance_index: Option<u32>,
@@ -374,6 +377,9 @@ pub struct Lane {
     pub status: Option<u32>,
     pub angles: Vec<i32>,
     pub highlight_angle: Option<i32>,
+    /// Every highlighted arrow where the phone can highlight more than one
+    /// (Android Auto); CarPlay has only `highlight_angle`.
+    pub highlight_angles: Vec<i32>,
 }
 
 /// A call on the phone of the active session, as the phone reports it.

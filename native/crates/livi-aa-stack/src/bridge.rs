@@ -46,10 +46,18 @@ pub struct Navigation {
     pub turn_angle: Option<u32>,
     pub roundabout_exit_number: Option<u32>,
     pub remain_distance: Option<u32>,
+    pub time_to_turn: Option<u32>,
+    /// Thousandths of the distance in `display_distance_unit` (AA's distance unit code).
+    /// The phone's display distance is this or `step_distance_display`, whichever came last.
     pub display_distance_e3: Option<u32>,
     pub display_distance_unit: Option<u32>,
+    /// The distance to the step as the phone writes it ("300 m"), with its unit.
+    pub step_distance_display: Option<String>,
+    pub step_distance_unit: Option<u32>,
     pub destination_name: Option<String>,
     pub distance_to_destination: Option<u32>,
+    pub destination_distance_display: Option<String>,
+    pub destination_distance_unit: Option<u32>,
     pub time_to_destination: Option<u32>,
     pub eta: Option<String>,
     /// The next step first, replaced whole by every state the phone sends.
@@ -71,8 +79,10 @@ pub struct Step {
 pub struct Lane {
     /// One arrow per direction, see [`lane_shape_angle`].
     pub angles: Vec<i32>,
-    /// The arrow to take.
+    /// The first arrow to take.
     pub highlighted: Option<i32>,
+    /// Every arrow to take, in `angles` order.
+    pub highlights: Vec<i32>,
 }
 
 impl Step {
@@ -103,8 +113,9 @@ impl Lane {
                 continue;
             };
             out.angles.push(angle);
-            if d.highlighted && out.highlighted.is_none() {
-                out.highlighted = Some(angle);
+            if d.highlighted {
+                out.highlighted.get_or_insert(angle);
+                out.highlights.push(angle);
             }
         }
         out
@@ -129,12 +140,23 @@ impl Navigation {
             patch.roundabout_exit_number,
         );
         take(&mut self.remain_distance, patch.remain_distance);
+        take(&mut self.time_to_turn, patch.time_to_turn);
         take(&mut self.display_distance_e3, patch.display_distance_e3);
         take(&mut self.display_distance_unit, patch.display_distance_unit);
+        take(&mut self.step_distance_display, patch.step_distance_display);
+        take(&mut self.step_distance_unit, patch.step_distance_unit);
         take(&mut self.destination_name, patch.destination_name);
         take(
             &mut self.distance_to_destination,
             patch.distance_to_destination,
+        );
+        take(
+            &mut self.destination_distance_display,
+            patch.destination_distance_display,
+        );
+        take(
+            &mut self.destination_distance_unit,
+            patch.destination_distance_unit,
         );
         take(&mut self.time_to_destination, patch.time_to_destination);
         take(&mut self.eta, patch.eta);
@@ -194,6 +216,8 @@ pub enum Report {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+// Navigation reports dominate; they're moved once per phone event, boxing buys nothing.
+#[allow(clippy::large_enum_variant)]
 pub enum BridgeOut {
     Report(Report),
     StartMic(&'static str),
@@ -495,9 +519,16 @@ impl Bridge {
                 );
             }
             NavigationEvent::Turn(t) => {
+                let maneuver_type = match turn_event_to_maneuver_type(t.event, t.turn_side) {
+                    Some(ManeuverType::EnterRoundabout) => t
+                        .turn_number
+                        .and_then(roundabout_exit)
+                        .or(Some(ManeuverType::EnterRoundabout)),
+                    other => other,
+                };
                 let patch = Navigation {
                     road_name: t.road.clone(),
-                    maneuver_type: turn_event_to_maneuver_type(t.event, t.turn_side),
+                    maneuver_type,
                     turn_side: turn_side_to_navi_code(t.turn_side),
                     turn_angle: t.turn_angle,
                     roundabout_exit_number: t.turn_number,
@@ -511,10 +542,15 @@ impl Bridge {
                 }
             }
             NavigationEvent::Distance(d) => {
+                if d.display_distance_e3.is_some() {
+                    self.navi.step_distance_display = None;
+                    self.navi.step_distance_unit = None;
+                }
                 self.publish(
                     out,
                     Navigation {
                         remain_distance: Some(d.distance_meters),
+                        time_to_turn: Some(d.time_to_turn_seconds),
                         display_distance_e3: d.display_distance_e3,
                         display_distance_unit: d.display_unit,
                         ..Default::default()
@@ -522,12 +558,28 @@ impl Bridge {
                 );
             }
             NavigationEvent::State(s) => {
+                let steps: Vec<Step> = s.steps.into_iter().map(Step::of).collect();
+                // The next step knows which exit a roundabout takes.
+                let maneuver_type = match nav_maneuver_type_to_code(s.maneuver_type) {
+                    Some(ManeuverType::EnterRoundabout) => steps
+                        .first()
+                        .and_then(|st| st.maneuver_type)
+                        .or(Some(ManeuverType::EnterRoundabout)),
+                    other => other,
+                };
+                let turn_angle = maneuver_type
+                    .filter(|m| {
+                        (ManeuverType::RoundaboutExit1 as u8..=ManeuverType::RoundaboutExit19 as u8)
+                            .contains(&(*m as u8))
+                    })
+                    .and(steps.first().and_then(|st| st.turn_angle));
                 let patch = Navigation {
-                    maneuver_type: nav_maneuver_type_to_code(s.maneuver_type),
+                    maneuver_type,
                     turn_side: nav_maneuver_type_to_side(s.maneuver_type),
+                    turn_angle,
                     road_name: s.road_name.filter(|r| !r.is_empty()),
                     destination_name: s.destination_address.filter(|d| !d.is_empty()),
-                    steps: s.steps.into_iter().map(Step::of).collect(),
+                    steps,
                     ..Default::default()
                 };
                 if !patch.is_empty() {
@@ -535,9 +587,21 @@ impl Bridge {
                 }
             }
             NavigationEvent::Position(p) => {
+                if p.step_distance_display
+                    .as_deref()
+                    .is_some_and(|d| !d.is_empty())
+                {
+                    self.navi.display_distance_e3 = None;
+                    self.navi.display_distance_unit = None;
+                }
                 let patch = Navigation {
                     remain_distance: p.step_distance_meters,
+                    time_to_turn: p.time_to_step_seconds,
+                    step_distance_display: p.step_distance_display.filter(|d| !d.is_empty()),
+                    step_distance_unit: p.step_distance_units,
                     distance_to_destination: p.destination_meters,
+                    destination_distance_display: p.destination_display.filter(|d| !d.is_empty()),
+                    destination_distance_unit: p.destination_units,
                     time_to_destination: p.time_to_arrival_seconds,
                     eta: p.eta_text.filter(|e| !e.is_empty()),
                     ..Default::default()
@@ -738,10 +802,12 @@ mod tests {
                         Lane {
                             angles: vec![-45],
                             highlighted: None,
+                            highlights: vec![],
                         },
                         Lane {
                             angles: vec![0, 45],
                             highlighted: Some(0),
+                            highlights: vec![0, 45],
                         },
                     ],
                     ..Default::default()
@@ -764,6 +830,92 @@ mod tests {
             panic!()
         };
         assert_eq!(n.steps.len(), 2);
+    }
+
+    #[test]
+    fn roundabout_exits_times_and_phone_text_are_kept() {
+        let mut b = Bridge::default();
+        let cfg = AaConfig::default();
+        let nav = |b: &mut Bridge, e| reports(b.on_event(SessionEvent::Navigation(e), &cfg));
+        let last = |out: Vec<Report>| match out.into_iter().next() {
+            Some(Report::Navigation(n)) => n,
+            other => panic!("{other:?}"),
+        };
+        nav(&mut b, NavigationEvent::Start);
+        let n = last(nav(
+            &mut b,
+            NavigationEvent::Turn(NavigationTurnUpdate {
+                event: Some(NavigationTurnEvent::RoundaboutEnterAndExit),
+                turn_side: Some(NavigationTurnSide::Right),
+                turn_number: Some(3),
+                turn_angle: Some(270),
+                ..Default::default()
+            }),
+        ));
+        assert_eq!(n.maneuver_type, Some(ManeuverType::RoundaboutExit3));
+        assert_eq!(n.turn_angle, Some(270));
+
+        let n = last(nav(
+            &mut b,
+            NavigationEvent::Distance(NavigationDistanceUpdate {
+                distance_meters: 350,
+                time_to_turn_seconds: 21,
+                display_distance_e3: Some(350_000),
+                display_unit: Some(1),
+            }),
+        ));
+        assert_eq!(
+            (
+                n.time_to_turn,
+                n.display_distance_e3,
+                n.display_distance_unit
+            ),
+            (Some(21), Some(350_000), Some(1))
+        );
+
+        let n = last(nav(
+            &mut b,
+            NavigationEvent::Position(NavigationPositionUpdate {
+                step_distance_meters: Some(300),
+                step_distance_display: Some("300 m".into()),
+                step_distance_units: Some(1),
+                time_to_step_seconds: Some(18),
+                destination_meters: Some(12_000),
+                destination_display: Some("12 km".into()),
+                destination_units: Some(2),
+                ..Default::default()
+            }),
+        ));
+        assert_eq!(n.time_to_turn, Some(18));
+        assert_eq!(n.display_distance_e3, None);
+        assert_eq!(
+            (n.step_distance_display.as_deref(), n.step_distance_unit),
+            (Some("300 m"), Some(1))
+        );
+        assert_eq!(
+            (
+                n.destination_distance_display.as_deref(),
+                n.destination_distance_unit
+            ),
+            (Some("12 km"), Some(2))
+        );
+
+        // A state names the roundabout; its first step says which exit.
+        let n = last(nav(
+            &mut b,
+            NavigationEvent::State(NavigationStateUpdate {
+                maneuver_type: Some(32),
+                steps: vec![NavigationStep {
+                    maneuver_type: Some(32),
+                    roundabout_exit_number: Some(2),
+                    roundabout_exit_angle: Some(180),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+        ));
+        assert_eq!(n.maneuver_type, Some(ManeuverType::RoundaboutExit2));
+        assert_eq!(n.turn_angle, Some(180));
     }
 
     #[test]

@@ -28,8 +28,9 @@ pub fn aa(action: &InputAction) -> Vec<Command> {
     let c = match action {
         A::Up => Command::Up,
         A::Down => Command::Down,
-        A::Left => Command::Left,
-        A::Right => Command::Right,
+        // D-pad, not the rotary: LIVI's Left/Right are rotary steps.
+        A::Left => Command::DpadLeft,
+        A::Right => Command::DpadRight,
         A::Rotate { steps: n } => {
             let c = if *n > 0 {
                 Command::KnobRight
@@ -40,7 +41,8 @@ pub fn aa(action: &InputAction) -> Vec<Command> {
         }
         A::Select { down: true } => Command::SelectDown,
         A::Select { down: false } => Command::SelectUp,
-        A::Back => Command::Back,
+        // AA ignored KEYCODE_BACK sent as one click (bench, 2026-11-08).
+        A::Back => return vec![Command::BackDown, Command::BackUp],
         A::Home => Command::Home,
         A::PlayPause => Command::PlayPause,
         A::Next => Command::Next,
@@ -159,7 +161,22 @@ mod tests {
         assert_eq!(key(A::PlayPause), click(Keycode::MediaPlayPause));
         assert_eq!(key(A::Next), click(Keycode::MediaNext));
         assert_eq!(key(A::Prev), click(Keycode::MediaPrevious));
-        assert_eq!(key(A::Back), click(Keycode::Back));
+        let back = Keycode::Back as u32;
+        assert_eq!(
+            key(A::Back),
+            [
+                Action::Key {
+                    code: back,
+                    down: true
+                },
+                Action::Key {
+                    code: back,
+                    down: false
+                }
+            ]
+        );
+        assert_eq!(key(A::Left), click(Keycode::DpadLeft));
+        assert_eq!(key(A::Right), click(Keycode::DpadRight));
         assert_eq!(key(A::Home), click(Keycode::Home));
         assert_eq!(key(A::Up), click(Keycode::DpadUp));
         assert_eq!(key(A::Down), click(Keycode::DpadDown));

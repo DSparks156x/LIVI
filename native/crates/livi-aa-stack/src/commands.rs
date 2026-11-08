@@ -25,6 +25,11 @@ pub enum Command {
     KnobRight = 112,
     KnobUp = 113,
     KnobDown = 114,
+    // carpi: a D-pad apart from the knob, and Back as a real press.
+    DpadLeft = 120,
+    DpadRight = 121,
+    BackDown = 122,
+    BackUp = 123,
     Home = 200,
     Play = 201,
     Pause = 202,
@@ -119,6 +124,16 @@ pub fn command_action(cmd: Command) -> Action {
         },
         C::VoiceAssistantRelease => Action::Key {
             code: Keycode::Search as u32,
+            down: false,
+        },
+        C::DpadLeft => Action::Click(Keycode::DpadLeft as u32),
+        C::DpadRight => Action::Click(Keycode::DpadRight as u32),
+        C::BackDown => Action::Key {
+            code: Keycode::Back as u32,
+            down: true,
+        },
+        C::BackUp => Action::Key {
+            code: Keycode::Back as u32,
             down: false,
         },
         C::Left | C::KnobLeft => Action::Rotary(-1),

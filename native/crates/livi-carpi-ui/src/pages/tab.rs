@@ -1535,10 +1535,11 @@ fn pin_entry(snap: &Snapshot, pin: &str) -> View {
 
 fn updates(snap: &Snapshot) -> View {
     with_settings(snap, "Updates", |v, s| {
-        let version = if s.update.version.is_empty() {
-            snap.daemon.clone().unwrap_or_default()
-        } else {
-            s.update.version.clone()
+        // "carpid 0.1.0, release 2026.11.08 (stable)": the release is what updates change.
+        let version = match s.update.version.split_once("release ") {
+            Some((_, r)) => r.to_string(),
+            None if s.update.version.is_empty() => snap.daemon.clone().unwrap_or_default(),
+            None => s.update.version.clone(),
         };
         v.row(info("This version", version));
         const CHANNELS: [(UpdateChannel, &str); 2] =

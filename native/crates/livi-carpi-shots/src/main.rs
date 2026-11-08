@@ -345,6 +345,7 @@ fn client() -> Client {
         ("avsd.teensy", Value::Text("connected".into())),
         ("avsd.link", Value::Text("812 kB/s".into())),
     ];
+    client.snapshot().datalog = Some(datalog());
     client.snapshot().values.take(
         extra
             .iter()
@@ -436,5 +437,71 @@ fn main() {
         if v.rows.len() > 7 && last > v.start {
             shots.view(&v, Some(last), true, &format!("{name}-end"));
         }
+    }
+}
+
+/// Two profiles and a run that ended, as carpid reports them.
+fn datalog() -> carpi_proto::DatalogStatus {
+    use carpi_proto::{DatalogLoad, DatalogProfile, DatalogProfileStatus, DatalogRun};
+    let p = |name: &str, values: &[&str], rate_hz, load| DatalogProfileStatus {
+        profile: DatalogProfile {
+            name: name.into(),
+            values: values.iter().map(|v| v.to_string()).collect(),
+            rate_hz,
+        },
+        load,
+    };
+    carpi_proto::DatalogStatus {
+        profiles: vec![
+            p(
+                "Boost",
+                &[
+                    "engine.rpm",
+                    "engine.boost.actual",
+                    "engine.boost.specified",
+                    "engine.n75_duty_pct",
+                    "engine.load_pct",
+                    "engine.throttle_pct",
+                    "engine.intake_temp_c",
+                    "vehicle.speed_kmh",
+                ],
+                10,
+                DatalogLoad {
+                    bus_values: 2,
+                    diag_values: 6,
+                    diag_groups: 3,
+                    diag_modules: 1,
+                    diag_hz: Some(4.4),
+                },
+            ),
+            p(
+                "Haldex",
+                &["awd.oil_temp_c", "awd.plate_temp_c", "engine.oil_temp_c"],
+                2,
+                DatalogLoad {
+                    bus_values: 0,
+                    diag_values: 3,
+                    diag_groups: 2,
+                    diag_modules: 2,
+                    diag_hz: Some(2.0),
+                },
+            ),
+        ],
+        selected: Some("Boost".into()),
+        running: None,
+        last: Some(DatalogRun {
+            label: "2026-11-08 #03".into(),
+            date: "2026-11-08".into(),
+            number: 3,
+            profile: "Boost".into(),
+            values: 8,
+            rate_hz: 10,
+            started: "2026-11-08T09:40:00".into(),
+            elapsed_ms: 481_200,
+            rows: 4812,
+            dir: "/home/pi/logs/2026-11-08/03".into(),
+            summary: "8 values, 10 Hz, 4 812 rows".into(),
+            error: None,
+        }),
     }
 }

@@ -86,6 +86,7 @@ fn refill<T: Clone + PartialEq + 'static>(now: &ModelRc<T>, next: Vec<T>) -> Opt
 
 pub fn depth() -> usize {
     with(|c| c.stack.len() + c.browser.as_ref().map_or(0, Browser::depth)).unwrap_or(0)
+        + crate::carpi_ui::settings_depth()
 }
 
 pub fn tr(key: &str, text: &str) -> String {
@@ -196,7 +197,7 @@ fn throttled(c: &mut Controller) -> bool {
 pub fn wire(ui: &AppWindow, client: &Client, lang: &str) {
     CONTROLLER.with_borrow_mut(|c| {
         *c = Some(Controller {
-            model: Settings::new(schema()).with_facts(facts()),
+            model: Settings::new(crate::carpi_ui::with_tab(schema())).with_facts(facts()),
             stack: Vec::new(),
             strings: Strings::readable(lang, &crate::fonts::shown()),
             baseline: None,
@@ -218,6 +219,9 @@ pub fn wire(ui: &AppWindow, client: &Client, lang: &str) {
     s.on_back({
         let (weak, client) = (weak.clone(), client.clone());
         move || {
+            if crate::carpi_ui::settings_back(&weak) {
+                return;
+            }
             act(&weak, &client, |c, _| match c.browser.as_mut() {
                 Some(b) => {
                     if !b.up() {
@@ -232,6 +236,9 @@ pub fn wire(ui: &AppWindow, client: &Client, lang: &str) {
     s.on_press({
         let (weak, client) = (weak.clone(), client.clone());
         move |i| {
+            if crate::carpi_ui::settings_press(&weak, i as usize) {
+                return;
+            }
             let row = with(|c| c.rows.get(i as usize).filter(|r| r.enabled).cloned()).flatten();
             let Some(row) = row else { return };
             if let Some(a) = row.action {
@@ -368,6 +375,9 @@ pub fn wire(ui: &AppWindow, client: &Client, lang: &str) {
     s.on_open({
         let (weak, client) = (weak.clone(), client.clone());
         move |i| {
+            if crate::carpi_ui::settings_open(&weak, i as usize) {
+                return;
+            }
             act(&weak, &client, |c, _| {
                 let i = i as usize;
                 if c.model.opens(&c.stack, i) {
@@ -381,6 +391,9 @@ pub fn wire(ui: &AppWindow, client: &Client, lang: &str) {
     s.on_toggle({
         let (weak, client) = (weak.clone(), client.clone());
         move |i| {
+            if crate::carpi_ui::settings_toggle(&weak, i as usize) {
+                return;
+            }
             act(&weak, &client, |c, state| {
                 let Some(row) = c.rows.get(i as usize).cloned() else {
                     return (Vec::new(), false);
@@ -489,6 +502,9 @@ pub fn wire(ui: &AppWindow, client: &Client, lang: &str) {
     s.on_pick({
         let (weak, client) = (weak.clone(), client.clone());
         move |i| {
+            if crate::carpi_ui::settings_pick(&weak, i as usize) {
+                return;
+            }
             act(&weak, &client, |c, state| {
                 let changes = c.model.pick(&c.stack, i as usize, state, &c.strings);
                 let done = !changes.is_empty();

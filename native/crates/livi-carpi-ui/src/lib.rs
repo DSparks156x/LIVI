@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Drew Sparks
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! carpid's pages in LIVI: Data, Diagnostics and Car (with Light and Logging), and carpid's
-//! toasts.
+//! carpid's pages in LIVI: Data, Diagnostics and the Car Integration tab in LIVI's Settings
+//! (docs/PAGES.md 5a), and carpid's toasts.
 //!
 //! The pages are Slint (`ui/carpi.slint`), drawn with LIVI's own rows, header and theme, and
 //! focused the way LIVI's settings are. This crate holds everything that isn't Slint glue: its own
@@ -21,7 +21,8 @@
 //! LIVI_UI_SIZE=800x480 LIVI_UI_PAGE=carpi/data LIVI_UI_SNAPSHOT=/tmp/data.png LIVI
 //! ```
 //!
-//! `LIVI_UI_PAGE` takes `carpi/data`, `carpi/diagnostics`, `carpi/car` or `carpi/car/light`.
+//! `LIVI_UI_PAGE` takes `carpi/data` or `carpi/diagnostics`. The tab's screens are drawn by
+//! `livi-carpi-shots`.
 
 pub mod catalog;
 pub mod client;
@@ -41,7 +42,7 @@ pub use carpi_proto::ToastLevel;
 pub use client::Client;
 pub use pages::{Moved, Pages};
 
-/// One of our pages.
+/// One of our pages. `Car` is the Car Integration tab, shown inside Settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PageId {
     Data,
@@ -84,8 +85,8 @@ impl PageId {
     }
 }
 
-/// The light page: a screen of the Car page, reached from it or by carpid's `OpenPage`, with a
-/// focus of its own.
+/// The light screens of the Car Integration tab, reached from it or by carpid's `OpenPage`, with
+/// a focus of their own.
 pub const LIGHT_PATH: &str = "/carpi/car/light";
 
 /// carpid's focus for a UI path: `page:<name>` for one of ours, `None` for anything else.

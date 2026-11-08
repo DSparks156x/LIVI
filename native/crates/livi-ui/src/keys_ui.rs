@@ -110,6 +110,9 @@ fn settings_targets(s: &SettingsState) -> Vec<Target> {
 
 fn targets(ui: &AppWindow) -> Vec<Target> {
     match ui.get_page() {
+        page if crate::carpi_ui::ours(page) => (0..crate::carpi_ui::targets(ui))
+            .map(Target::Carpi)
+            .collect(),
         Page::Settings => settings_targets(&ui.global::<SettingsState>()),
         Page::Media => {
             let mut out = Vec::new();
@@ -139,9 +142,6 @@ fn targets(ui: &AppWindow) -> Vec<Target> {
             }
             out
         }
-        page if crate::carpi_ui::ours(page) => (0..crate::carpi_ui::targets(ui))
-            .map(Target::Carpi)
-            .collect(),
         _ => Vec::new(),
     }
 }

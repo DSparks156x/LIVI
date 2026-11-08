@@ -188,7 +188,7 @@ export component AppWindow inherits Window {
                 width: parent.width;
                 height: parent.height;
             }
-            if root.page == Page.carpi-data || root.page == Page.carpi-diagnostics || root.page == Page.carpi-car: CarpiView {
+            if root.page == Page.carpi-data || root.page == Page.carpi-diagnostics || (root.page == Page.settings && CarpiState.over-settings): CarpiView {
                 width: parent.width;
                 height: parent.height;
             }

@@ -78,6 +78,8 @@ export global CarpiState {
     // A step row takes the knob's keys while it's held (when the knob and the D-pad send the
     // same keys).
     in property <bool> holding;
+    // Shown over LIVI's Settings: the Car Integration tab's plot and picker.
+    in property <bool> over-settings;
     // The light plot: curve as SVG path commands in a 1000x1000 box, y down.
     in property <bool> plot-shown;
     in property <string> plot-curve;

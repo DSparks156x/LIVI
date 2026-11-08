@@ -243,7 +243,7 @@ pub fn report_page(ui: &AppWindow) {
 }
 
 fn open_path(ui: &AppWindow, path: &str) {
-    if carpi_ui::toast_path(ui, path) {
+    if carpi_ui::toast_path(ui, path) || carpi_ui::open_tab(ui, path) {
         return;
     }
     let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
@@ -291,8 +291,8 @@ fn reported(ui: &AppWindow, client: &Client, page: Page) {
         Page::Telemetry => (Front::Livi, "/telemetry"),
         Page::Media => (Front::Livi, media_ui::path(ui)),
         Page::Camera => (Front::Camera, "/camera"),
-        Page::Settings => (Front::Livi, "/settings"),
-        Page::CarpiData | Page::CarpiDiagnostics | Page::CarpiCar => carpi_ui::reported(ui, page),
+        Page::Settings => (Front::Livi, carpi_ui::settings_path().unwrap_or("/settings")),
+        Page::CarpiData | Page::CarpiDiagnostics => carpi_ui::reported(ui, page),
     };
     client.show(Screen::Main, front);
     client.path(path);

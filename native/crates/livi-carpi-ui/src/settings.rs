@@ -158,14 +158,23 @@ pub fn apply(s: &mut Settings, patch: &SettingsPatch) {
         if let Some(v) = d.default_page {
             m.default_page = v;
         }
-        if let Some(v) = d.auto_nav {
-            m.auto_nav = v;
+        if let Some(v) = d.claim_nav {
+            m.claim_nav = v;
         }
-        if let Some(v) = d.auto_phone {
-            m.auto_phone = v;
+        if let Some(v) = d.release_nav {
+            m.release_nav = v;
         }
-        if let Some(v) = d.auto_media {
-            m.auto_media = v;
+        if let Some(v) = d.claim_phone {
+            m.claim_phone = v;
+        }
+        if let Some(v) = d.release_phone {
+            m.release_phone = v;
+        }
+        if let Some(v) = d.claim_media {
+            m.claim_media = v;
+        }
+        if let Some(v) = d.release_media {
+            m.release_media = v;
         }
         if let Some(v) = d.media_layout {
             m.media_layout = v;
@@ -178,6 +187,30 @@ pub fn apply(s: &mut Settings, patch: &SettingsPatch) {
         }
         if let Some(v) = d.clock {
             m.clock = v;
+        }
+        if let Some(v) = &d.pages {
+            m.pages = v.clone();
+        }
+        if let Some(v) = d.nav_style {
+            m.nav_style = v;
+        }
+        if let Some(v) = d.nav_distance {
+            m.nav_distance = v;
+        }
+        if let Some(v) = d.nav_pocket {
+            m.nav_pocket = v;
+        }
+        if let Some(v) = d.nav_eta {
+            m.nav_eta = v;
+        }
+        if let Some(v) = d.nav_time_left {
+            m.nav_time_left = v;
+        }
+        if let Some(v) = d.nav_dest_distance {
+            m.nav_dest_distance = v;
+        }
+        if let Some(v) = d.nav_lanes {
+            m.nav_lanes = v;
         }
     }
     if let Some(v) = &patch.bindings {
@@ -295,13 +328,24 @@ pub(crate) fn sample() -> Settings {
             }],
             claim: carpi_proto::DisClaim::Always,
             default_page: carpi_proto::DisPage::Readings,
-            auto_nav: true,
-            auto_phone: true,
-            auto_media: true,
+            pages: Vec::new(),
+            claim_nav: true,
+            release_nav: true,
+            claim_phone: true,
+            release_phone: true,
+            claim_media: true,
+            release_media: true,
             media_layout: carpi_proto::DisMediaLayout::Stack,
             cover_flash_s: 4.0,
             units: carpi_proto::DisUnits::Auto,
             clock: carpi_proto::DisClock::Auto,
+            nav_style: carpi_proto::DisNavStyle::Fancy,
+            nav_distance: true,
+            nav_pocket: true,
+            nav_eta: true,
+            nav_time_left: true,
+            nav_dest_distance: true,
+            nav_lanes: carpi_proto::DisLanes::Flip,
         },
         bindings: vec![
             Binding {
@@ -382,7 +426,7 @@ mod tests {
             &SettingsPatch {
                 dis: Some(carpi_proto::DisPatch {
                     claim: Some(carpi_proto::DisClaim::Tab),
-                    auto_phone: Some(false),
+                    claim_phone: Some(false),
                     cover_flash_s: Some(0.0),
                     units: Some(carpi_proto::DisUnits::Imperial),
                     clock: Some(carpi_proto::DisClock::H12),
@@ -392,7 +436,7 @@ mod tests {
             },
         );
         assert_eq!(s.dis.claim, carpi_proto::DisClaim::Tab);
-        assert!(!s.dis.auto_phone && s.dis.auto_nav);
+        assert!(!s.dis.claim_phone && s.dis.claim_nav);
         assert_eq!(s.dis.cover_flash_s, 0.0);
         assert_eq!(s.dis.units, carpi_proto::DisUnits::Imperial);
         assert_eq!(s.dis.clock, carpi_proto::DisClock::H12);

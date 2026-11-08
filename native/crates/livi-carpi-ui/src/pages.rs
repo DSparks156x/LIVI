@@ -1088,26 +1088,26 @@ fn dis_rows(v: &mut View, d: &carpi_proto::DisSettings) {
     );
     for (label, on, set) in [
         (
-            "Show nav when it starts",
-            d.auto_nav,
+            "Take over when a route starts",
+            d.claim_nav,
             DisPatch {
-                auto_nav: Some(!d.auto_nav),
+                claim_nav: Some(!d.claim_nav),
                 ..Default::default()
             },
         ),
         (
-            "Show calls",
-            d.auto_phone,
+            "Take over on a call",
+            d.claim_phone,
             DisPatch {
-                auto_phone: Some(!d.auto_phone),
+                claim_phone: Some(!d.claim_phone),
                 ..Default::default()
             },
         ),
         (
-            "Show a new track",
-            d.auto_media,
+            "Take over on a new track",
+            d.claim_media,
             DisPatch {
-                auto_media: Some(!d.auto_media),
+                claim_media: Some(!d.claim_media),
                 ..Default::default()
             },
         ),
@@ -2096,9 +2096,9 @@ mod tests {
             patch_of(v.side_act(Some(&Hit::Row(page)), -1)).default_page,
             Some(DisPage::Media)
         );
-        let calls = &v.rows[find(&v, "Show calls")];
+        let calls = &v.rows[find(&v, "Take over on a call")];
         assert!(calls.checked && calls.kind == RowKind::Toggle);
-        assert_eq!(patch_of(Some(&calls.act)).auto_phone, Some(false));
+        assert_eq!(patch_of(Some(&calls.act)).claim_phone, Some(false));
         assert_eq!(v.rows[find(&v, "Media layout")].value, "Text");
         let units = find(&v, "Units");
         assert_eq!(v.rows[units].value, "As the phone");

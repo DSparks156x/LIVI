@@ -16,8 +16,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use carpi_proto::{
-    BusInfo, DatalogAction, DatalogStatus, DiagAction, LightAction, Reading, Settings,
-    SettingsPatch, ToastLevel,
+    BusInfo, DatalogAction, DatalogStatus, DiagAction, JobEvent, LightAction, Reading, Settings,
+    SettingsPatch, ToastLevel, UpdateAction,
 };
 use serde::Deserialize;
 
@@ -69,6 +69,46 @@ pub struct Snapshot {
     pub datalog: Option<DatalogStatus>,
     /// Why the last data-log ask didn't go through.
     pub datalog_note: Option<String>,
+    /// The last update job this connection started.
+    pub update: UpdateJob,
+}
+
+/// An update job as it goes.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct UpdateJob {
+    /// Asked for, no job number yet.
+    pub asked: bool,
+    pub job: Option<u32>,
+    pub stage: String,
+    pub message: String,
+    /// Done and total in the stage.
+    pub progress: Option<(u64, Option<u64>)>,
+    /// How it ended: ok, and why.
+    pub finished: Option<(bool, String)>,
+}
+
+impl UpdateJob {
+    pub fn running(&self) -> bool {
+        (self.asked || self.job.is_some()) && self.finished.is_none()
+    }
+
+    fn event(&mut self, e: JobEvent) {
+        match e {
+            JobEvent::Stage { stage, message } => {
+                self.stage = stage;
+                self.message = message;
+                self.progress = None;
+            }
+            JobEvent::Progress { done, total, .. } => self.progress = Some((done, total)),
+            JobEvent::Finished { ok, message } => self.finished = Some((ok, message)),
+            _ => {}
+        }
+    }
+
+    fn refused(&mut self, why: String) {
+        self.asked = false;
+        self.finished = Some((false, why));
+    }
 }
 
 impl Snapshot {
@@ -112,6 +152,7 @@ impl Default for Snapshot {
             toast: None,
             datalog: None,
             datalog_note: None,
+            update: UpdateJob::default(),
         }
     }
 }
@@ -125,6 +166,7 @@ enum Ask {
     Light(LightAction),
     Diag(DiagAction),
     Datalog(DatalogAction),
+    Update(UpdateAction, bool),
     /// The names to watch changed.
     Watch,
 }
@@ -241,6 +283,21 @@ impl Client {
         self.ask(Ask::Datalog(action));
     }
 
+    /// Starts an update job; its events land in [`Snapshot::update`].
+    pub fn update(&self, action: UpdateAction, and_apply: bool) {
+        {
+            let mut s = self.snapshot();
+            s.update = UpdateJob {
+                asked: true,
+                ..Default::default()
+            };
+            if self.asks.is_none() {
+                s.update.refused("not connected".into());
+            }
+        }
+        self.ask(Ask::Update(action, and_apply));
+    }
+
     /// Diag catalog names to keep subscribed while a page is shown; carpid polls them for as
     /// long as they are. Asks carpid only when they change.
     pub fn watch(&self, names: Vec<String>) {
@@ -312,6 +369,8 @@ mod link {
         Light,
         Diag(DiagAction),
         Datalog,
+        Update,
+        Catalog,
         Ok,
     }
 
@@ -366,6 +425,9 @@ mod link {
                     }
                     Ok(Ev::Ask(Ask::Datalog(_))) => {
                         lock(&shared).datalog_note = Some("not connected".into())
+                    }
+                    Ok(Ev::Ask(Ask::Update(..))) => {
+                        lock(&shared).update.refused("not connected".into())
                     }
                     Ok(_) => {}
                     Err(RecvTimeoutError::Timeout) => break,
@@ -560,6 +622,10 @@ mod link {
                         self.send(&Request::Diag { action }, Pending::Diag(action))
                     }
                     Ok(Ev::Ask(Ask::Datalog(action))) => self.datalog(action),
+                    Ok(Ev::Ask(Ask::Update(action, and_apply))) => self.send(
+                        &Request::Update { action, and_apply },
+                        Pending::Update,
+                    ),
                     Ok(Ev::Ask(Ask::Watch)) if *shown => self.rewatch(),
                     Ok(Ev::Ask(Ask::Watch)) => Ok(()),
                     Ok(Ev::Got(from, resp)) if from == id => {
@@ -586,7 +652,11 @@ mod link {
                     return Ok(());
                 }
                 Response::Job { job, event } => {
-                    s.diag.event(job, event);
+                    if s.update.job == Some(job) {
+                        s.update.event(event);
+                    } else {
+                        s.diag.event(job, event);
+                    }
                     return Ok(());
                 }
                 // Not ours: only the bridge asks for commands.
@@ -605,7 +675,17 @@ mod link {
                     s.connected = true;
                     s.daemon = Some(daemon);
                     s.problem = None;
+                    drop(s);
+                    // Once a connection: the pickers' catalog.
+                    self.send(&Request::Catalog, Pending::Catalog)
+                        .map_err(|e| format!("carpid: {e}"))?;
+                    return Ok(());
                 }
+                (_, Response::Catalog { categories, values }) => {
+                    crate::catalog::set(categories, values);
+                }
+                // An old carpid: the built-in table stays.
+                (Some(Pending::Catalog), Response::Error { .. }) => {}
                 (Some(Pending::Hello), Response::Error { message }) => {
                     return Err(format!("carpid refused: {message}"));
                 }
@@ -627,6 +707,11 @@ mod link {
                 (Some(Pending::Settings | Pending::Light), Response::Error { message }) => {
                     s.settings_note = Some(message)
                 }
+                (Some(Pending::Update), Response::JobStarted { job }) => {
+                    s.update.asked = false;
+                    s.update.job = Some(job);
+                }
+                (Some(Pending::Update), Response::Error { message }) => s.update.refused(message),
                 (Some(Pending::Diag(action)), Response::JobStarted { job }) => {
                     s.diag.started(job, action)
                 }
@@ -713,6 +798,19 @@ impl Fixture {
                         crate::logging::apply(st, &action);
                     }
                 }
+                Ok(Ev::Ask(Ask::Update(..))) => {
+                    s.update.asked = false;
+                    s.update.job = Some(1);
+                    s.update.event(JobEvent::Stage {
+                        stage: "download".into(),
+                        message: "Downloading".into(),
+                    });
+                    s.update.event(JobEvent::Progress {
+                        stage: "download".into(),
+                        done: 12 << 20,
+                        total: Some(40 << 20),
+                    });
+                }
                 Ok(_) | Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return,
             }
@@ -796,6 +894,14 @@ mod tests {
             },
         );
         assert!(wait(&client, |s| s.connected));
+        assert_eq!(request(&mut s), Request::Catalog);
+        reply(
+            &mut s,
+            &Response::Catalog {
+                categories: vec!["Engine".into()],
+                values: vec![],
+            },
+        );
 
         client.shown(true);
         assert!(matches!(request(&mut s), Request::Subscribe { sub: 1, .. }));

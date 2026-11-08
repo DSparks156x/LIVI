@@ -239,40 +239,10 @@ fn main() {
     t.set_shown(false);
     shots.settle();
 
-    // The light page, focused on the brightness.
-    pages.open(PageId::Car, "light");
-    let v = pages.view(PageId::Car, &client.snapshot(), now);
-    shots.show(&v, v.start, true);
-    shots.save("10-light");
-    shots.show(&v, v.start + 5, false);
-    shots.save("11-light-day");
-
-    // Diagnostics and the Car page.
+    // Diagnostics. The Car Integration tab is drawn by livi-carpi-shots.
     let v = pages.view(PageId::Diagnostics, &client.snapshot(), now);
     shots.show(&v, 1, true);
     shots.save("12-diagnostics");
-    pages.reset(PageId::Car);
-    let v = pages.view(PageId::Car, &client.snapshot(), now);
-    shots.show(&v, 0, true);
-    shots.save("13-car");
-
-    // The cluster display's settings, scrolled to the new rows.
-    pages.open(PageId::Car, "");
-    let v = pages.view(PageId::Car, &client.snapshot(), now);
-    let settings = row(&v, "Settings");
-    pages.press(PageId::Car, &v, &settings, 0, &client);
-    let v = pages.view(PageId::Car, &client.snapshot(), now);
-    if let Hit::Row(i) = row(&v, "Units") {
-        // The list's height is only known once it's drawn: draw, then focus again to scroll.
-        shots.show(&v, v.rows[i].focus_at, true);
-        shots.save("19-dis-settings");
-        shots.show(&v, v.rows[i].focus_at, true);
-        shots.save("19-dis-settings");
-    }
-    if let Hit::Row(i) = row(&v, "Cover flash") {
-        shots.show(&v, v.rows[i].focus_at, false);
-        shots.save("20-dis-settings-day");
-    }
 
     // Logging: idle with a last run, running, a profile, its channels, a channel's picker.
     client.snapshot().datalog = Some(datalog());

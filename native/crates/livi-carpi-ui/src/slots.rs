@@ -41,8 +41,12 @@ impl Spec {
         !self.without.contains(&cat)
     }
 
+    /// carpid's catalog's categories when it's in, the built-in ones until then.
     fn categories(&self) -> impl Iterator<Item = &'static Category> + '_ {
-        CATEGORIES.iter().filter(|c| self.offers(c.id))
+        crate::catalog::categories()
+            .unwrap_or_else(|| CATEGORIES.iter().collect())
+            .into_iter()
+            .filter(|c| self.offers(c.id))
     }
 }
 
@@ -215,7 +219,8 @@ fn act(a: SlotAct) -> Act {
 
 /// Values only diagnostics give, and carpid polls while something watches them.
 pub fn polled(name: &str) -> bool {
-    MEASURED.iter().any(|m| m.0 == name && m.1 != NO_POLL)
+    crate::catalog::diag(name)
+        .unwrap_or_else(|| MEASURED.iter().any(|m| m.0 == name && m.1 != NO_POLL))
 }
 
 /// Whether the picker shows `name` without "Show unavailable": carpid sent it, or it's polled on
@@ -227,21 +232,38 @@ fn available(name: &str, snap: &Snapshot) -> bool {
 /// The names of a category, in picker order: the catalog's, then anything else carpid has that
 /// lands there, alphabetically, each with its sub-group.
 pub fn members(cat: &str, snap: &Snapshot) -> Vec<(String, String)> {
-    let mut known: Vec<(String, String)> = DEFS
-        .iter()
-        .filter(|d| d.cat == cat)
-        .map(|d| (d.sub.to_string(), d.name.to_string()))
-        .collect();
+    let listed = crate::catalog::members(cat);
+    let in_catalog = |n: &str| crate::catalog::entry(n).is_some();
+    let mut known: Vec<(String, String)> = listed.clone().unwrap_or_default();
+    // Ours the catalog doesn't have: the bridge's and the light model's.
+    known.extend(
+        DEFS.iter()
+            .filter(|d| place(d.name).0 == cat && !in_catalog(d.name))
+            .map(|d| (d.sub.to_string(), d.name.to_string())),
+    );
     let mut extra: Vec<(String, String)> = snap
         .values
         .names()
-        .filter(|n| !hidden(n) && crate::defs::find(n).is_none())
+        .filter(|n| !hidden(n) && crate::defs::find(n).is_none() && !in_catalog(n))
         .filter_map(|n| {
             let (c, sub) = place(n);
             (c == cat).then(|| (sub.into_owned(), n.to_string()))
         })
         .collect();
     extra.sort();
+    if listed.is_some() {
+        // The catalog's order, then ours by sub-group, then the rest.
+        let subs: Vec<String> = known.iter().fold(Vec::new(), |mut out, (s, _)| {
+            if !out.contains(s) {
+                out.push(s.clone());
+            }
+            out
+        });
+        let rank = |s: &str| subs.iter().position(|x| x == s).unwrap_or(subs.len());
+        known.sort_by_key(|(s, _)| rank(s));
+        known.extend(extra);
+        return known;
+    }
     // Known sub-groups keep the category's order; new ones go after, alphabetically.
     let subs = crate::defs::category(cat).map_or(&[][..], |c| c.subs);
     let rank = |s: &str| subs.iter().position(|x| *x == s).unwrap_or(subs.len());
@@ -328,10 +350,12 @@ impl Picker {
         now: Instant,
         spec: &Spec,
     ) -> View {
-        match self.cat {
+        let mut v = match self.cat {
             None => level1(title, current, recent, snap, spec),
             Some(cat) => self.level2(cat, current, recent, snap, now, spec),
-        }
+        };
+        v.custom = true;
+        v
     }
 
     fn level2(

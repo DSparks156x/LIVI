@@ -60,52 +60,124 @@ pub enum Act {
     Slots(SlotAct),
     /// Data logging: the run and the profiles.
     Log(crate::logging::LogAct),
+    /// Changes to the cluster display's readings pages.
+    Dis(DisAct),
+    /// Sets the time zone and goes back to the Power & clock screen.
+    Zone(String),
+    /// Starts an update (check, download, install) and goes back.
+    Update,
+    /// Back a screen.
+    Back,
 }
 
+/// A readings page change: page `p`, cell `c`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DisAct {
+    AddPage,
+    /// Asks, then removes the page.
+    RemovePage(usize),
+    /// Moves page `p` to position `to`.
+    MovePage(usize, usize),
+    Name(usize, i32),
+    MoveCell(usize, usize, i32),
+    Decimals(usize, usize, u8),
+    Unit(usize, usize, Option<String>),
+    /// Sets the icon and goes back.
+    Icon(usize, usize, Option<String>),
+    RemoveCell(usize, usize),
+}
+
+/// A screen of the Car Integration tab (docs/PAGES.md 5a).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CarScreen {
     Root,
+    Status,
+    AllValues,
     Buses,
-    Light,
-    Rnse,
-    Bridge,
-    Settings,
-    /// The cluster display's readings, and the picker for one of them.
-    Readings,
-    Reading(usize),
-    /// The key binding table, and one row of it.
-    Bindings,
-    Binding(usize),
-    /// Entering a new portal PIN.
-    Pin,
-    /// Every `light.` value, and one point of the manual curve.
-    LightValues,
+    Cluster,
+    /// The readings pages, one page, one value on it, its picker, a new value's picker, its
+    /// icon.
+    ReadingPages,
+    ReadingPage(usize),
+    Cell(usize, usize),
+    CellValue(usize, usize),
+    CellAdd(usize),
+    CellIcon(usize, usize),
+    Nav,
+    Calls,
+    Media,
+    Lighting,
+    /// The plot and the manual curve's points, and one point.
+    Curve,
     Point(usize),
+    Night,
+    Controls,
+    Wheel,
+    Faceplate,
+    /// One key's bindings ([`crate::keys::KEYS`] index), and the action picker for one row.
+    Key(usize),
+    Binding(usize, usize),
+    Logs,
     /// Data logging: the run and the profiles, one profile, its channels.
     Logging,
     LogProfile,
     LogChannels,
+    Power,
+    /// Time zone regions, and the zones in one.
+    Zones,
+    Zone(usize),
+    Avsd,
+    Picture,
+    Portal,
+    /// Entering a new portal PIN.
+    Pin,
+    Updates,
+    UpdateConfirm,
+    Advanced,
 }
 
 impl CarScreen {
     /// The screen back goes to; `None` on the first one.
     pub fn parent(self) -> Option<CarScreen> {
         use CarScreen as S;
-        match self {
-            S::Root => None,
-            S::Readings | S::Bindings | S::Pin => Some(S::Settings),
-            S::Reading(_) => Some(S::Readings),
-            S::Binding(_) => Some(S::Bindings),
-            S::LightValues | S::Point(_) => Some(S::Light),
-            S::LogProfile => Some(S::Logging),
-            S::LogChannels => Some(S::LogProfile),
-            _ => Some(S::Root),
-        }
+        Some(match self {
+            S::Root => return None,
+            S::AllValues | S::Buses => S::Status,
+            S::ReadingPages | S::Nav | S::Calls | S::Media => S::Cluster,
+            S::ReadingPage(_) => S::ReadingPages,
+            S::Cell(p, _) | S::CellAdd(p) => S::ReadingPage(p),
+            S::CellValue(p, c) | S::CellIcon(p, c) => S::Cell(p, c),
+            S::Curve | S::Night => S::Lighting,
+            S::Point(_) => S::Curve,
+            S::Wheel | S::Faceplate => S::Controls,
+            S::Key(k) => match crate::keys::KEYS.get(k) {
+                Some(key) if key.wheel => S::Wheel,
+                _ => S::Faceplate,
+            },
+            S::Binding(k, _) => S::Key(k),
+            S::Logging => S::Logs,
+            S::LogProfile => S::Logging,
+            S::LogChannels => S::LogProfile,
+            S::Zones => S::Power,
+            S::Zone(_) => S::Zones,
+            S::Picture => S::Avsd,
+            S::Pin => S::Portal,
+            S::UpdateConfirm => S::Updates,
+            _ => S::Root,
+        })
     }
 
     /// Screens below the first one.
     pub fn depth(self) -> usize {
         std::iter::successors(self.parent(), |s| s.parent()).count()
+    }
+
+    /// The light screens: carpid's focus is `page:light` while one is up.
+    pub fn light(self) -> bool {
+        matches!(
+            self,
+            CarScreen::Lighting | CarScreen::Curve | CarScreen::Point(_) | CarScreen::Night
+        )
     }
 }
 
@@ -133,6 +205,8 @@ pub struct Row {
     pub last: bool,
     pub act: Act,
     pub side: Side,
+    /// A LIVI icon name, for the tab's own rows.
+    pub icon: Option<&'static str>,
 }
 
 impl Row {
@@ -152,6 +226,7 @@ impl Row {
             last: false,
             act: Act::None,
             side: None,
+            icon: None,
         }
     }
 
@@ -182,6 +257,16 @@ impl Row {
 
     pub fn tag(mut self, tag: impl Into<String>) -> Self {
         self.tag = tag.into();
+        self
+    }
+
+    pub fn icon(mut self, icon: &'static str) -> Self {
+        self.icon = Some(icon);
+        self
+    }
+
+    pub fn alert(mut self, on: bool) -> Self {
+        self.alert = on;
         self
     }
 }
@@ -266,6 +351,10 @@ pub struct View {
     pub side: Side,
     /// Focus index to start at when the view opens.
     pub start: i32,
+    /// Drawn by our own Slint page, not as LIVI settings rows: the picker.
+    pub custom: bool,
+    /// A pick from a list: LIVI's select screen, the checked row is the current one.
+    pub select: bool,
 }
 
 /// What a focus index points at.
@@ -294,6 +383,8 @@ impl View {
             spots: Vec::new(),
             side: None,
             start: -1,
+            custom: false,
+            select: false,
         }
     }
 

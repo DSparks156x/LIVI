@@ -23,10 +23,12 @@
 //!
 //! `LIVI_UI_PAGE` takes `carpi/data`, `carpi/diagnostics`, `carpi/car` or `carpi/car/light`.
 
+pub mod catalog;
 pub mod client;
 pub mod config;
 pub mod defs;
 pub mod diag;
+pub mod keys;
 pub mod light;
 pub mod logging;
 pub mod pages;

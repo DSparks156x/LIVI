@@ -405,6 +405,12 @@ pub fn hidden(name: &str) -> bool {
 /// Category and sub-group of any name: the table's, or Other with the name's first part as the
 /// sub-group. Unknown bridge names go with Phone & nav.
 pub fn place(name: &str) -> (&'static str, Cow<'static, str>) {
+    if let Some(e) = crate::catalog::entry(name)
+        && let Some(c) = crate::catalog::categories()
+            .and_then(|cats| cats.into_iter().find(|c| c.id == e.category))
+    {
+        return (c.id, Cow::Owned(e.sub));
+    }
     if let Some(d) = find(name) {
         return (d.cat, Cow::Borrowed(d.sub));
     }
@@ -452,9 +458,11 @@ pub struct Described {
 /// The definition of `name`, or one guessed from it: the last part, unit suffix dropped, as the
 /// label.
 pub fn describe(name: &str) -> Described {
+    let entry = crate::catalog::entry(name);
     if let Some(d) = find(name) {
         return Described {
-            label: Cow::Borrowed(d.label),
+            label: entry
+                .map_or(Cow::Borrowed(d.label), |e| Cow::Owned(e.label)),
             unit: d.unit,
             kind: d.kind,
         };
@@ -464,6 +472,17 @@ pub fn describe(name: &str) -> Described {
         .iter()
         .find_map(|(s, u, dp)| last.strip_suffix(s).map(|stem| (stem, *u, *dp)))
         .unwrap_or((last, "", 2));
+    if let Some(e) = entry {
+        let unit = SUFFIXES
+            .iter()
+            .find(|(_, u, _)| *u == e.unit)
+            .map_or(unit, |(_, u, _)| *u);
+        return Described {
+            label: Cow::Owned(e.label),
+            unit,
+            kind: Kind::Num(dp),
+        };
+    }
     Described {
         label: Cow::Owned(capital(stem)),
         unit,

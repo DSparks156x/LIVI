@@ -1,0 +1,20 @@
+[package]
+name = "livi-carpi-shots"
+description = "The Car Integration tab drawn offscreen with LIVI's own settings view"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+carpi-proto = { path = "../../../../crates/carpi-proto" }
+livi-carpi-ui.workspace = true
+livi-ui-model.workspace = true
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+slint = { version = "1.18.1", default-features = false, features = [
+  "std",
+  "compat-1-2",
+  "renderer-software",
+] }
+# Image and SVG loading, which LIVI gets through its winit backend.
+i-slint-core = { version = "=1.18.1", default-features = false, features = ["image-decoders", "svg"] }

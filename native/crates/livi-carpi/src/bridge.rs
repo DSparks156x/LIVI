@@ -3,8 +3,11 @@
 
 //! LIVI's state as carpid's bridge sections. Each section goes out only when it changed.
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use carpi_proto::{
-    BridgeUpdate, CallState, Lane, LaneArrow, MediaState, NavState, PhoneState, Projection,
+    BridgeUpdate, CallState, Lane, LaneArrow, MEDIA_ART_MAX_BYTES, MediaArt, MediaState, NavState,
+    PhoneState, Projection, media_art_id, media_art_mime,
 };
 use livi_core_proto::state::{
     Call, CallStatus, DeviceStatus, Front, Navigation, NowPlaying, Protocol, State,
@@ -25,6 +28,8 @@ pub struct Sent {
     nav: Option<Option<NavState>>,
     icon: Option<Option<String>>,
     media: Option<Option<MediaState>>,
+    /// Hash of the cover's base64 text, so an unchanged cover costs no decode.
+    art: Option<Option<u64>>,
     call: Option<Option<CallState>>,
     phone: Option<Option<PhoneState>>,
     focus: Option<String>,
@@ -58,6 +63,16 @@ impl Sent {
         }
         if let Some(media) = changed(&mut self.media, media(&state.now_playing)) {
             out.push(BridgeUpdate::Media { media });
+        }
+        let art = state
+            .now_playing
+            .artwork
+            .as_deref()
+            .filter(|a| !a.is_empty());
+        if changed(&mut self.art, art.map(|a| media_art_id(a.as_bytes()))).is_some() {
+            out.push(BridgeUpdate::MediaArt {
+                art: art.and_then(media_art),
+            });
         }
         if let Some(call) = changed(&mut self.call, call(&state.calls)) {
             out.push(BridgeUpdate::Call { call });
@@ -288,6 +303,19 @@ fn media(np: &NowPlaying) -> Option<MediaState> {
     })
 }
 
+/// LIVI keeps the cover as base64 of the phone's bytes; they go on as they are.
+fn media_art(base64: &str) -> Option<MediaArt> {
+    let bytes = STANDARD.decode(base64).ok()?;
+    if bytes.is_empty() || bytes.len() > MEDIA_ART_MAX_BYTES {
+        return None;
+    }
+    Some(MediaArt {
+        id: media_art_id(&bytes),
+        mime: media_art_mime(&bytes).into(),
+        data_base64: base64.to_string(),
+    })
+}
+
 /// The call that matters most: one ringing, then one going on, then one held.
 fn call(calls: &[Call]) -> Option<CallState> {
     let rank = |c: &&Call| match c.status {
@@ -402,7 +430,8 @@ mod tests {
         let mut sent = Sent::default();
         let mut state = guided();
         let first = sent.updates(&state, "/media");
-        assert_eq!(first.len(), 7);
+        assert_eq!(first.len(), 8);
+        assert!(first.contains(&BridgeUpdate::MediaArt { art: None }));
         assert!(first.contains(&BridgeUpdate::Projection {
             projection: Some(Projection {
                 kind: "android_auto".into(),
@@ -579,5 +608,59 @@ mod tests {
         assert_eq!(maneuver(49, None), ("slight_turn", Some("left")));
         assert_eq!(maneuver(4, Some(SIDE_LEFT)), ("u_turn", Some("left")));
         assert_eq!(shape(-180), "uturn_left");
+    }
+
+    #[test]
+    fn a_cover_goes_once_and_clears() {
+        let jpeg = [0xFF, 0xD8, 0xFF, 0xE0, 0, 0x10];
+        let mut sent = Sent::default();
+        let mut state = State::default();
+        state.now_playing.title = Some("One".into());
+        state.now_playing.artwork = Some(STANDARD.encode(jpeg));
+        let first = sent.updates(&state, "/media");
+        let art = MediaArt {
+            id: media_art_id(&jpeg),
+            mime: "image/jpeg".into(),
+            data_base64: STANDARD.encode(jpeg),
+        };
+        assert!(first.contains(&BridgeUpdate::MediaArt {
+            art: Some(art.clone())
+        }));
+
+        // Same cover, new position or track text: not sent again.
+        state.now_playing.elapsed_ms = Some(5000.0);
+        state.now_playing.title = Some("Two".into());
+        let next = sent.updates(&state, "/media");
+        assert!(
+            !next
+                .iter()
+                .any(|u| matches!(u, BridgeUpdate::MediaArt { .. }))
+        );
+        state.now_playing.artwork = Some(STANDARD.encode(jpeg));
+        assert!(sent.updates(&state, "/media").is_empty());
+
+        // A new cover goes, with its own id.
+        let png = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        state.now_playing.artwork = Some(STANDARD.encode(png));
+        let [BridgeUpdate::MediaArt { art: Some(new) }] = &sent.updates(&state, "/media")[..]
+        else {
+            panic!("one MediaArt");
+        };
+        assert_eq!(new.mime, "image/png");
+        assert_ne!(new.id, art.id);
+
+        // Gone (session ended), then empty or too big: cleared once.
+        state.now_playing.artwork = None;
+        assert_eq!(
+            sent.updates(&state, "/media"),
+            [BridgeUpdate::MediaArt { art: None }]
+        );
+        state.now_playing.artwork = Some(String::new());
+        assert!(sent.updates(&state, "/media").is_empty());
+        state.now_playing.artwork = Some(STANDARD.encode(vec![0xFF; MEDIA_ART_MAX_BYTES + 1]));
+        assert_eq!(
+            sent.updates(&state, "/media"),
+            [BridgeUpdate::MediaArt { art: None }]
+        );
     }
 }

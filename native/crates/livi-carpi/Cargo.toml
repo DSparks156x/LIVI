@@ -6,6 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+base64.workspace = true
 # From the pq35-carpi superproject: this fork is its livi/ submodule.
 carpi-proto = { path = "../../../../crates/carpi-proto" }
 livi-aa-stack.workspace = true

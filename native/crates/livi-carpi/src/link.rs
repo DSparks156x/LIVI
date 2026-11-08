@@ -470,7 +470,8 @@ mod tests {
             Request::Subscribe { sub: SUB, .. }
         ));
         assert_eq!(request(&mut daemon).await, Request::Commands);
-        for _ in 0..7 {
+        // Every bridge section once.
+        for _ in 0..8 {
             assert!(matches!(request(&mut daemon).await, Request::Bridge { .. }));
         }
         reply(

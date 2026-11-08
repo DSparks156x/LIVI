@@ -1171,10 +1171,21 @@ fn dis_rows(v: &mut View, d: &carpi_proto::DisSettings) {
     } else {
         format!("{} s", d.cover_flash_s)
     };
-    v.row(Row::new(RowKind::Step, "Cover flash", shown).side(
-        flash(cfg::flash_step(d.cover_flash_s, -1)),
-        flash(cfg::flash_step(d.cover_flash_s, 1)),
-    ));
+    // A choice like Units: push (or a tap) steps on and wraps to Off; the
+    // D-pad steps both ways. As a Step row a push did nothing (Drew).
+    let at = cfg::COVER_FLASH
+        .iter()
+        .rposition(|x| *x <= d.cover_flash_s)
+        .unwrap_or(0);
+    let next = cfg::COVER_FLASH[(at + 1) % cfg::COVER_FLASH.len()];
+    v.row(
+        Row::new(RowKind::Choice, "Cover flash", shown)
+            .act(flash(next))
+            .side(
+                flash(cfg::flash_step(d.cover_flash_s, -1)),
+                flash(cfg::flash_step(d.cover_flash_s, 1)),
+            ),
+    );
 }
 
 fn light_patch(p: LightPatch, back: bool) -> Act {
@@ -2106,6 +2117,11 @@ mod tests {
         assert_eq!(
             patch_of(v.side_act(Some(&Hit::Row(flash)), -1)).cover_flash_s,
             Some(3.0)
+        );
+        // A press steps on too (it did nothing as a Step row).
+        assert_eq!(
+            patch_of(Some(&v.rows[flash].act)).cover_flash_s,
+            Some(5.0)
         );
     }
 

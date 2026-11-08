@@ -6,13 +6,14 @@
 //! Same socket and protocol as livi-carpi (`$CARPID_SOCKET` or `$XDG_RUNTIME_DIR/carpid.sock`,
 //! length-prefixed JSON). It stays connected, but only asks for anything while one of our pages is
 //! on screen: a subscription to every value, plus `Values` and `Bus` once a second so ages stay
-//! true. `CARPI_UI_FIXTURE=<file.json>` shows a fixed set instead, for snapshots without carpid.
+//! true, and carpid's settings each time a page comes up. `CARPI_UI_FIXTURE=<file.json>` shows a
+//! fixed set instead, for snapshots without carpid.
 
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use carpi_proto::{BusInfo, Reading};
+use carpi_proto::{BusInfo, Reading, Settings, SettingsPatch};
 use serde::Deserialize;
 
 use crate::diag::Diag;
@@ -39,6 +40,12 @@ pub struct Snapshot {
     pub capture: Capture,
     /// Empty until carpid has a diag API.
     pub diag: Diag,
+    /// carpid's settings, from the last `Settings` reply.
+    pub settings: Option<Settings>,
+    /// Settings saved that only take effect after a restart of carpid.
+    pub restart_needed: Vec<String>,
+    /// Why the last settings change didn't go through, or a note about one.
+    pub settings_note: Option<String>,
 }
 
 impl Default for Snapshot {
@@ -51,6 +58,9 @@ impl Default for Snapshot {
             buses: None,
             capture: Capture::Idle,
             diag: Diag::default(),
+            settings: None,
+            restart_needed: Vec::new(),
+            settings_note: None,
         }
     }
 }
@@ -59,6 +69,8 @@ impl Default for Snapshot {
 enum Ask {
     Shown(bool),
     SaveCapture,
+    /// `None` asks for the settings, a patch changes them.
+    Settings(Option<Box<SettingsPatch>>),
 }
 
 #[derive(Clone)]
@@ -129,6 +141,24 @@ impl Client {
         self.ask(Ask::SaveCapture);
     }
 
+    /// Asks carpid for its settings again.
+    pub fn settings(&self) {
+        self.ask(Ask::Settings(None));
+    }
+
+    /// Changes carpid's settings; the reply replaces [`Snapshot::settings`].
+    pub fn set(&self, patch: SettingsPatch) {
+        if self.asks.is_none() {
+            self.snapshot().settings_note = Some("not connected".into());
+        }
+        self.ask(Ask::Settings(Some(Box::new(patch))));
+    }
+
+    /// A note the pages show with the settings.
+    pub fn note(&self, note: impl Into<String>) {
+        self.snapshot().settings_note = Some(note.into());
+    }
+
     fn ask(&self, ask: Ask) {
         if let Some(tx) = &self.asks {
             let _ = tx.send(Ev::Ask(ask));
@@ -140,7 +170,7 @@ impl Client {
 enum Ev {
     Ask(Ask),
     #[cfg_attr(not(unix), allow(dead_code))]
-    Got(u64, carpi_proto::Response),
+    Got(u64, Box<carpi_proto::Response>),
     #[cfg_attr(not(unix), allow(dead_code))]
     Gone(u64, String),
 }
@@ -178,6 +208,7 @@ mod link {
         Values,
         Bus,
         Capture,
+        Settings,
         Ok,
     }
 
@@ -215,6 +246,9 @@ mod link {
                     Ok(Ev::Ask(Ask::Shown(on))) => shown = on,
                     Ok(Ev::Ask(Ask::SaveCapture)) => {
                         lock(&shared).capture = Capture::Failed("not connected".into())
+                    }
+                    Ok(Ev::Ask(Ask::Settings(Some(_)))) => {
+                        lock(&shared).settings_note = Some("not connected".into())
                     }
                     Ok(_) => {}
                     Err(RecvTimeoutError::Timeout) => break,
@@ -257,7 +291,7 @@ mod link {
                 loop {
                     match read(&mut reader) {
                         Ok(resp) => {
-                            if back.send(Ev::Got(id, resp)).is_err() {
+                            if back.send(Ev::Got(id, Box::new(resp))).is_err() {
                                 return;
                             }
                         }
@@ -308,10 +342,19 @@ mod link {
                     period_ms: PERIOD_MS,
                 };
                 self.send(&req, Pending::Ok)?;
+                self.settings(None)?;
                 self.poll()
             } else {
                 self.send(&Request::Unsubscribe { sub: SUB }, Pending::Ok)
             }
+        }
+
+        fn settings(&mut self, patch: Option<Box<SettingsPatch>>) -> io::Result<()> {
+            let action = match patch {
+                None => carpi_proto::SettingsAction::Get,
+                Some(patch) => carpi_proto::SettingsAction::Set { patch },
+            };
+            self.send(&Request::Settings { action }, Pending::Settings)
         }
 
         fn drive(
@@ -352,8 +395,9 @@ mod link {
                         lock(shared).capture = Capture::Saving;
                         self.send(&Request::SaveCapture { path: None }, Pending::Capture)
                     }
+                    Ok(Ev::Ask(Ask::Settings(patch))) => self.settings(patch),
                     Ok(Ev::Got(from, resp)) if from == id => {
-                        if let Err(why) = self.got(shared, resp) {
+                        if let Err(why) = self.got(shared, *resp) {
                             return why;
                         }
                         Ok(())
@@ -403,6 +447,20 @@ mod link {
                 (Some(Pending::Capture), Response::Error { message }) => {
                     s.capture = Capture::Failed(message)
                 }
+                (
+                    _,
+                    Response::Settings {
+                        settings,
+                        restart_needed,
+                    },
+                ) => {
+                    s.settings = Some(settings);
+                    s.restart_needed = restart_needed;
+                    s.settings_note = None;
+                }
+                (Some(Pending::Settings), Response::Error { message }) => {
+                    s.settings_note = Some(message)
+                }
                 (_, Response::Error { message }) => s.problem = Some(message),
                 _ => {}
             }
@@ -411,13 +469,15 @@ mod link {
     }
 }
 
-/// A fixed set of readings for snapshots and tests: `{"values": [Reading], "buses": [BusInfo]}`.
+/// A fixed set of readings for snapshots and tests:
+/// `{"values": [Reading], "buses": [BusInfo], "settings": Settings}`.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct Fixture {
     pub daemon: Option<String>,
     pub values: Vec<Reading>,
     pub buses: Option<Vec<BusInfo>>,
+    pub settings: Option<Settings>,
 }
 
 impl Fixture {
@@ -429,7 +489,11 @@ impl Fixture {
     /// Fills a snapshot now and every second, so nothing goes stale.
     pub fn start(self) -> Client {
         let shared = Arc::new(Mutex::new(Snapshot::default()));
-        self.fill(&mut shared.lock().unwrap_or_else(|e| e.into_inner()));
+        {
+            let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
+            self.fill(&mut s);
+            s.settings = self.settings.clone();
+        }
         let (tx, rx) = mpsc::channel();
         let inner = shared.clone();
         let _ = std::thread::Builder::new()
@@ -458,6 +522,11 @@ impl Fixture {
                     s.capture = Capture::Saved {
                         path: "fixture.log".into(),
                         frames: 0,
+                    }
+                }
+                Ok(Ev::Ask(Ask::Settings(Some(patch)))) => {
+                    if let Some(settings) = &mut s.settings {
+                        crate::settings::apply(settings, &patch);
                     }
                 }
                 Ok(_) | Err(RecvTimeoutError::Timeout) => {}
@@ -492,6 +561,7 @@ mod tests {
         assert!(s.values.get("engine.rpm").is_some());
         assert_eq!(s.values.get("wheels.rl_pulses").unwrap().value, None);
         assert_eq!(s.buses.as_ref().unwrap()[0].ring.len(), 4);
+        assert_eq!(s.settings.as_ref().unwrap().bindings.len(), 6);
         drop(s);
         client.save_capture();
         assert!(wait(&client, |s| matches!(
@@ -539,6 +609,19 @@ mod tests {
         client.shown(true);
         assert!(matches!(request(&mut s), Request::Subscribe { sub: 1, .. }));
         reply(&mut s, &Response::Ok);
+        assert_eq!(
+            request(&mut s),
+            Request::Settings {
+                action: carpi_proto::SettingsAction::Get
+            }
+        );
+        reply(
+            &mut s,
+            &Response::Settings {
+                settings: crate::settings::sample(),
+                restart_needed: vec!["tx".into()],
+            },
+        );
         assert_eq!(request(&mut s), Request::Values { prefix: "".into() });
         reply(&mut s, &Response::Values { items: vec![] });
         assert_eq!(request(&mut s), Request::Bus);
@@ -555,6 +638,33 @@ mod tests {
             },
         );
         assert!(wait(&client, |s| s.values.get("engine.rpm").is_some()));
+        assert!(wait(&client, |s| s.settings.is_some()
+            && s.restart_needed == ["tx"]));
+
+        client.set(carpi_proto::SettingsPatch {
+            dis_enabled: Some(false),
+            ..Default::default()
+        });
+        loop {
+            match request(&mut s) {
+                Request::Settings {
+                    action: carpi_proto::SettingsAction::Set { patch },
+                } => {
+                    assert_eq!(patch.dis_enabled, Some(false));
+                    break;
+                }
+                Request::Values { .. } => reply(&mut s, &Response::Values { items: vec![] }),
+                Request::Bus => reply(&mut s, &Response::Bus { buses: vec![] }),
+                other => panic!("{other:?}"),
+            }
+        }
+        reply(
+            &mut s,
+            &Response::Error {
+                message: "dis: bad".into(),
+            },
+        );
+        assert!(wait(&client, |s| s.settings_note.as_deref() == Some("dis: bad")));
 
         client.save_capture();
         // Polls may come first.

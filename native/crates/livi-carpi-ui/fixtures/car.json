@@ -62,6 +62,48 @@
     { "name": "media.title", "value": "Track", "age_ms": 900 },
     { "name": "ui.focus", "value": "page:car", "age_ms": 900 }
   ],
+  "settings": {
+    "tx_enabled": true,
+    "power_shutdown": true,
+    "light": {
+      "auto_brightness": true,
+      "scroll_trim": true,
+      "ambient_source": "cluster",
+      "curve_mode": "learned",
+      "manual_curve": [
+        { "ambient": 0.0, "pct": 12 },
+        { "ambient": 1.0, "pct": 30 },
+        { "ambient": 1.8, "pct": 70 },
+        { "ambient": 2.4, "pct": 100 }
+      ],
+      "learned": [
+        { "source": "cluster", "ambient": 0.6, "pct": 18 },
+        { "source": "cluster", "ambient": 1.4, "pct": 55 }
+      ],
+      "dark_mode_source": "headlights",
+      "night_threshold": 0.8,
+      "night_hysteresis": 0.15,
+      "night_dwell_s": 10.0,
+      "night_from": "19:00",
+      "day_from": "07:00"
+    },
+    "dis": {
+      "enabled": true,
+      "readings": [
+        { "key": "engine.coolant_c", "label": "COL" },
+        { "key": "power.battery_v", "label": "BAT", "decimals": 1 }
+      ]
+    },
+    "bindings": [
+      { "table": "dis_toggle", "key": "mode", "gesture": "long", "action": "toggle" },
+      { "table": "system", "key": "mode", "gesture": "extended", "action": "save_capture" },
+      { "table": "car", "key": "nav", "gesture": "short", "action": "open_nav" },
+      { "table": "livi", "key": "wheel_up", "gesture": "short", "action": "up" },
+      { "table": "livi", "key": "wheel_down", "gesture": "short", "action": "down" },
+      { "table": "livi", "key": "ptt", "gesture": "long", "action": "voice" }
+    ],
+    "portal_pin_set": true
+  },
   "buses": [
     {
       "role": "ican",

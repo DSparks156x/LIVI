@@ -27,6 +27,7 @@ pub mod config;
 pub mod defs;
 pub mod diag;
 pub mod pages;
+pub mod settings;
 pub mod values;
 pub mod view;
 

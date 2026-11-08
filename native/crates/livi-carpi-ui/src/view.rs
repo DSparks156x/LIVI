@@ -24,7 +24,7 @@ pub enum RowKind {
 }
 
 /// What pressing something does. The page that built the view knows what each one means.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Act {
     None,
     Group(&'static str),
@@ -34,6 +34,11 @@ pub enum Act {
     Module(usize),
     Car(CarScreen),
     Capture,
+    /// Sends a settings change to carpid; with `true`, goes back a screen too.
+    Patch(Box<carpi_proto::SettingsPatch>, bool),
+    PinDigit(u8),
+    PinDelete,
+    PinSave,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +49,33 @@ pub enum CarScreen {
     Rnse,
     Bridge,
     Settings,
+    /// The cluster display's readings, and one slot of them.
+    Readings,
+    Reading(usize),
+    /// The key binding table, and one row of it.
+    Bindings,
+    Binding(usize),
+    /// Entering a new portal PIN.
+    Pin,
+}
+
+impl CarScreen {
+    /// The screen back goes to; `None` on the first one.
+    pub fn parent(self) -> Option<CarScreen> {
+        use CarScreen as S;
+        match self {
+            S::Root => None,
+            S::Readings | S::Bindings | S::Pin => Some(S::Settings),
+            S::Reading(_) => Some(S::Readings),
+            S::Binding(_) => Some(S::Bindings),
+            _ => Some(S::Root),
+        }
+    }
+
+    /// Screens below the first one.
+    pub fn depth(self) -> usize {
+        std::iter::successors(self.parent(), |s| s.parent()).count()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

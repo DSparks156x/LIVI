@@ -6,13 +6,14 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use carpi_proto::{BusInfo, Value};
+use carpi_proto::{BusInfo, PinChange, Settings, SettingsPatch, Value};
 
 use crate::PageId;
 use crate::client::{Capture, Client, Snapshot};
 use crate::config::{self, Saved};
 use crate::defs::{DEFS, GROUPS, MAX_CELLS, section};
 use crate::diag::GROUP_SLOTS;
+use crate::settings::{self as cfg, DIS_SLOTS};
 use crate::values::{NONE, Store, age, show};
 use crate::view::{Act, CarScreen, Cell, Hit, Layout, Row, RowKind, View};
 
@@ -32,6 +33,9 @@ const SECTIONS: [&str; 10] = [
     "",
 ];
 
+/// Longest portal PIN the entry takes.
+const PIN_MAX: usize = 8;
+
 /// After pressing something.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Moved {
@@ -49,6 +53,8 @@ pub struct Pages {
     module: Option<usize>,
     car: CarScreen,
     trail: Vec<i32>,
+    /// The portal PIN being entered.
+    pin: String,
 }
 
 impl Pages {
@@ -68,6 +74,7 @@ impl Pages {
             module: None,
             car: CarScreen::Root,
             trail: Vec::new(),
+            pin: String::new(),
         }
     }
 
@@ -76,25 +83,30 @@ impl Pages {
     }
 
     pub fn depth(&self, page: PageId) -> usize {
-        let deep = match page {
-            PageId::Data => self.editing,
-            PageId::Diagnostics => self.module.is_some(),
-            PageId::Car => self.car != CarScreen::Root,
-        };
-        usize::from(deep)
+        match page {
+            PageId::Data => usize::from(self.editing),
+            PageId::Diagnostics => usize::from(self.module.is_some()),
+            PageId::Car => self.car.depth(),
+        }
     }
 
+    /// One screen up.
     fn close(&mut self, page: PageId) {
         match page {
             PageId::Data => self.editing = false,
             PageId::Diagnostics => self.module = None,
-            PageId::Car => self.car = CarScreen::Root,
+            PageId::Car => self.car = self.car.parent().unwrap_or(CarScreen::Root),
+        }
+        if self.car != CarScreen::Pin {
+            self.pin.clear();
         }
     }
 
     /// Back to the page's first screen.
     pub fn reset(&mut self, page: PageId) {
-        self.close(page);
+        while self.depth(page) > 0 {
+            self.close(page);
+        }
         self.trail.clear();
     }
 
@@ -158,6 +170,31 @@ impl Pages {
                 client.save_capture();
                 false
             }
+            Act::Patch(patch, back) => {
+                client.set((**patch).clone());
+                if *back {
+                    return self.back(page).map_or(Moved::Stay, Moved::Closed);
+                }
+                false
+            }
+            Act::PinDigit(d) => {
+                if self.pin.len() < PIN_MAX {
+                    self.pin.push(char::from(b'0' + d % 10));
+                }
+                false
+            }
+            Act::PinDelete => {
+                self.pin.pop();
+                false
+            }
+            Act::PinSave => {
+                let pin = std::mem::take(&mut self.pin);
+                client.set(SettingsPatch {
+                    portal_pin: Some(PinChange::Set { pin }),
+                    ..Default::default()
+                });
+                return self.back(page).map_or(Moved::Stay, Moved::Closed);
+            }
         };
         if opened {
             self.trail.push(focus);
@@ -182,7 +219,7 @@ impl Pages {
                 Some(i) => module(snap, i),
                 None => modules(snap),
             },
-            PageId::Car => car(self.car, snap, now),
+            PageId::Car => car(self.car, snap, now, &self.pin),
         }
     }
 
@@ -418,7 +455,7 @@ fn module(snap: &Snapshot, i: usize) -> View {
     v.finish()
 }
 
-fn car(screen: CarScreen, snap: &Snapshot, now: Instant) -> View {
+fn car(screen: CarScreen, snap: &Snapshot, now: Instant, pin: &str) -> View {
     let note = if snap.connected {
         String::new()
     } else {
@@ -434,7 +471,12 @@ fn car(screen: CarScreen, snap: &Snapshot, now: Instant) -> View {
         CarScreen::Light => listed(snap, now, note, "Light", &["light."]),
         CarScreen::Rnse => listed(snap, now, note, "RNS-E", &["rnse."]),
         CarScreen::Bridge => bridge(snap, now, note),
-        CarScreen::Settings => settings(),
+        CarScreen::Settings => settings(snap),
+        CarScreen::Readings => readings(snap),
+        CarScreen::Reading(i) => dis_slot(snap, now, i),
+        CarScreen::Bindings => bindings(snap),
+        CarScreen::Binding(i) => binding(snap, i),
+        CarScreen::Pin => pin_entry(snap, pin),
     }
 }
 
@@ -502,10 +544,12 @@ fn car_root(snap: &Snapshot, note: String) -> View {
     row.mono = matches!(snap.capture, Capture::Saved { .. });
     v.row(row);
     v.section("Settings");
-    v.row(
-        Row::new(RowKind::Route, "Settings", "read-only, API coming")
-            .act(Act::Car(CarScreen::Settings)),
-    );
+    let tx = match &snap.settings {
+        Some(s) if s.tx_enabled => "TX on",
+        Some(_) => "TX off",
+        None => NONE,
+    };
+    v.row(Row::new(RowKind::Route, "Settings", tx).act(Act::Car(CarScreen::Settings)));
     v.finish()
 }
 
@@ -601,27 +645,243 @@ fn bridge(snap: &Snapshot, now: Instant, note: String) -> View {
     v.finish()
 }
 
-fn settings() -> View {
-    let mut v = View::new(Layout::List, "Settings", true)
-        .note("Read-only: settings API coming. carpid's config file still decides.");
-    for (section, rows) in [
-        (
-            "Brightness",
-            &[
-                "Night threshold",
-                "Day threshold",
-                "Panel level by day",
-                "Panel level at night",
-            ][..],
-        ),
-        ("CAN", &["TX enabled"][..]),
-        ("Power", &["Shutdown enabled"][..]),
-        ("Keys", &["Key bindings"][..]),
-    ] {
-        v.section(section);
-        for r in rows {
-            v.row(Row::new(RowKind::Info, *r, NONE).enabled(false));
+/// The note over a settings screen: no connection, a failed change, or a restart to do.
+fn settings_note(snap: &Snapshot) -> String {
+    if !snap.connected {
+        return problem(snap);
+    }
+    let mut lines = Vec::new();
+    if let Some(n) = &snap.settings_note {
+        lines.push(n.clone());
+    }
+    if !snap.restart_needed.is_empty() {
+        lines.push(format!(
+            "Saved. Takes effect after carpid restarts: {}.",
+            snap.restart_needed.join(", ")
+        ));
+    }
+    lines.join(" ")
+}
+
+fn patch(p: SettingsPatch, back: bool) -> Act {
+    Act::Patch(Box::new(p), back)
+}
+
+fn toggle(label: &str, on: bool, act: Act) -> Row {
+    let mut row = Row::new(RowKind::Toggle, label, "").act(act);
+    row.checked = on;
+    row
+}
+
+/// A settings screen, or one saying they haven't come yet.
+fn with_settings(snap: &Snapshot, title: &str, body: impl FnOnce(&mut View, &Settings)) -> View {
+    let mut v = View::new(Layout::List, title, true).note(settings_note(snap));
+    match &snap.settings {
+        Some(s) => body(&mut v, s),
+        None => v.row(Row::new(RowKind::Info, "Settings", "not from carpid yet").dimmed(true)),
+    }
+    v.finish()
+}
+
+fn settings(snap: &Snapshot) -> View {
+    with_settings(snap, "Settings", |v, s| {
+        v.section("CAN");
+        v.row(toggle(
+            "TX enabled",
+            s.tx_enabled,
+            patch(
+                SettingsPatch {
+                    tx_enabled: Some(!s.tx_enabled),
+                    ..Default::default()
+                },
+                false,
+            ),
+        ));
+        v.section("Power");
+        v.row(toggle(
+            "Shutdown on request",
+            s.power_shutdown,
+            patch(
+                SettingsPatch {
+                    power_shutdown: Some(!s.power_shutdown),
+                    ..Default::default()
+                },
+                false,
+            ),
+        ));
+        v.section("Cluster display");
+        v.row(toggle(
+            "Cluster display",
+            s.dis.enabled,
+            patch(
+                SettingsPatch {
+                    dis_enabled: Some(!s.dis.enabled),
+                    ..Default::default()
+                },
+                false,
+            ),
+        ));
+        v.row(
+            Row::new(
+                RowKind::Route,
+                "Readings",
+                format!("{} of {DIS_SLOTS}", s.dis.readings.len()),
+            )
+            .act(Act::Car(CarScreen::Readings)),
+        );
+        v.section("Keys");
+        v.row(
+            Row::new(
+                RowKind::Route,
+                "Key bindings",
+                format!("{} rows", s.bindings.len()),
+            )
+            .act(Act::Car(CarScreen::Bindings)),
+        );
+        v.section("Phone portal");
+        let set = if s.portal_pin_set { "set" } else { "not set" };
+        v.row(Row::new(RowKind::Route, "PIN", set).act(Act::Car(CarScreen::Pin)));
+        let mut clear = Row::new(RowKind::Button, "Clear the PIN", "")
+            .enabled(s.portal_pin_set)
+            .act(patch(
+                SettingsPatch {
+                    portal_pin: Some(PinChange::Clear),
+                    ..Default::default()
+                },
+                false,
+            ));
+        clear.button = "Clear".into();
+        v.row(clear);
+    })
+}
+
+/// Left column top to bottom, then right.
+fn slot_name(i: usize) -> String {
+    let half = DIS_SLOTS / 2;
+    if i < half {
+        format!("Left {}", i + 1)
+    } else {
+        format!("Right {}", i - half + 1)
+    }
+}
+
+fn readings(snap: &Snapshot) -> View {
+    with_settings(snap, "Cluster readings", |v, s| {
+        let list = &s.dis.readings;
+        for i in 0..(list.len() + 1).min(DIS_SLOTS) {
+            let value = list.get(i).map_or_else(
+                || "empty".to_string(),
+                |r| format!("{} · {}", r.label, r.key),
+            );
+            v.row(
+                Row::new(RowKind::Route, slot_name(i), value).act(Act::Car(CarScreen::Reading(i))),
+            );
         }
+    })
+}
+
+fn dis_slot(snap: &Snapshot, now: Instant, at: usize) -> View {
+    with_settings(snap, &slot_name(at), |v, s| {
+        let list = &s.dis.readings;
+        let current = list.get(at).map(|r| r.key.as_str());
+        let set = |name: Option<&str>| {
+            patch(
+                SettingsPatch {
+                    dis_readings: Some(cfg::reading_set(list, at, name)),
+                    ..Default::default()
+                },
+                true,
+            )
+        };
+        v.row(toggle("Nothing", current.is_none(), set(None)).enabled(at < list.len()));
+        let mut section_at = "";
+        for name in candidates(&snap.values) {
+            let sec = section(&name);
+            if sec != section_at {
+                v.section(sec);
+                section_at = sec;
+            }
+            let shown = show(&name, snap.values.get(&name), now);
+            let mut row = toggle(
+                &format!("{} ({name})", shown.label),
+                current == Some(name.as_str()),
+                set(Some(&name)),
+            );
+            row.value = reading(&shown.value, &shown.unit);
+            v.row(row);
+        }
+    })
+}
+
+fn bindings(snap: &Snapshot) -> View {
+    with_settings(snap, "Key bindings", |v, s| {
+        let mut table = "";
+        for (i, b) in s.bindings.iter().enumerate() {
+            if b.table != table {
+                v.section(b.table.clone());
+                table = &b.table;
+            }
+            let mut row = Row::new(
+                RowKind::Route,
+                format!("{} {}", b.key, b.gesture),
+                b.action.clone(),
+            )
+            .act(Act::Car(CarScreen::Binding(i)));
+            row.mono = true;
+            v.row(row);
+        }
+    })
+}
+
+fn binding(snap: &Snapshot, at: usize) -> View {
+    let title = snap
+        .settings
+        .as_ref()
+        .and_then(|s| s.bindings.get(at))
+        .map_or_else(|| "Key binding".to_string(), cfg::binding_label);
+    with_settings(snap, &title, |v, s| {
+        let Some(b) = s.bindings.get(at) else {
+            v.row(Row::new(RowKind::Info, "No such row", NONE));
+            return;
+        };
+        let mut actions: Vec<&str> = cfg::actions(&b.table).to_vec();
+        if !actions.contains(&b.action.as_str()) {
+            actions.insert(0, &b.action);
+        }
+        v.section("Action");
+        for a in actions {
+            let set = SettingsPatch {
+                bindings: Some(cfg::rebound(&s.bindings, at, a)),
+                ..Default::default()
+            };
+            v.row(toggle(a, a == b.action, patch(set, true)));
+        }
+    })
+}
+
+fn pin_entry(snap: &Snapshot, pin: &str) -> View {
+    let mut v = View::new(Layout::List, "Portal PIN", true).note(settings_note(snap));
+    v.pill("Delete", false, !pin.is_empty(), Act::PinDelete);
+    v.pill(
+        "Save",
+        true,
+        snap.connected && !pin.is_empty(),
+        Act::PinSave,
+    );
+    let shown = if pin.is_empty() {
+        NONE.to_string()
+    } else {
+        "•".repeat(pin.len())
+    };
+    v.section("New PIN");
+    v.row(Row::new(RowKind::Info, "PIN", shown));
+    v.section("Digits");
+    for d in (1..=9).chain([0]) {
+        let mut row = Row::new(RowKind::Button, d.to_string(), "")
+            .enabled(pin.len() < PIN_MAX)
+            .act(Act::PinDigit(d));
+        row.button = "Add".into();
+        v.row(row);
     }
     v.finish()
 }
@@ -748,20 +1008,111 @@ mod tests {
             }],
         }]);
         let now = Instant::now();
-        let v = car(CarScreen::Root, &s, now);
+        let v = car(CarScreen::Root, &s, now, "");
         let values: Vec<&str> = v.rows.iter().map(|r| r.value.as_str()).collect();
         assert!(values.contains(&"ican awake"));
         assert!(values.contains(&"Night"));
         assert!(values.contains(&"On TV"));
         assert!(values.contains(&"Android Auto"));
-        let v = car(CarScreen::Buses, &s, now);
+        let v = car(CarScreen::Buses, &s, now, "");
         assert!(v.rows.iter().any(|r| r.value == "1234"));
         assert!(v.rows.iter().any(|r| r.label == "Node 0x20"));
-        let v = car(CarScreen::Bridge, &s, now);
+        let v = car(CarScreen::Bridge, &s, now, "");
         assert!(v.rows.iter().any(|r| r.label.contains("nav.road")));
         assert!(!v.rows.iter().any(|r| r.label.contains("base64")));
-        let v = car(CarScreen::Settings, &s, now);
-        assert!(v.note.contains("settings API coming"));
+        let v = car(CarScreen::Settings, &s, now, "");
+        assert!(v.rows.iter().any(|r| r.value == "not from carpid yet"));
+    }
+
+    #[test]
+    fn settings_edit_through_carpid() {
+        let client = Client::offline("test");
+        let mut p = Pages::new(Saved::default(), None);
+        let mut s = snap(&[("engine.rpm", Some(Value::Num(800.0)))]);
+        s.settings = Some(cfg::sample());
+        let now = Instant::now();
+        let v = car(CarScreen::Settings, &s, now, "");
+        let tx = v.rows.iter().find(|r| r.label == "TX enabled").unwrap();
+        assert!(!tx.checked);
+        let Act::Patch(patch, false) = &tx.act else {
+            panic!("{:?}", tx.act)
+        };
+        assert_eq!(patch.tx_enabled, Some(true));
+        let clear = v.rows.iter().find(|r| r.button == "Clear").unwrap();
+        assert!(!clear.enabled);
+
+        // Settings, then bindings, then one row: three deep, and back twice after picking.
+        let v = p.view(PageId::Car, &s, now);
+        let at = v
+            .rows
+            .iter()
+            .position(|r| r.label == "Settings" && r.kind == RowKind::Route)
+            .unwrap();
+        p.press(PageId::Car, &v, &Hit::Row(at), 3, &client);
+        let v = p.view(PageId::Car, &s, now);
+        let at = v
+            .rows
+            .iter()
+            .position(|r| r.label == "Key bindings")
+            .unwrap();
+        assert_eq!(
+            p.press(PageId::Car, &v, &Hit::Row(at), 5, &client),
+            Moved::Opened
+        );
+        let v = p.view(PageId::Car, &s, now);
+        assert_eq!(v.rows[0].kind, RowKind::Section);
+        assert_eq!(v.rows[3].value, "up");
+        p.press(PageId::Car, &v, &Hit::Row(3), 7, &client);
+        assert_eq!(p.depth(PageId::Car), 3);
+        let v = p.view(PageId::Car, &s, now);
+        let select = v.rows.iter().position(|r| r.label == "select").unwrap();
+        let Act::Patch(patch, true) = &v.rows[select].act else {
+            panic!("picking goes back")
+        };
+        assert_eq!(patch.bindings.as_ref().unwrap()[1].action, "select");
+        assert_eq!(
+            p.press(PageId::Car, &v, &Hit::Row(select), 9, &client),
+            Moved::Closed(7)
+        );
+        assert_eq!(p.depth(PageId::Car), 2);
+        assert_eq!(
+            client.snapshot().settings_note.as_deref(),
+            Some("not connected")
+        );
+        p.reset(PageId::Car);
+        assert_eq!(p.depth(PageId::Car), 0);
+    }
+
+    #[test]
+    fn the_pin_is_entered_with_the_knob() {
+        let client = Client::offline("test");
+        let mut p = Pages::new(Saved::default(), None);
+        let mut s = snap(&[]);
+        s.settings = Some(cfg::sample());
+        let now = Instant::now();
+        p.car = CarScreen::Pin;
+        let v = p.view(PageId::Car, &s, now);
+        assert!(!v.pills[1].enabled);
+        for d in [4, 7, 1, 1] {
+            let at = v
+                .rows
+                .iter()
+                .position(|r| r.act == Act::PinDigit(d))
+                .unwrap();
+            p.press(PageId::Car, &v, &Hit::Row(at), 0, &client);
+        }
+        let v = p.view(PageId::Car, &s, now);
+        assert!(v.rows.iter().any(|r| r.value == "••••"));
+        assert!(!v.rows.iter().any(|r| r.value.contains("4711")));
+        p.press(PageId::Car, &v, &Hit::Pill(0), 0, &client);
+        let v = p.view(PageId::Car, &s, now);
+        assert!(v.rows.iter().any(|r| r.value == "•••"));
+        assert!(matches!(
+            p.press(PageId::Car, &v, &Hit::Pill(1), 0, &client),
+            Moved::Closed(_)
+        ));
+        assert_eq!(p.car, CarScreen::Settings);
+        assert!(p.pin.is_empty());
     }
 
     #[test]

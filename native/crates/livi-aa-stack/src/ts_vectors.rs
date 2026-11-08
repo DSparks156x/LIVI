@@ -902,6 +902,7 @@ fn bridge_event(name: &str, args: &[Json], formats: &mut [(u32, u32); 3]) -> Ses
                     road_name: s(d, "roadName"),
                     cue: s(d, "cue"),
                     destination_address: s(d, "destinationAddress"),
+                    steps: Vec::new(),
                 },
             ))
         }

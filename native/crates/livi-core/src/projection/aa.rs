@@ -2,10 +2,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Additional terms: see NOTICE
 
+use livi_aa_stack::bridge::Step as AaStep;
 use livi_aa_stack::protocol::{CallState as AaCallState, PhoneCall as AaCall};
 use livi_core_proto::aa_events::AaHelperEvent;
 use livi_core_proto::ids::same_mac;
-use livi_core_proto::state::CallStatus;
+use livi_core_proto::state::{CallStatus, Lane, LaneGuidance, Maneuver};
 
 use super::*;
 
@@ -344,6 +345,7 @@ impl Projection {
                 ..Default::default()
             }
         } else {
+            let has_lanes = from.steps.first().is_some_and(|s| !s.lanes.is_empty());
             Navigation {
                 active: from.active,
                 road_name: from.road_name,
@@ -357,6 +359,15 @@ impl Projection {
                 eta_text: from.eta,
                 app_name: from.app_name,
                 image,
+                lane_guidance_index: has_lanes.then_some(0),
+                lane_guidance_shown: (!from.steps.is_empty()).then_some(has_lanes),
+                current_maneuvers: if from.steps.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![0]
+                },
+                lane_guidance: lane_guidance(&from.steps),
+                maneuvers: from.steps.into_iter().zip(0..).map(maneuver).collect(),
                 ..Default::default()
             }
         };
@@ -384,4 +395,40 @@ fn call(from: AaCall) -> Option<Call> {
         number_label: given(from.number_type),
         duration_s: from.duration_s,
     })
+}
+
+fn maneuver((step, index): (AaStep, u32)) -> Maneuver {
+    Maneuver {
+        index,
+        maneuver_type: step.maneuver_type.map(|m| m as u32),
+        turn_side: step.turn_side.map(|s| s as u32),
+        turn_angle: step.turn_angle.and_then(|a| i32::try_from(a).ok()),
+        after_road_name: step.road_name,
+        description: step.cue,
+        linked_lane_guidance: (!step.lanes.is_empty()).then_some(index),
+        ..Default::default()
+    }
+}
+
+fn lane_guidance(steps: &[AaStep]) -> Vec<LaneGuidance> {
+    steps
+        .iter()
+        .zip(0..)
+        .filter(|(step, _)| !step.lanes.is_empty())
+        .map(|(step, index)| LaneGuidance {
+            index,
+            description: None,
+            lanes: step
+                .lanes
+                .iter()
+                .zip(0..)
+                .map(|(lane, index)| Lane {
+                    index,
+                    status: None,
+                    angles: lane.angles.clone(),
+                    highlight_angle: lane.highlighted,
+                })
+                .collect(),
+        })
+        .collect()
 }

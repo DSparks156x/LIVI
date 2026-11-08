@@ -157,6 +157,50 @@ pub fn nav_maneuver_type_to_side(t: Option<u32>) -> Option<DrivingSide> {
     }
 }
 
+/// A roundabout with its exit known, 1 to 19.
+pub fn roundabout_exit(exit: u32) -> Option<ManeuverType> {
+    use ManeuverType as M;
+    const EXITS: [ManeuverType; 19] = [
+        M::RoundaboutExit1,
+        M::RoundaboutExit2,
+        M::RoundaboutExit3,
+        M::RoundaboutExit4,
+        M::RoundaboutExit5,
+        M::RoundaboutExit6,
+        M::RoundaboutExit7,
+        M::RoundaboutExit8,
+        M::RoundaboutExit9,
+        M::RoundaboutExit10,
+        M::RoundaboutExit11,
+        M::RoundaboutExit12,
+        M::RoundaboutExit13,
+        M::RoundaboutExit14,
+        M::RoundaboutExit15,
+        M::RoundaboutExit16,
+        M::RoundaboutExit17,
+        M::RoundaboutExit18,
+        M::RoundaboutExit19,
+    ];
+    EXITS.get(exit.checked_sub(1)? as usize).copied()
+}
+
+/// The arrow of an Android Auto lane shape in degrees, 0 straight ahead, negative to the left.
+/// The shapes run straight, slight, normal, sharp and u-turn, each left then right.
+pub fn lane_shape_angle(shape: u32) -> Option<i32> {
+    Some(match shape {
+        1 => 0,
+        2 => -45,
+        3 => 45,
+        4 => -90,
+        5 => 90,
+        6 => -135,
+        7 => 135,
+        8 => -180,
+        9 => 180,
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

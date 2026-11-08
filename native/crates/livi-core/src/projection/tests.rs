@@ -1631,6 +1631,7 @@ async fn android_auto_touches_land_on_its_stream_and_the_voice_key_is_held() {
 
 #[tokio::test]
 async fn android_auto_media_and_guidance_reach_the_state_of_the_phone_in_front() {
+    use livi_aa_stack::bridge::{Lane as AaLane, Step as AaStep};
     use livi_aa_stack::channels::nav_maneuver::{DrivingSide, ManeuverType};
 
     let mut rig = Rig::new();
@@ -1688,6 +1689,27 @@ async fn android_auto_media_and_guidance_reach_the_state_of_the_phone_in_front()
         distance_to_destination: Some(5_000),
         time_to_destination: Some(600),
         eta: Some("21:58".into()),
+        steps: vec![
+            AaStep {
+                maneuver_type: Some(ManeuverType::LeftTurn),
+                road_name: Some("Main St".into()),
+                lanes: vec![
+                    AaLane {
+                        angles: vec![-90],
+                        highlighted: Some(-90),
+                    },
+                    AaLane {
+                        angles: vec![0],
+                        highlighted: None,
+                    },
+                ],
+                ..Default::default()
+            },
+            AaStep {
+                maneuver_type: Some(ManeuverType::Arrived),
+                ..Default::default()
+            },
+        ],
         ..Default::default()
     };
     rig.p.on_aa(AaEvent::Navigation {
@@ -1707,6 +1729,29 @@ async fn android_auto_media_and_guidance_reach_the_state_of_the_phone_in_front()
     assert_eq!(
         (nav.image.as_deref(), nav.time_to_destination),
         (Some("CQ=="), Some(600.0))
+    );
+    assert_eq!(nav.current_maneuvers, [0]);
+    assert_eq!(
+        nav.maneuvers
+            .iter()
+            .map(|m| (m.index, m.maneuver_type, m.linked_lane_guidance))
+            .collect::<Vec<_>>(),
+        [
+            (0, Some(ManeuverType::LeftTurn as u32), Some(0)),
+            (1, Some(ManeuverType::Arrived as u32), None),
+        ]
+    );
+    assert_eq!(
+        (nav.lane_guidance_index, nav.lane_guidance_shown),
+        (Some(0), Some(true))
+    );
+    let lanes = &nav.lane_guidance[0].lanes;
+    assert_eq!(
+        lanes
+            .iter()
+            .map(|l| (l.index, l.angles.clone(), l.highlight_angle))
+            .collect::<Vec<_>>(),
+        [(0, vec![-90], Some(-90)), (1, vec![0], None)]
     );
 
     rig.p.on_aa(AaEvent::NavigationImage {

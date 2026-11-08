@@ -135,6 +135,30 @@ pub struct NavigationStateUpdate {
     pub road_name: Option<String>,
     pub cue: Option<String>,
     pub destination_address: Option<String>,
+    /// Every step the phone sent, the next one first.
+    pub steps: Vec<NavigationStep>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NavigationStep {
+    pub maneuver_type: Option<u32>,
+    pub roundabout_exit_number: Option<u32>,
+    pub roundabout_exit_angle: Option<u32>,
+    pub road_name: Option<String>,
+    pub cue: Option<String>,
+    /// Left to right.
+    pub lanes: Vec<NavigationLane>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NavigationLane {
+    pub directions: Vec<NavigationLaneDirection>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NavigationLaneDirection {
+    pub shape: u32,
+    pub highlighted: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -326,6 +350,67 @@ pub fn decode_state(payload: &[u8]) -> NavigationStateUpdate {
                 }
             }
         }
+        if f.field == 1 && f.wire == WIRE_LEN {
+            out.steps.push(decode_step(f.bytes));
+        }
+    }
+    out
+}
+
+fn decode_step(b: &[u8]) -> NavigationStep {
+    let mut out = NavigationStep::default();
+    for s in decode_fields(b) {
+        match (s.field, s.wire) {
+            (1, WIRE_LEN) => {
+                for m in decode_fields(s.bytes) {
+                    if m.wire != WIRE_VARINT {
+                        continue;
+                    }
+                    let v = Some(decode_varint_value(m.bytes));
+                    match m.field {
+                        1 => out.maneuver_type = v,
+                        2 => out.roundabout_exit_number = v,
+                        3 => out.roundabout_exit_angle = v,
+                        _ => {}
+                    }
+                }
+            }
+            (2, WIRE_LEN) => {
+                for r in decode_fields(s.bytes) {
+                    if r.field == 1 && r.wire == WIRE_LEN {
+                        out.road_name = Some(text(r.bytes));
+                    }
+                }
+            }
+            (3, WIRE_LEN) => out.lanes.push(decode_lane(s.bytes)),
+            (4, WIRE_LEN) => {
+                for c in decode_fields(s.bytes) {
+                    if c.field == 1 && c.wire == WIRE_LEN && out.cue.is_none() {
+                        out.cue = Some(text(c.bytes));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn decode_lane(b: &[u8]) -> NavigationLane {
+    let mut out = NavigationLane::default();
+    for l in decode_fields(b) {
+        if l.field != 1 || l.wire != WIRE_LEN {
+            continue;
+        }
+        let mut direction = NavigationLaneDirection::default();
+        for d in decode_fields(l.bytes) {
+            match (d.field, d.wire) {
+                (1, WIRE_VARINT) => direction.shape = decode_varint_value(d.bytes),
+                (2, WIRE_VARINT) => direction.highlighted = decode_varint_value(d.bytes) != 0,
+                _ => {}
+            }
+        }
+        out.directions.push(direction);
     }
     out
 }
@@ -509,6 +594,19 @@ mod tests {
                 road_name: Some("Ring".into()),
                 cue: Some("cue1".into()),
                 destination_address: Some("Home".into()),
+                steps: vec![
+                    NavigationStep {
+                        maneuver_type: Some(8),
+                        road_name: Some("Ring".into()),
+                        cue: Some("cue1".into()),
+                        ..Default::default()
+                    },
+                    NavigationStep {
+                        maneuver_type: Some(7),
+                        road_name: Some("Other".into()),
+                        ..Default::default()
+                    },
+                ],
             }
         );
         let distance =
@@ -563,5 +661,58 @@ mod tests {
         }
         assert_eq!(next_turn(19), NavigationTurnEvent::Destination);
         assert_eq!(next_turn(15), NavigationTurnEvent::Unknown);
+    }
+
+    #[test]
+    fn steps_carry_their_roundabout_exit_and_lanes() {
+        let direction = |shape: i64, on: i64| {
+            field_len_delim(1, &[field_varint(1, shape), field_varint(2, on)].concat())
+        };
+        let step = [
+            field_len_delim(
+                1,
+                &[
+                    field_varint(1, 32),
+                    field_varint(2, 3),
+                    field_varint(3, 200),
+                ]
+                .concat(),
+            ),
+            field_len_delim(2, &s(1, "Ring")),
+            field_len_delim(3, &direction(2, 0)),
+            field_len_delim(3, &[direction(1, 1), direction(3, 0)].concat()),
+        ]
+        .concat();
+        let state = decode_state(&field_len_delim(1, &step));
+        assert_eq!(
+            state.steps,
+            [NavigationStep {
+                maneuver_type: Some(32),
+                roundabout_exit_number: Some(3),
+                roundabout_exit_angle: Some(200),
+                road_name: Some("Ring".into()),
+                cue: None,
+                lanes: vec![
+                    NavigationLane {
+                        directions: vec![NavigationLaneDirection {
+                            shape: 2,
+                            highlighted: false,
+                        }],
+                    },
+                    NavigationLane {
+                        directions: vec![
+                            NavigationLaneDirection {
+                                shape: 1,
+                                highlighted: true,
+                            },
+                            NavigationLaneDirection {
+                                shape: 3,
+                                highlighted: false,
+                            },
+                        ],
+                    },
+                ],
+            }]
+        );
     }
 }

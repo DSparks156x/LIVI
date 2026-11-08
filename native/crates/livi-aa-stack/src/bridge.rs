@@ -5,10 +5,13 @@
 use crate::channels::audio::AudioChannelType;
 use crate::channels::media_info::{MediaPlaybackMetadata, MediaPlaybackState, MediaPlaybackStatus};
 use crate::channels::nav_maneuver::{
-    DrivingSide, ManeuverType, nav_maneuver_type_to_code, nav_maneuver_type_to_side,
-    turn_event_to_maneuver_type, turn_side_to_navi_code,
+    DrivingSide, ManeuverType, lane_shape_angle, nav_maneuver_type_to_code,
+    nav_maneuver_type_to_side, roundabout_exit, turn_event_to_maneuver_type,
+    turn_side_to_navi_code,
 };
-use crate::channels::navigation::{NavigationEvent, NavigationState};
+use crate::channels::navigation::{
+    NavigationEvent, NavigationLane, NavigationState, NavigationStep,
+};
 use crate::config::AaConfig;
 use crate::discovery::VideoCodec;
 use crate::log::detail;
@@ -49,6 +52,63 @@ pub struct Navigation {
     pub distance_to_destination: Option<u32>,
     pub time_to_destination: Option<u32>,
     pub eta: Option<String>,
+    /// The next step first, replaced whole by every state the phone sends.
+    pub steps: Vec<Step>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Step {
+    pub maneuver_type: Option<ManeuverType>,
+    pub turn_side: Option<DrivingSide>,
+    pub turn_angle: Option<u32>,
+    pub road_name: Option<String>,
+    pub cue: Option<String>,
+    /// Left to right.
+    pub lanes: Vec<Lane>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Lane {
+    /// One arrow per direction, see [`lane_shape_angle`].
+    pub angles: Vec<i32>,
+    /// The arrow to take.
+    pub highlighted: Option<i32>,
+}
+
+impl Step {
+    fn of(s: NavigationStep) -> Self {
+        let maneuver_type = match nav_maneuver_type_to_code(s.maneuver_type) {
+            Some(ManeuverType::EnterRoundabout) => s
+                .roundabout_exit_number
+                .and_then(roundabout_exit)
+                .or(Some(ManeuverType::EnterRoundabout)),
+            other => other,
+        };
+        Self {
+            maneuver_type,
+            turn_side: nav_maneuver_type_to_side(s.maneuver_type),
+            turn_angle: s.roundabout_exit_angle,
+            road_name: s.road_name.filter(|r| !r.is_empty()),
+            cue: s.cue.filter(|c| !c.is_empty()),
+            lanes: s.lanes.into_iter().map(Lane::of).collect(),
+        }
+    }
+}
+
+impl Lane {
+    fn of(lane: NavigationLane) -> Self {
+        let mut out = Self::default();
+        for d in lane.directions {
+            let Some(angle) = lane_shape_angle(d.shape) else {
+                continue;
+            };
+            out.angles.push(angle);
+            if d.highlighted && out.highlighted.is_none() {
+                out.highlighted = Some(angle);
+            }
+        }
+        out
+    }
 }
 
 impl Navigation {
@@ -78,6 +138,9 @@ impl Navigation {
         );
         take(&mut self.time_to_destination, patch.time_to_destination);
         take(&mut self.eta, patch.eta);
+        if !patch.steps.is_empty() {
+            self.steps = patch.steps;
+        }
     }
 
     fn is_empty(&self) -> bool {
@@ -464,6 +527,7 @@ impl Bridge {
                     turn_side: nav_maneuver_type_to_side(s.maneuver_type),
                     road_name: s.road_name.filter(|r| !r.is_empty()),
                     destination_name: s.destination_address.filter(|d| !d.is_empty()),
+                    steps: s.steps.into_iter().map(Step::of).collect(),
                     ..Default::default()
                 };
                 if !patch.is_empty() {
@@ -625,6 +689,81 @@ mod tests {
                 ..Default::default()
             })]
         );
+    }
+
+    #[test]
+    fn steps_keep_their_lanes_until_the_next_state() {
+        use crate::channels::navigation::NavigationLaneDirection;
+
+        let mut b = Bridge::default();
+        let cfg = AaConfig::default();
+        let nav = |b: &mut Bridge, e| reports(b.on_event(SessionEvent::Navigation(e), &cfg));
+        let direction = |shape, highlighted| NavigationLaneDirection { shape, highlighted };
+        let roundabout = NavigationStep {
+            maneuver_type: Some(32),
+            roundabout_exit_number: Some(2),
+            road_name: Some("Ring".into()),
+            lanes: vec![
+                NavigationLane {
+                    directions: vec![direction(2, false), direction(0, true)],
+                },
+                NavigationLane {
+                    directions: vec![direction(1, true), direction(3, true)],
+                },
+            ],
+            ..Default::default()
+        };
+        let then = NavigationStep {
+            maneuver_type: Some(5),
+            road_name: Some(String::new()),
+            ..Default::default()
+        };
+        let out = nav(
+            &mut b,
+            NavigationEvent::State(NavigationStateUpdate {
+                steps: vec![roundabout, then],
+                ..Default::default()
+            }),
+        );
+        let Report::Navigation(n) = &out[0] else {
+            panic!()
+        };
+        assert_eq!(
+            n.steps,
+            [
+                Step {
+                    maneuver_type: Some(ManeuverType::RoundaboutExit2),
+                    road_name: Some("Ring".into()),
+                    lanes: vec![
+                        Lane {
+                            angles: vec![-45],
+                            highlighted: None,
+                        },
+                        Lane {
+                            angles: vec![0, 45],
+                            highlighted: Some(0),
+                        },
+                    ],
+                    ..Default::default()
+                },
+                Step {
+                    maneuver_type: Some(ManeuverType::SlightLeft),
+                    turn_side: Some(DrivingSide::Left),
+                    ..Default::default()
+                },
+            ]
+        );
+        let out = nav(
+            &mut b,
+            NavigationEvent::Position(NavigationPositionUpdate {
+                step_distance_meters: Some(50),
+                ..Default::default()
+            }),
+        );
+        let Report::Navigation(n) = &out[0] else {
+            panic!()
+        };
+        assert_eq!(n.steps.len(), 2);
     }
 
     #[test]

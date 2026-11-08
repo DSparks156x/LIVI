@@ -49,6 +49,7 @@ enum Target {
     Source(MediaSource),
     Favorite,
     Station(usize),
+    Carpi(usize),
 }
 
 thread_local! {
@@ -138,6 +139,9 @@ fn targets(ui: &AppWindow) -> Vec<Target> {
             }
             out
         }
+        page if crate::carpi_ui::ours(page) => (0..crate::carpi_ui::targets(ui))
+            .map(Target::Carpi)
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -275,6 +279,7 @@ fn activate(ui: &AppWindow, target: Target) {
                 d.invoke_pick(st.id);
             }
         }
+        Target::Carpi(i) => crate::carpi_ui::activate(ui, i),
         _ => {}
     }
 }
@@ -401,6 +406,7 @@ fn apply(ui: &AppWindow, client: &Client, code: &str, outcome: Outcome) -> bool 
                 adjust(ui, t, d);
             }
         }
+        Outcome::SettingsBack if crate::carpi_ui::back(ui) => {}
         Outcome::SettingsBack => {
             let from = f.get_main_index();
             ui.global::<SettingsState>().invoke_back();
@@ -433,7 +439,7 @@ fn context(ui: &AppWindow, repeat: bool) -> Context {
         settings_depth: if page == Page::Settings {
             crate::settings_ui::depth()
         } else {
-            0
+            crate::carpi_ui::depth(ui)
         },
         first: if page == Page::Telemetry {
             ui.global::<DashState>().get_page_index() <= 0

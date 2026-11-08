@@ -1,0 +1,229 @@
+// SPDX-FileCopyrightText: 2026 Drew Sparks
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+// carpid's pages: one view for all three, filled from livi-ui's carpi_ui.rs. Rows, header,
+// buttons, theme and focus are LIVI's own, so the pages look and steer like its settings.
+
+import { Theme, Ui } from "../../livi-ui/ui/theme.slint";
+import { Focus, FocusZone } from "../../livi-ui/ui/focus.slint";
+import { Metrics } from "../../livi-ui/ui/settings/metrics.slint";
+import { SettingsHeader } from "../../livi-ui/ui/settings/header.slint";
+import { SettingsRow, RowData } from "../../livi-ui/ui/settings/row.slint";
+import { RowButton } from "../../livi-ui/ui/settings/actions.slint";
+
+export enum CarpiLayout { list, grid }
+
+export struct CarpiPill {
+    label: string,
+    active: bool,
+    enabled: bool,
+    focus-at: int,
+}
+
+export struct CarpiRow {
+    section: bool,
+    title: string,
+    first: bool,
+    last: bool,
+    data: RowData,
+}
+
+export struct CarpiCell {
+    label: string,
+    name: string,
+    value: string,
+    unit: string,
+    age: string,
+    dim: bool,
+}
+
+export global CarpiState {
+    in property <CarpiLayout> layout;
+    in property <string> title;
+    in property <string> note;
+    in property <int> back-at: -1;
+    in property <[CarpiPill]> pills;
+    in property <[CarpiRow]> rows;
+    in property <[CarpiCell]> cells;
+    // Focus index of the first row, and per focusable row the plain rows and sections above it.
+    in property <int> row-base;
+    in property <[int]> scroll-rows;
+    in property <[int]> scroll-sections;
+
+    callback back();
+    callback pill(int);
+    callback row(int);
+}
+
+component CarpiGrid inherits Rectangle {
+    property <int> n: CarpiState.cells.length;
+    property <int> cols: n <= 1 ? 1 : n <= 4 ? 2 : n <= 9 ? 3 : 4;
+    property <int> lines: max(1, ceil(n / cols));
+    property <length> gap: 8px;
+    property <length> cw: (root.width - (cols - 1) * gap) / cols;
+    property <length> ch: (root.height - (lines - 1) * gap) / lines;
+    property <length> big: min(48px, max(18px, root.ch * 0.34));
+    property <length> small: max(11px, min(14px, root.ch * 0.13));
+
+    for c[i] in CarpiState.cells: Rectangle {
+        x: mod(i, root.cols) * (root.cw + root.gap);
+        y: floor(i / root.cols) * (root.ch + root.gap);
+        width: root.cw;
+        height: root.ch;
+        border-radius: 10px;
+        background: Theme.paper;
+        opacity: c.dim ? 0.45 : 1;
+
+        VerticalLayout {
+            padding-left: 12px;
+            padding-right: 12px;
+            padding-top: 8px;
+            padding-bottom: 8px;
+            Text {
+                text: c.label;
+                color: Theme.text-secondary;
+                font-size: root.small + 2px;
+                font-weight: 500;
+                overflow: elide;
+            }
+            HorizontalLayout {
+                vertical-stretch: 1;
+                spacing: 6px;
+                Text {
+                    text: c.value;
+                    color: Theme.text;
+                    font-size: root.big;
+                    font-weight: 500;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                Text {
+                    horizontal-stretch: 1;
+                    text: c.unit;
+                    color: Theme.text-secondary;
+                    font-size: root.small + 2px;
+                    vertical-alignment: center;
+                }
+            }
+            HorizontalLayout {
+                spacing: 6px;
+                Text {
+                    horizontal-stretch: 1;
+                    text: c.name;
+                    color: Theme.text-disabled;
+                    font-size: root.small;
+                    overflow: elide;
+                }
+                Text {
+                    text: c.age;
+                    color: Theme.text-disabled;
+                    font-size: root.small;
+                }
+            }
+        }
+    }
+}
+
+export component CarpiView inherits Rectangle {
+    background: Theme.background;
+
+    property <int> focus-index: Focus.zone == FocusZone.main ? Focus.main-index : -1;
+    property <length> caption-h: 34px;
+    property <bool> header-shown: CarpiState.title != "" || CarpiState.back-at >= 0;
+
+    changed focus-index => {
+        if (CarpiState.layout != CarpiLayout.list) {
+            return;
+        }
+        if (focus-index < CarpiState.row-base) {
+            flick.content-y = 0;
+            return;
+        }
+        let k = focus-index - CarpiState.row-base;
+        if (k >= CarpiState.scroll-rows.length) {
+            return;
+        }
+        let top = CarpiState.scroll-rows[k] * Metrics.row-h + CarpiState.scroll-sections[k] * root.caption-h;
+        if (top + flick.content-y < root.caption-h) {
+            flick.content-y = min(0, root.caption-h - top);
+        } else if (top + Metrics.row-h + flick.content-y > flick.height) {
+            flick.content-y = flick.height - top - Metrics.row-h;
+        }
+    }
+
+    VerticalLayout {
+        padding-left: Metrics.pad-x;
+        padding-right: Metrics.pad-x;
+        padding-top: Metrics.pad-top;
+        padding-bottom: Metrics.pad-bottom;
+        spacing: 8px;
+
+        HorizontalLayout {
+            height: Metrics.header-h;
+            spacing: 8px;
+            if root.header-shown: SettingsHeader {
+                horizontal-stretch: 1;
+                title: CarpiState.title;
+                can-back: CarpiState.back-at >= 0;
+                back-focused: CarpiState.back-at >= 0 && Focus.main(CarpiState.back-at);
+                back => { CarpiState.back(); }
+            }
+            for p[i] in CarpiState.pills: RowButton {
+                y: (parent.height - self.height) / 2;
+                text: p.label;
+                outlined: !p.active;
+                enabled: p.enabled;
+                focused: Focus.main(p.focus-at);
+                clicked => { CarpiState.pill(i); }
+            }
+            Rectangle { horizontal-stretch: root.header-shown ? 0 : 1; }
+        }
+
+        if CarpiState.note != "": Text {
+            text: CarpiState.note;
+            color: Theme.text-secondary;
+            font-size: Metrics.row-font - 1px;
+            wrap: word-wrap;
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+            flick := Flickable {
+                visible: CarpiState.layout == CarpiLayout.list;
+                content-height: list.preferred-height;
+                list := VerticalLayout {
+                    width: parent.width;
+                    padding-left: 0.5rem;
+                    padding-right: 0.5rem;
+                    padding-bottom: 2px;
+                    for r[i] in CarpiState.rows: Rectangle {
+                        height: r.section ? root.caption-h : Metrics.row-h;
+                        if r.section: Text {
+                            x: Metrics.row-pad;
+                            y: parent.height - self.height - 6px;
+                            text: r.title;
+                            color: Theme.primary;
+                            font-size: Metrics.row-font - 1px;
+                            font-weight: 500;
+                        }
+                        if !r.section: SettingsRow {
+                            width: parent.width;
+                            height: parent.height;
+                            data: r.data;
+                            focused: Focus.main(r.data.focus-at);
+                            first: r.first;
+                            last: r.last;
+                            open => { CarpiState.row(i); }
+                            press => { CarpiState.row(i); }
+                            toggle => { CarpiState.row(i); }
+                        }
+                    }
+                }
+            }
+            if CarpiState.layout == CarpiLayout.grid: CarpiGrid {
+                width: parent.width;
+                height: parent.height;
+            }
+        }
+    }
+}

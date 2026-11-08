@@ -1,0 +1,12 @@
+[package]
+name = "livi-carpi-ui"
+description = "carpid's pages in LIVI: data, diagnostics and car"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# From the pq35-carpi superproject: this fork is its livi/ submodule.
+carpi-proto = { path = "../../../../crates/carpi-proto" }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true

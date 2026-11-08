@@ -11,6 +11,7 @@ pub enum Tab {
     Media,
     Camera,
     Settings,
+    Carpi(livi_carpi_ui::PageId),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -72,7 +73,7 @@ pub fn look(config: &Config) -> Look {
     };
     let positive = |v: u32, fallback: i32| if v > 0 { v as i32 } else { fallback };
     Look {
-        tabs: tabs(config),
+        tabs: crate::carpi::tabs(tabs(config)),
         right_hand: config.hand == HandDriveType::Rhd,
         dark,
         primary: pick(&config.primary_color_dark, &config.primary_color_light),

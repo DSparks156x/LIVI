@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Additional terms: see NOTICE
 
+mod carpi_ui;
 pub mod clock;
 #[cfg(not(target_os = "android"))]
 mod cursor_ui;
@@ -111,6 +112,7 @@ fn tab(t: Tab) -> TabData {
         Tab::Media => (Page::Media, "PlayCircleOutlined"),
         Tab::Camera => (Page::Camera, "CameraOutlined"),
         Tab::Settings => (Page::Settings, "SettingsOutlined"),
+        Tab::Carpi(id) => (carpi_ui::page_of(id), id.icon()),
     };
     TabData {
         page,
@@ -248,6 +250,7 @@ fn open_path(ui: &AppWindow, path: &str) {
         Some("media") => Page::Media,
         Some("camera") => Page::Camera,
         Some("settings") => Page::Settings,
+        Some("carpi") => carpi_ui::named(path).unwrap_or(Page::Media),
         Some(other) => {
             println!("[ui] no page for {other}");
             return;
@@ -286,6 +289,7 @@ fn reported(ui: &AppWindow, client: &Client, page: Page) {
         Page::Media => (Front::Livi, media_ui::path(ui)),
         Page::Camera => (Front::Camera, "/camera"),
         Page::Settings => (Front::Livi, "/settings"),
+        Page::CarpiData | Page::CarpiDiagnostics | Page::CarpiCar => carpi_ui::reported(ui, page),
     };
     client.show(Screen::Main, front);
     client.path(path);
@@ -472,6 +476,7 @@ pub fn run(
     touch_ui::wire(&ui, &client);
     video_ui::wire(&ui, &client);
     wire(&ui, &client);
+    carpi_ui::wire(&ui);
     if let Some(state) = fixture {
         let mut mirror = client.mirror();
         *mirror = Mirror::new(State::filled(state));
@@ -547,7 +552,7 @@ pub fn run(
             "projection" => Page::Projection,
             "settings" => Page::Settings,
             "telemetry" => Page::Telemetry,
-            _ => Page::Media,
+            other => carpi_ui::named(other).unwrap_or(Page::Media),
         };
         choose(&ui, page);
         if page == Page::Settings {

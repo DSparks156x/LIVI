@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Additional terms: see NOTICE
 
+pub mod carpi;
 pub mod dashboard;
 pub use livi_i18n as i18n;
 pub mod icons;

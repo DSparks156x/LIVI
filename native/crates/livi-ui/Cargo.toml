@@ -21,6 +21,7 @@ image = { version = "0.25.10", default-features = false, features = ["jpeg", "pn
 libc.workspace = true
 livi-core-client.workspace = true
 livi-core-proto.workspace = true
+livi-carpi-ui.workspace = true
 livi-ui-model.workspace = true
 raw-window-handle = "0.6.2"
 serde_json.workspace = true

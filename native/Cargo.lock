@@ -4023,6 +4023,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "livi-carpi-ui"
+version = "0.1.0"
+dependencies = [
+ "carpi-proto",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "livi-compositor"
 version = "0.1.0"
 dependencies = [
@@ -4332,6 +4341,7 @@ dependencies = [
  "i-slint-backend-android-activity",
  "image",
  "libc 1.0.0-alpha.5",
+ "livi-carpi-ui",
  "livi-core-client",
  "livi-core-proto",
  "livi-ui-model",
@@ -4349,6 +4359,7 @@ dependencies = [
 name = "livi-ui-model"
 version = "0.1.0"
 dependencies = [
+ "livi-carpi-ui",
  "livi-core-proto",
  "livi-i18n",
  "serde_json",

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Drew Sparks
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! carpid's pages in LIVI: Data, Diagnostics and Car.
+//! carpid's pages in LIVI: Data, Diagnostics and Car, and carpid's toasts.
 //!
 //! The pages are Slint (`ui/carpi.slint`), drawn with LIVI's own rows, header and theme, and
 //! focused the way LIVI's settings are. This crate holds everything that isn't Slint glue: its own
@@ -29,9 +29,11 @@ pub mod diag;
 pub mod light;
 pub mod pages;
 pub mod settings;
+pub mod slots;
 pub mod values;
 pub mod view;
 
+pub use carpi_proto::ToastLevel;
 pub use client::Client;
 pub use pages::{Moved, Pages};
 
@@ -102,6 +104,30 @@ pub fn page_path(name: &str) -> Option<String> {
     PageId::from_name(name).map(|p| p.path().to_string())
 }
 
+/// carpid's toasts reach the UI over the core's open-page channel, as this path.
+const TOAST: &str = "/carpi/toast/";
+
+/// The path the bridge sends for a toast: `/carpi/toast/<level>/<text>`.
+pub fn toast_path(text: &str, level: ToastLevel) -> String {
+    let level = match level {
+        ToastLevel::Info => "info",
+        ToastLevel::Warn => "warn",
+        ToastLevel::Error => "error",
+    };
+    format!("{TOAST}{level}/{text}")
+}
+
+/// The toast a path carries, if it's one.
+pub fn toast_of(path: &str) -> Option<(String, ToastLevel)> {
+    let (level, text) = path.strip_prefix(TOAST)?.split_once('/')?;
+    let level = match level {
+        "warn" => ToastLevel::Warn,
+        "error" => ToastLevel::Error,
+        _ => ToastLevel::Info,
+    };
+    Some((text.to_string(), level))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -119,5 +145,16 @@ mod tests {
         assert_eq!(page_path("light").as_deref(), Some(LIGHT_PATH));
         assert_eq!(focus(LIGHT_PATH), Some("page:light".into()));
         assert_eq!(page_path("nope"), None);
+    }
+
+    #[test]
+    fn toasts_ride_a_path() {
+        let p = toast_path("Capture 2026-11-08 #03 / CAN", ToastLevel::Warn);
+        assert_eq!(
+            toast_of(&p),
+            Some(("Capture 2026-11-08 #03 / CAN".into(), ToastLevel::Warn))
+        );
+        assert_eq!(toast_of("/carpi/data"), None);
+        assert_eq!(focus(&p), None);
     }
 }

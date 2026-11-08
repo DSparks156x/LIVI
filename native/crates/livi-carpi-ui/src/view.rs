@@ -3,12 +3,17 @@
 
 //! A page as plain data, for livi-ui to copy into `CarpiState`.
 //!
-//! Focus works like LIVI's settings: everything focusable has an index in one list, in screen
-//! order (back, then the header pills, then the rows), and the knob steps through it.
+//! Everything focusable has an index in one list, in screen order: header tabs, then grid tiles,
+//! then rows. The knob steps through it, push presses what's focused, and the D-pad runs the
+//! focused thing's `side` acts (or the view's own, when it has none).
+
+use crate::slots::SlotAct;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Layout {
+    /// Rows, with the grid on top when the view has tiles.
     List,
+    /// Only the grid, filling the page.
     Grid,
 }
 
@@ -16,21 +21,24 @@ pub enum Layout {
 pub enum RowKind {
     /// A caption over the rows that follow it.
     Section,
+    /// A label and a reading.
     Info,
     /// Opens a screen.
     Route,
+    /// Does something; `button` is the action's word.
     Button,
     Toggle,
+    /// A choice the D-pad cycles in place; push steps it forward.
+    Choice,
+    /// A number the D-pad steps in place.
+    Step,
 }
 
 /// What pressing something does. The page that built the view knows what each one means.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Act {
     None,
-    Group(&'static str),
     Edit,
-    Reset,
-    Toggle(String),
     Module(usize),
     Car(CarScreen),
     Capture,
@@ -48,6 +56,8 @@ pub enum Act {
     Light(carpi_proto::LightAction),
     /// Shows or hides the manual curve's points.
     Advanced,
+    /// The slot editor and the picker.
+    Slots(SlotAct),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,7 +68,7 @@ pub enum CarScreen {
     Rnse,
     Bridge,
     Settings,
-    /// The cluster display's readings, and one slot of them.
+    /// The cluster display's readings, and the picker for one of them.
     Readings,
     Reading(usize),
     /// The key binding table, and one row of it.
@@ -91,16 +101,21 @@ impl CarScreen {
     }
 }
 
+/// The two acts of the D-pad: left, right.
+pub type Side = Option<(Act, Act)>;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Row {
     pub kind: RowKind,
     pub label: String,
     pub value: String,
-    /// Text of a button row.
+    /// Word on a button row.
     pub button: String,
-    pub enabled: bool,
+    /// A small tag after the label, like `diag`.
+    pub tag: String,
     pub dimmed: bool,
     pub alert: bool,
+    /// A toggle that's on, or the value already in a slot.
     pub checked: bool,
     pub mono: bool,
     /// Index in the focus list, -1 for a section.
@@ -109,6 +124,7 @@ pub struct Row {
     pub first: bool,
     pub last: bool,
     pub act: Act,
+    pub side: Side,
 }
 
 impl Row {
@@ -118,7 +134,7 @@ impl Row {
             label: label.into(),
             value: value.into(),
             button: String::new(),
-            enabled: true,
+            tag: String::new(),
             dimmed: false,
             alert: false,
             checked: false,
@@ -127,6 +143,7 @@ impl Row {
             first: false,
             last: false,
             act: Act::None,
+            side: None,
         }
     }
 
@@ -135,8 +152,8 @@ impl Row {
         self
     }
 
-    pub fn enabled(mut self, on: bool) -> Self {
-        self.enabled = on;
+    pub fn side(mut self, left: Act, right: Act) -> Self {
+        self.side = Some((left, right));
         self
     }
 
@@ -144,45 +161,103 @@ impl Row {
         self.dimmed = on;
         self
     }
+
+    pub fn checked(mut self, on: bool) -> Self {
+        self.checked = on;
+        self
+    }
+
+    pub fn button(mut self, word: impl Into<String>) -> Self {
+        self.button = word.into();
+        self
+    }
+
+    pub fn tag(mut self, tag: impl Into<String>) -> Self {
+        self.tag = tag.into();
+        self
+    }
 }
 
+/// A tab or a button in the header.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Pill {
     pub label: String,
+    /// The tab shown; buttons are never active.
     pub active: bool,
-    pub enabled: bool,
     pub focus_at: i32,
     pub act: Act,
+    pub side: Side,
 }
 
-/// One value of the data grid.
+/// One tile of the grid.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cell {
     pub label: String,
-    pub name: String,
     pub value: String,
     pub unit: String,
-    pub age: String,
-    /// Stale, invalid or missing.
+    /// One line in place of the value when there isn't one: "not seen", "no value".
+    pub why: String,
+    /// Stale or invalid: greyed.
     pub dim: bool,
+    /// The slot has nothing in it.
+    pub empty: bool,
+    /// -1 when tiles don't take focus (the plain Data page).
+    pub focus_at: i32,
+    pub act: Act,
+    pub side: Side,
+}
+
+impl Cell {
+    pub fn blank() -> Self {
+        Self {
+            label: String::new(),
+            value: String::new(),
+            unit: String::new(),
+            why: String::new(),
+            dim: false,
+            empty: true,
+            focus_at: -1,
+            act: Act::None,
+            side: None,
+        }
+    }
+}
+
+/// Where a focusable thing is, to keep it in view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Spot {
+    Header,
+    /// A tile on this line of the grid.
+    Tile(i32),
+    /// A row with this many plain rows and sections above it.
+    Row(i32, i32),
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct View {
     pub layout: Layout,
     pub title: String,
+    /// Right of the header: what the D-pad does here ("◀ Recent   Driving ▶").
+    pub hint: String,
     /// One line under the header: why something is missing.
     pub note: String,
-    /// Focus index of the back arrow, -1 without one.
-    pub back_at: i32,
+    /// A back arrow, for touch. RETURN does the same.
+    pub back: bool,
     pub pills: Vec<Pill>,
-    pub rows: Vec<Row>,
     pub cells: Vec<Cell>,
+    /// Grid columns.
+    pub cols: usize,
+    /// Tiles have outlines: the slot editor.
+    pub outlined: bool,
+    pub rows: Vec<Row>,
     /// Drawn left of the rows, on the light page.
     pub plot: Option<crate::light::Plot>,
-    /// For each focusable row in order: plain rows and sections above it, to scroll it into view.
-    pub scroll: Vec<(i32, i32)>,
-    targets: i32,
+    /// Per focus index, where it is.
+    pub spots: Vec<Spot>,
+    /// The D-pad's acts where the focused thing has none.
+    pub side: Side,
+    /// Focus index to start at when the view opens.
+    pub start: i32,
 }
 
 /// What a focus index points at.
@@ -190,6 +265,7 @@ pub struct View {
 pub enum Hit {
     Back,
     Pill(usize),
+    Cell(usize),
     Row(usize),
 }
 
@@ -198,14 +274,18 @@ impl View {
         Self {
             layout,
             title: title.into(),
+            hint: String::new(),
             note: String::new(),
-            back_at: if back { 0 } else { -1 },
+            back,
             pills: Vec::new(),
-            rows: Vec::new(),
             cells: Vec::new(),
+            cols: 1,
+            outlined: false,
+            rows: Vec::new(),
             plot: None,
-            scroll: Vec::new(),
-            targets: i32::from(back),
+            spots: Vec::new(),
+            side: None,
+            start: -1,
         }
     }
 
@@ -214,39 +294,59 @@ impl View {
         self
     }
 
-    /// Pills come before rows in the focus order; add them first.
-    pub fn pill(&mut self, label: impl Into<String>, active: bool, enabled: bool, act: Act) {
-        debug_assert!(self.rows.is_empty(), "pills go before rows");
+    fn take(&mut self, spot: Spot) -> i32 {
+        self.spots.push(spot);
+        self.spots.len() as i32 - 1
+    }
+
+    /// A header tab or button. Pills come first in the focus order.
+    pub fn pill(&mut self, label: impl Into<String>, active: bool, act: Act) -> &mut Pill {
+        debug_assert!(self.cells.is_empty() && self.rows.is_empty());
+        let focus_at = self.take(Spot::Header);
         self.pills.push(Pill {
             label: label.into(),
             active,
-            enabled,
-            focus_at: self.targets,
+            focus_at,
             act,
+            side: None,
         });
-        self.targets += 1;
+        self.pills.last_mut().expect("just pushed")
+    }
+
+    /// A grid tile; `focus` makes it take focus. Tiles go after pills and before rows.
+    pub fn cell(&mut self, mut cell: Cell, focus: bool) -> i32 {
+        debug_assert!(self.rows.is_empty(), "tiles go before rows");
+        cell.focus_at = if focus {
+            let line = (self.cells.len() / self.cols.max(1)) as i32;
+            self.take(Spot::Tile(line))
+        } else {
+            -1
+        };
+        self.cells.push(cell);
+        cell_at(self)
     }
 
     pub fn section(&mut self, title: impl Into<String>) {
         self.rows.push(Row::new(RowKind::Section, title, ""));
     }
 
-    pub fn row(&mut self, mut row: Row) {
-        let plain = self
-            .rows
-            .iter()
-            .filter(|r| r.kind != RowKind::Section)
-            .count();
-        let sections = self.rows.len() - plain;
+    /// Adds a row; returns its focus index, -1 for a section.
+    pub fn row(&mut self, mut row: Row) -> i32 {
         if row.kind != RowKind::Section {
-            row.focus_at = self.targets;
-            self.targets += 1;
-            self.scroll.push((plain as i32, sections as i32));
+            let plain = self
+                .rows
+                .iter()
+                .filter(|r| r.kind != RowKind::Section)
+                .count();
+            let sections = self.rows.len() - plain;
+            row.focus_at = self.take(Spot::Row(plain as i32, sections as i32));
         }
+        let at = row.focus_at;
         self.rows.push(row);
+        at
     }
 
-    /// Sets the corners once all rows are in.
+    /// Sets the corners and the start once everything is in.
     pub fn finish(mut self) -> Self {
         let n = self.rows.len();
         for i in 0..n {
@@ -256,40 +356,34 @@ impl View {
             self.rows[i].first = i == 0 || self.rows[i - 1].kind == RowKind::Section;
             self.rows[i].last = i + 1 == n || self.rows[i + 1].kind == RowKind::Section;
         }
+        if self.start < 0 || self.start >= self.targets() as i32 {
+            self.start = self.first_body();
+        }
         self
     }
 
     /// How many things take focus.
     pub fn targets(&self) -> usize {
-        self.targets as usize
+        self.spots.len()
     }
 
-    /// Focus index of the first row, or of the first thing after back.
-    pub fn first_target(&self) -> i32 {
-        if self.back_at == 0 && self.targets > 1 {
-            1
-        } else {
-            0
-        }
-    }
-
-    /// Focus index of the first row; without rows, the first thing after back.
-    pub fn first_row(&self) -> i32 {
-        self.rows
+    /// The first tile or row; the first pill when there are none.
+    pub fn first_body(&self) -> i32 {
+        self.spots
             .iter()
-            .find(|r| r.focus_at >= 0)
-            .map_or(self.first_target(), |r| r.focus_at)
+            .position(|s| *s != Spot::Header)
+            .unwrap_or(0) as i32
     }
 
     pub fn hit(&self, at: i32) -> Option<Hit> {
         if at < 0 {
             return None;
         }
-        if at == self.back_at {
-            return Some(Hit::Back);
-        }
         if let Some(i) = self.pills.iter().position(|p| p.focus_at == at) {
             return Some(Hit::Pill(i));
+        }
+        if let Some(i) = self.cells.iter().position(|c| c.focus_at == at) {
+            return Some(Hit::Cell(i));
         }
         self.rows
             .iter()
@@ -297,14 +391,39 @@ impl View {
             .map(Hit::Row)
     }
 
-    /// What pressing `hit` does, when it's enabled.
+    /// What pushing `hit` does.
     pub fn act(&self, hit: &Hit) -> Option<&Act> {
-        match hit {
-            Hit::Back => None,
-            Hit::Pill(i) => self.pills.get(*i).filter(|p| p.enabled).map(|p| &p.act),
-            Hit::Row(i) => self.rows.get(*i).filter(|r| r.enabled).map(|r| &r.act),
-        }
+        let act = match hit {
+            Hit::Back => return None,
+            Hit::Pill(i) => &self.pills.get(*i)?.act,
+            Hit::Cell(i) => &self.cells.get(*i)?.act,
+            Hit::Row(i) => &self.rows.get(*i)?.act,
+        };
+        (*act != Act::None).then_some(act)
     }
+
+    /// What the D-pad does on `hit`: `delta` < 0 is left.
+    pub fn side_act(&self, hit: Option<&Hit>, delta: i32) -> Option<&Act> {
+        let own = match hit {
+            Some(Hit::Pill(i)) => self.pills.get(*i).and_then(|p| p.side.as_ref()),
+            Some(Hit::Cell(i)) => self.cells.get(*i).and_then(|c| c.side.as_ref()),
+            Some(Hit::Row(i)) => self.rows.get(*i).and_then(|r| r.side.as_ref()),
+            _ => None,
+        };
+        let (l, r) = own.or(self.side.as_ref())?;
+        let act = if delta < 0 { l } else { r };
+        (*act != Act::None).then_some(act)
+    }
+
+    /// The focused thing steps with the D-pad and does nothing on push: a held edit, when the
+    /// D-pad and the knob send the same keys.
+    pub fn steps_only(&self, hit: &Hit) -> bool {
+        matches!(hit, Hit::Row(i) if self.rows.get(*i).is_some_and(|r| r.kind == RowKind::Step))
+    }
+}
+
+fn cell_at(v: &View) -> i32 {
+    v.cells.last().map_or(-1, |c| c.focus_at)
 }
 
 #[cfg(test)]
@@ -312,40 +431,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn focus_runs_back_pills_rows() {
+    fn focus_runs_pills_tiles_rows() {
         let mut v = View::new(Layout::List, "t", true);
-        v.pill("Reset", false, true, Act::Reset);
+        v.pill("Tab", true, Act::Edit);
+        v.cols = 2;
+        v.cell(Cell::blank(), true);
+        v.cell(Cell::blank(), true);
+        v.cell(Cell::blank(), true);
         v.section("A");
         v.row(Row::new(RowKind::Info, "a1", ""));
         v.row(Row::new(RowKind::Info, "a2", ""));
         v.section("B");
-        v.row(Row::new(RowKind::Toggle, "b1", "").act(Act::Toggle("x".into())));
+        v.row(Row::new(RowKind::Toggle, "b1", "").act(Act::Advanced));
         let v = v.finish();
-        assert_eq!(v.targets(), 5);
-        assert_eq!(v.first_target(), 1);
-        assert_eq!(v.hit(0), Some(Hit::Back));
-        assert_eq!(v.hit(1), Some(Hit::Pill(0)));
-        assert_eq!(v.hit(2), Some(Hit::Row(1)));
-        assert_eq!(v.hit(4), Some(Hit::Row(4)));
-        assert_eq!(v.hit(5), None);
-        assert_eq!(v.scroll, [(0, 1), (1, 1), (2, 2)]);
+        assert_eq!(v.targets(), 7);
+        assert_eq!(v.start, 1);
+        assert_eq!(v.hit(0), Some(Hit::Pill(0)));
+        assert_eq!(v.hit(3), Some(Hit::Cell(2)));
+        assert_eq!(v.hit(4), Some(Hit::Row(1)));
+        assert_eq!(v.hit(6), Some(Hit::Row(4)));
+        assert_eq!(v.hit(7), None);
+        assert_eq!(v.spots[3], Spot::Tile(1));
+        assert_eq!(v.spots[5], Spot::Row(1, 1));
+        assert_eq!(v.spots[6], Spot::Row(2, 2));
         assert!(v.rows[1].first && !v.rows[1].last);
-        assert!(!v.rows[2].first && v.rows[2].last);
         assert!(v.rows[4].first && v.rows[4].last);
-        assert_eq!(v.act(&Hit::Row(4)), Some(&Act::Toggle("x".into())));
+        assert_eq!(v.act(&Hit::Row(4)), Some(&Act::Advanced));
+        assert_eq!(v.act(&Hit::Row(1)), None);
     }
 
     #[test]
-    fn disabled_things_do_nothing() {
+    fn the_dpad_takes_the_focused_acts_then_the_views() {
         let mut v = View::new(Layout::List, "t", false);
-        v.pill("Scan", false, false, Act::Edit);
-        v.row(
-            Row::new(RowKind::Button, "Read", "")
-                .enabled(false)
-                .act(Act::Capture),
-        );
-        assert_eq!(v.first_target(), 0);
-        assert_eq!(v.act(&Hit::Pill(0)), None);
-        assert_eq!(v.act(&Hit::Row(0)), None);
+        v.side = Some((Act::ClearCancel, Act::Advanced));
+        v.row(Row::new(RowKind::Step, "s", "").side(Act::PinDelete, Act::PinSave));
+        v.row(Row::new(RowKind::Info, "i", ""));
+        let v = v.finish();
+        assert_eq!(v.side_act(Some(&Hit::Row(0)), -1), Some(&Act::PinDelete));
+        assert_eq!(v.side_act(Some(&Hit::Row(1)), 1), Some(&Act::Advanced));
+        assert!(v.steps_only(&Hit::Row(0)));
+        assert!(!v.steps_only(&Hit::Row(1)));
     }
 }

@@ -1,64 +1,55 @@
 // SPDX-FileCopyrightText: 2026 Drew Sparks
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The pages' own settings: which values each data group shows.
+//! The pages' own settings: the Data page's pages and the picker's recent values.
 //!
-//! Kept in `~/.config/LIVI/carpi-ui.json` for now (`$XDG_CONFIG_HOME/LIVI` when set). carpid will
-//! keep this with its config once it has `config.get/set`; this file goes then.
+//! Kept in `~/.config/LIVI/carpi-ui.json` for now (`$XDG_CONFIG_HOME/LIVI` when set). carpid
+//! takes the layouts over with its settings API (docs/PAGES.md 2); this file goes then.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::defs::{GROUPS, MAX_CELLS};
+use crate::defs::PRESETS;
+use crate::slots::{Board, SlotPage, fit};
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Saved {
-    /// Group the data page shows.
+    /// The Data page's pages; `None` until edited.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<Board>,
+    /// Last values picked, newest first.
+    pub recent: Vec<String>,
+    /// The first version's groups, read once into pages.
+    #[serde(skip_serializing)]
     pub group: String,
-    /// Values per group id. A group that isn't here shows its preset.
+    #[serde(skip_serializing)]
     pub groups: BTreeMap<String, Vec<String>>,
 }
 
 impl Saved {
-    pub fn group(&self) -> &'static str {
-        GROUPS
+    /// The Data page's pages: saved, from the first version's groups, or today's groups.
+    pub fn board(&self) -> Board {
+        if let Some(b) = &self.data {
+            return b.clone().fixed();
+        }
+        if self.groups.is_empty() {
+            return Board::data();
+        }
+        let pages = PRESETS
             .iter()
-            .find(|g| g.id == self.group)
-            .unwrap_or(&GROUPS[0])
-            .id
-    }
-
-    /// Values of group `id`, at most [`MAX_CELLS`].
-    pub fn values(&self, id: &str) -> Vec<String> {
-        match self.groups.get(id) {
-            Some(v) => v.iter().take(MAX_CELLS).cloned().collect(),
-            None => GROUPS
-                .iter()
-                .find(|g| g.id == id)
-                .map(|g| g.preset.iter().map(|s| s.to_string()).collect())
-                .unwrap_or_default(),
-        }
-    }
-
-    /// Adds or drops `name` in group `id`. False when the group is full.
-    pub fn toggle(&mut self, id: &str, name: &str) -> bool {
-        let mut v = self.values(id);
-        if let Some(i) = v.iter().position(|n| n == name) {
-            v.remove(i);
-        } else if v.len() >= MAX_CELLS {
-            return false;
-        } else {
-            v.push(name.to_string());
-        }
-        self.groups.insert(id.to_string(), v);
-        true
-    }
-
-    pub fn reset(&mut self, id: &str) {
-        self.groups.remove(id);
+            .map(|p| {
+                let values: Vec<&str> = match self.groups.get(p.id) {
+                    Some(v) => v.iter().map(String::as_str).collect(),
+                    None => p.values.to_vec(),
+                };
+                SlotPage::new(p.name, fit(values.len()), &values)
+            })
+            .collect();
+        let shown = PRESETS.iter().position(|p| p.id == self.group).unwrap_or(0);
+        Board { pages, shown }.fixed()
     }
 }
 
@@ -100,42 +91,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn presets_until_edited() {
-        let mut s = Saved::default();
-        assert_eq!(s.group(), "engine");
-        assert_eq!(s.values("engine")[0], "engine.rpm");
-        assert!(s.toggle("engine", "engine.rpm"));
-        assert!(!s.values("engine").contains(&"engine.rpm".to_string()));
-        assert!(s.toggle("engine", "engine.rpm"));
-        assert_eq!(s.values("engine").last().unwrap(), "engine.rpm");
-        s.reset("engine");
-        assert_eq!(s.values("engine")[0], "engine.rpm");
-    }
-
-    #[test]
-    fn a_full_group_takes_no_more() {
-        let mut s = Saved::default();
-        for i in 0..MAX_CELLS {
-            s.groups
-                .entry("body".into())
-                .or_default()
-                .push(format!("x.{i}"));
-        }
-        s.groups.get_mut("body").unwrap().truncate(MAX_CELLS);
-        assert!(!s.toggle("body", "x.new"));
-        assert!(s.toggle("body", "x.0"));
-        assert!(s.toggle("body", "x.new"));
+    fn the_first_versions_groups_become_pages() {
+        let s: Saved = serde_json::from_str(
+            r#"{"group":"body","groups":{"engine":["engine.rpm","engine.boost.actual"]}}"#,
+        )
+        .unwrap();
+        let b = s.board();
+        assert_eq!(b.shown, 2);
+        assert_eq!(b.pages[0].size, 4);
+        assert_eq!(b.pages[0].slots[1].as_deref(), Some("engine.boost.actual"));
+        assert_eq!(b.pages[2].slots[0].as_deref(), Some("body.door_fl_open"));
+        assert_eq!(Saved::default().board(), Board::data());
     }
 
     #[test]
     fn round_trips_and_survives_a_broken_file() {
         let dir = std::env::temp_dir().join(format!("carpi-ui-{}", std::process::id()));
         let file = dir.join("LIVI").join("carpi-ui.json");
-        let mut s = Saved {
-            group: "body".into(),
+        let mut b = Board::data();
+        b.shown = 3;
+        let s = Saved {
+            data: Some(b),
+            recent: vec!["engine.rpm".into()],
             ..Saved::default()
         };
-        s.toggle("body", "lights.drl");
         save(&file, &s).unwrap();
         assert_eq!(load(&file), s);
         std::fs::write(&file, b"{nope").unwrap();

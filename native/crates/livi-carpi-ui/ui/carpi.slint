@@ -1,32 +1,55 @@
 // SPDX-FileCopyrightText: 2026 Drew Sparks
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// carpid's pages: one view for all of them, filled from livi-ui's carpi_ui.rs. Rows, header,
-// buttons, theme and focus are LIVI's own, so the pages look and steer like its settings. The
-// light page adds a plot left of its rows.
+// carpid's pages, filled from livi-ui's carpi_ui.rs. Built for the RNS-E knob at 800x480: rows
+// of 60 px with 22 px text, a filled highlight on whatever has focus, the grid of the Data page
+// and its editor, and a toast over everything. Colours are LIVI's theme, which follows
+// `light.night` through the bridge.
 
-import { Theme, Ui } from "../../livi-ui/ui/theme.slint";
+import { Theme } from "../../livi-ui/ui/theme.slint";
 import { Focus, FocusZone } from "../../livi-ui/ui/focus.slint";
-import { Metrics } from "../../livi-ui/ui/settings/metrics.slint";
-import { SettingsHeader } from "../../livi-ui/ui/settings/header.slint";
-import { SettingsRow, RowData } from "../../livi-ui/ui/settings/row.slint";
-import { RowButton } from "../../livi-ui/ui/settings/actions.slint";
 
 export enum CarpiLayout { list, grid }
+export enum CarpiKind { section, info, route, button, toggle, choice, step }
 
 export struct CarpiPill {
     label: string,
     active: bool,
-    enabled: bool,
+    tab: bool,
     focus-at: int,
 }
 
 export struct CarpiRow {
-    section: bool,
-    title: string,
+    kind: CarpiKind,
+    label: string,
+    value: string,
+    button: string,
+    tag: string,
+    dimmed: bool,
+    alert: bool,
+    checked: bool,
+    mono: bool,
+    focus-at: int,
     first: bool,
     last: bool,
-    data: RowData,
+}
+
+export struct CarpiCell {
+    label: string,
+    value: string,
+    unit: string,
+    why: string,
+    dim: bool,
+    empty: bool,
+    focus-at: int,
+}
+
+// Where a focus index is: line -1 the header, 0.. a grid line, -2 a row with `rows` plain rows
+// and `sections` captions above it.
+export struct CarpiSpot {
+    line: int,
+    rows: int,
+    sections: int,
 }
 
 // A point in the light plot, both 0..1, y up.
@@ -40,27 +63,21 @@ export struct CarpiTick {
     label: string,
 }
 
-export struct CarpiCell {
-    label: string,
-    name: string,
-    value: string,
-    unit: string,
-    age: string,
-    dim: bool,
-}
-
 export global CarpiState {
     in property <CarpiLayout> layout;
     in property <string> title;
+    in property <string> hint;
     in property <string> note;
-    in property <int> back-at: -1;
+    in property <bool> can-back;
     in property <[CarpiPill]> pills;
     in property <[CarpiRow]> rows;
     in property <[CarpiCell]> cells;
-    // Focus index of the first row, and per focusable row the plain rows and sections above it.
-    in property <int> row-base;
-    in property <[int]> scroll-rows;
-    in property <[int]> scroll-sections;
+    in property <int> cols: 1;
+    in property <bool> outlined;
+    in property <[CarpiSpot]> spots;
+    // A step row takes the knob's keys while it's held (when the knob and the D-pad send the
+    // same keys).
+    in property <bool> holding;
     // The light plot: curve as SVG path commands in a 1000x1000 box, y down.
     in property <bool> plot-shown;
     in property <string> plot-curve;
@@ -74,87 +91,362 @@ export global CarpiState {
     callback back();
     callback pill(int);
     callback row(int);
+    callback cell(int);
 }
 
-component CarpiGrid inherits Rectangle {
-    property <int> n: CarpiState.cells.length;
-    property <int> cols: n <= 1 ? 1 : n <= 4 ? 2 : n <= 9 ? 3 : 4;
-    property <int> lines: max(1, ceil(n / cols));
-    property <length> gap: 8px;
-    property <length> cw: (root.width - (cols - 1) * gap) / cols;
-    property <length> ch: (root.height - (lines - 1) * gap) / lines;
-    property <length> big: min(48px, max(18px, root.ch * 0.34));
-    property <length> small: max(11px, min(14px, root.ch * 0.13));
+// 0 info, 1 warn, 2 error.
+export global CarpiToast {
+    in property <bool> shown;
+    in property <string> text;
+    in property <int> level;
+}
 
-    for c[i] in CarpiState.cells: Rectangle {
-        x: mod(i, root.cols) * (root.cw + root.gap);
-        y: floor(i / root.cols) * (root.ch + root.gap);
-        width: root.cw;
-        height: root.ch;
-        border-radius: 10px;
-        background: Theme.paper;
-        opacity: c.dim ? 0.45 : 1;
+global M {
+    out property <length> pad-x: 16px;
+    out property <length> header-h: 52px;
+    out property <length> row-h: 60px;
+    out property <length> caption-h: 40px;
+    out property <length> font: 22px;
+    out property <length> small: 18px;
+    out property <length> title: 26px;
+    out property <length> radius: 12px;
+    out property <length> gap: 8px;
+    out property <color> alert: Theme.dark ? #ff6b6b : #c62828;
+    out property <color> on-focus: #ffffff;
+}
 
-        VerticalLayout {
-            padding-left: 12px;
-            padding-right: 12px;
-            padding-top: 8px;
-            padding-bottom: 8px;
-            Text {
-                text: c.label;
-                color: Theme.text-secondary;
-                font-size: root.small + 2px;
-                font-weight: 500;
-                overflow: elide;
+component Chevron inherits Path {
+    in property <bool> left;
+    width: 12px;
+    height: 20px;
+    viewbox-width: 12;
+    viewbox-height: 20;
+    commands: root.left ? "M 10 2 L 2 10 L 10 18" : "M 2 2 L 10 10 L 2 18";
+    fill: transparent;
+    stroke-width: 2.5px;
+}
+
+component Check inherits Path {
+    width: 22px;
+    height: 22px;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    commands: "M 4 12.5 L 9.5 18 L 20 6.5";
+    fill: transparent;
+    stroke-width: 3px;
+}
+
+component Tag inherits Rectangle {
+    in property <string> text;
+    in property <color> ink;
+    height: 26px;
+    width: t.preferred-width + 14px;
+    border-radius: 6px;
+    border-width: 1.5px;
+    border-color: root.ink;
+    t := Text {
+        text: root.text;
+        color: root.ink;
+        font-size: 15px;
+        font-weight: 500;
+        vertical-alignment: center;
+        horizontal-alignment: center;
+    }
+}
+
+component Switch inherits Rectangle {
+    in property <bool> on;
+    in property <bool> focused;
+    width: 56px;
+    height: 32px;
+    border-radius: 16px;
+    background: root.on ? (root.focused ? #ffffff : Theme.primary) : (root.focused ? #ffffff55 : (Theme.dark ? Theme.track : #00000033));
+    Rectangle {
+        x: root.on ? parent.width - self.width - 4px : 4px;
+        y: 4px;
+        width: 24px;
+        height: 24px;
+        border-radius: 12px;
+        background: root.on && root.focused ? Theme.highlight : #ffffff;
+        animate x { duration: 120ms; }
+    }
+}
+
+component Header inherits Rectangle {
+    property <int> focus-index: Focus.zone == FocusZone.main ? Focus.main-index : -1;
+    height: M.header-h;
+
+    HorizontalLayout {
+        spacing: 6px;
+        if CarpiState.can-back: Rectangle {
+            width: 30px;
+            Chevron {
+                x: 4px;
+                left: true;
+                stroke: Theme.text-secondary;
             }
-            HorizontalLayout {
-                vertical-stretch: 1;
-                spacing: 6px;
-                Text {
-                    text: c.value;
-                    color: Theme.text;
-                    font-size: root.big;
-                    font-weight: 500;
-                    vertical-alignment: center;
-                    overflow: elide;
-                }
-                Text {
-                    horizontal-stretch: 1;
-                    text: c.unit;
-                    color: Theme.text-secondary;
-                    font-size: root.small + 2px;
-                    vertical-alignment: center;
-                }
+            TouchArea {
+                clicked => { CarpiState.back(); }
             }
-            HorizontalLayout {
-                spacing: 6px;
-                Text {
-                    horizontal-stretch: 1;
-                    text: c.name;
-                    color: Theme.text-disabled;
-                    font-size: root.small;
-                    overflow: elide;
-                }
-                Text {
-                    text: c.age;
-                    color: Theme.text-disabled;
-                    font-size: root.small;
-                }
+        }
+        if CarpiState.title != "": Text {
+            text: CarpiState.title;
+            color: Theme.text;
+            font-size: M.title;
+            font-weight: 700;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: CarpiState.pills.length == 0 ? 1 : 0;
+            min-width: min(self.preferred-width, 160px);
+        }
+        if CarpiState.pills.length > 0: Rectangle { width: 10px; }
+        for p[i] in CarpiState.pills: tab := Rectangle {
+            property <bool> focused: root.focus-index == p.focus-at;
+            y: (parent.height - self.height) / 2;
+            height: 44px;
+            width: label.preferred-width + 28px;
+            border-radius: 10px;
+            background: self.focused ? Theme.highlight : transparent;
+            border-width: !p.tab && !self.focused ? 2px : 0;
+            border-color: Theme.divider;
+            label := Text {
+                text: p.label;
+                color: tab.focused ? M.on-focus : (p.active || !p.tab ? Theme.text : Theme.text-secondary);
+                font-size: 20px;
+                font-weight: p.active ? 700 : 500;
+                vertical-alignment: center;
+                horizontal-alignment: center;
             }
+            if p.active && !tab.focused: Rectangle {
+                y: tab.height - 5px;
+                x: 12px;
+                width: tab.width - 24px;
+                height: 4px;
+                border-radius: 2px;
+                background: Theme.primary;
+            }
+            TouchArea {
+                clicked => { CarpiState.pill(i); }
+            }
+        }
+        Rectangle { horizontal-stretch: CarpiState.pills.length == 0 ? 0 : 1; }
+        if CarpiState.hint != "": Text {
+            text: CarpiState.hint;
+            color: Theme.text-secondary;
+            font-size: M.small;
+            vertical-alignment: center;
         }
     }
 }
 
-// Ambient across on a log scale (ticks are raw sensor values), RNS-E panel % up.
-component CarpiPlot inherits Rectangle {
-    property <length> gutter: 40px;
-    property <length> head: 10px;
-    property <length> foot: 38px;
-    property <length> pw: root.width - root.gutter - 10px;
-    property <length> ph: root.height - root.head - root.foot;
-    property <length> dot: 8px;
+component RowView inherits Rectangle {
+    in property <CarpiRow> r;
+    in property <bool> focused;
+    callback pushed();
 
-    border-radius: 10px;
+    property <color> ink: root.focused ? M.on-focus : (r.alert ? M.alert : (r.dimmed ? Theme.text-disabled : Theme.text));
+    property <color> soft: root.focused ? #ffffffd9 : (r.alert ? M.alert : (r.dimmed ? Theme.text-disabled : Theme.text-secondary));
+    property <bool> sided: r.kind == CarpiKind.choice || r.kind == CarpiKind.step;
+
+    height: M.row-h;
+
+    // The section's card, with dividers between rows.
+    Rectangle {
+        background: Theme.paper;
+        border-top-left-radius: r.first ? M.radius : 0;
+        border-top-right-radius: r.first ? M.radius : 0;
+        border-bottom-left-radius: r.last ? M.radius : 0;
+        border-bottom-right-radius: r.last ? M.radius : 0;
+    }
+    if !r.first: Rectangle {
+        x: 18px;
+        y: 0;
+        width: parent.width - 36px;
+        height: 1px;
+        background: Theme.hairline;
+    }
+    if root.focused: Rectangle {
+        border-radius: M.radius;
+        background: Theme.highlight;
+        border-width: CarpiState.holding && r.kind == CarpiKind.step ? 3px : 0;
+        border-color: #ffffff;
+    }
+
+    HorizontalLayout {
+        padding-left: 18px;
+        padding-right: 16px;
+        spacing: 12px;
+        Text {
+            text: r.label;
+            color: root.ink;
+            font-size: M.font;
+            font-weight: 500;
+            font-family: r.mono ? "monospace" : "Roboto";
+            vertical-alignment: center;
+            overflow: elide;
+            min-width: min(self.preferred-width, 200px);
+        }
+        if r.tag != "": Tag {
+            y: (parent.height - self.height) / 2;
+            text: r.tag;
+            ink: root.soft;
+        }
+        Rectangle { horizontal-stretch: 1; }
+        if root.sided: Chevron {
+            y: (parent.height - self.height) / 2;
+            left: true;
+            stroke: root.focused ? M.on-focus : Theme.text-disabled;
+        }
+        if r.value != "": Text {
+            text: r.value;
+            color: root.sided ? root.ink : root.soft;
+            font-size: M.font;
+            font-weight: root.sided ? 500 : 400;
+            font-family: r.mono ? "monospace" : "Roboto";
+            vertical-alignment: center;
+            horizontal-alignment: right;
+            overflow: elide;
+        }
+        if root.sided: Chevron {
+            y: (parent.height - self.height) / 2;
+            stroke: root.focused ? M.on-focus : Theme.text-disabled;
+        }
+        if r.kind == CarpiKind.route: Chevron {
+            y: (parent.height - self.height) / 2;
+            stroke: root.soft;
+        }
+        if r.kind == CarpiKind.toggle: Switch {
+            y: (parent.height - self.height) / 2;
+            on: r.checked;
+            focused: root.focused;
+        }
+        if r.checked && r.kind == CarpiKind.info: Check {
+            y: (parent.height - self.height) / 2;
+            stroke: root.focused ? M.on-focus : Theme.primary;
+        }
+        if r.kind == CarpiKind.button && r.button != "": Rectangle {
+            y: (parent.height - self.height) / 2;
+            height: 40px;
+            width: word.preferred-width + 30px;
+            border-radius: 20px;
+            background: root.focused ? #ffffff : transparent;
+            border-width: root.focused ? 0 : 2px;
+            border-color: r.alert ? M.alert : Theme.primary;
+            word := Text {
+                text: r.button;
+                color: root.focused ? Theme.highlight : (r.alert ? M.alert : Theme.primary);
+                font-size: 20px;
+                font-weight: 700;
+                vertical-alignment: center;
+                horizontal-alignment: center;
+            }
+        }
+    }
+    TouchArea {
+        clicked => { root.pushed(); }
+    }
+}
+
+component Tile inherits Rectangle {
+    in property <CarpiCell> c;
+    in property <bool> focused;
+    in property <bool> outlined;
+    in property <int> cols;
+    callback pushed();
+
+    property <length> label-px: root.cols >= 4 ? 19px : (root.cols == 3 ? 22px : 26px);
+    // As big as the tile allows, smaller for long values so they fit beside the unit.
+    property <length> room: root.width - 26px - (c.unit.character-count * 0.6 + 0.5) * root.label-px;
+    property <length> value-px: min(root.height * 0.42, root.cols >= 4 ? 40px : (root.cols == 3 ? 56px : 80px), root.room / max(1, c.value.character-count * 0.58));
+    property <color> ink: root.focused ? M.on-focus : Theme.text;
+    property <color> soft: root.focused ? #ffffffd9 : Theme.text-secondary;
+
+    border-radius: M.radius;
+    background: root.focused ? Theme.highlight : (c.empty ? transparent : Theme.paper);
+    border-width: root.outlined && !root.focused ? 2px : 0;
+    border-color: c.empty ? Theme.divider : Theme.hairline;
+
+    if !c.empty: VerticalLayout {
+        padding-left: 14px;
+        padding-right: 12px;
+        padding-top: 8px;
+        padding-bottom: 8px;
+        opacity: c.dim && !root.focused ? 0.5 : 1;
+        Text {
+            text: c.label;
+            color: root.soft;
+            font-size: root.label-px;
+            font-weight: 500;
+            overflow: elide;
+        }
+        if c.why == "": HorizontalLayout {
+            vertical-stretch: 1;
+            spacing: 6px;
+            Text {
+                text: c.value;
+                color: root.ink;
+                font-size: root.value-px;
+                font-weight: 500;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            Text {
+                horizontal-stretch: 1;
+                text: c.unit;
+                color: root.soft;
+                font-size: root.label-px;
+                vertical-alignment: center;
+            }
+        }
+        if c.why != "": Text {
+            vertical-stretch: 1;
+            text: c.why;
+            color: root.focused ? root.soft : Theme.text-disabled;
+            font-size: root.label-px;
+            vertical-alignment: center;
+        }
+    }
+    if c.empty && root.outlined: Text {
+        text: "Empty";
+        color: root.focused ? M.on-focus : Theme.text-disabled;
+        font-size: root.label-px;
+    }
+    TouchArea {
+        clicked => { root.pushed(); }
+    }
+}
+
+component Grid inherits Rectangle {
+    in property <int> focus-index;
+    property <int> n: CarpiState.cells.length;
+    property <int> cols: max(1, CarpiState.cols);
+    property <int> lines: max(1, ceil(n / cols));
+    property <length> cw: (root.width - (cols - 1) * M.gap) / cols;
+    property <length> ch: (root.height - (lines - 1) * M.gap) / lines;
+
+    for c[i] in CarpiState.cells: Tile {
+        x: mod(i, root.cols) * (root.cw + M.gap);
+        y: floor(i / root.cols) * (root.ch + M.gap);
+        width: root.cw;
+        height: root.ch;
+        c: c;
+        cols: root.cols;
+        outlined: CarpiState.outlined;
+        focused: c.focus-at >= 0 && root.focus-index == c.focus-at;
+        pushed => { CarpiState.cell(i); }
+    }
+}
+
+// Ambient across on a log scale (ticks are raw sensor values), RNS-E panel % up.
+component Plot inherits Rectangle {
+    property <length> gutter: 46px;
+    property <length> head: 12px;
+    property <length> foot: 48px;
+    property <length> pw: root.width - root.gutter - 12px;
+    property <length> ph: root.height - root.head - root.foot;
+    property <length> dot: 9px;
+
+    border-radius: M.radius;
     background: Theme.paper;
 
     area := Rectangle {
@@ -169,7 +461,7 @@ component CarpiPlot inherits Rectangle {
             y: parent.height * (1 - f);
             width: parent.width;
             height: 1px;
-            background: Theme.divider;
+            background: Theme.hairline;
         }
         if CarpiState.plot-curve != "": Path {
             width: parent.width;
@@ -178,7 +470,7 @@ component CarpiPlot inherits Rectangle {
             viewbox-height: 1000;
             commands: CarpiState.plot-curve;
             stroke: Theme.primary;
-            stroke-width: 2px;
+            stroke-width: 3px;
             fill: transparent;
         }
         for p in CarpiState.plot-manual: Rectangle {
@@ -205,35 +497,35 @@ component CarpiPlot inherits Rectangle {
             height: root.dot * 2;
             border-radius: root.dot;
             background: Theme.primary;
-            border-width: 2px;
+            border-width: 3px;
             border-color: Theme.paper;
         }
     }
-    for t[i] in [{ f: 1.0, l: "100 %" }, { f: 0.5, l: "50 %" }, { f: 0.0, l: "0" }]: Text {
+    for t[i] in [{ f: 1.0, l: "100%" }, { f: 0.5, l: "50%" }, { f: 0.0, l: "0" }]: Text {
         x: 0;
         width: root.gutter - 6px;
         y: area.y + area.height * (1 - t.f) - self.height / 2;
         text: t.l;
         color: Theme.text-secondary;
-        font-size: 11px;
+        font-size: 15px;
         horizontal-alignment: right;
     }
     for t in CarpiState.plot-ticks: Text {
-        x: area.x + t.at * area.width - 24px;
-        width: 48px;
-        y: area.y + area.height + 2px;
+        x: area.x + t.at * area.width - 26px;
+        width: 52px;
+        y: area.y + area.height + 3px;
         text: t.label;
         color: Theme.text-secondary;
-        font-size: 11px;
+        font-size: 15px;
         horizontal-alignment: center;
     }
     Text {
         x: area.x;
         width: area.width;
-        y: root.height - self.height - 4px;
+        y: root.height - self.height - 6px;
         text: CarpiState.plot-caption;
         color: Theme.text-disabled;
-        font-size: 11px;
+        font-size: 15px;
         overflow: elide;
     }
 }
@@ -242,110 +534,128 @@ export component CarpiView inherits Rectangle {
     background: Theme.background;
 
     property <int> focus-index: Focus.zone == FocusZone.main ? Focus.main-index : -1;
-    property <length> caption-h: 34px;
-    property <bool> header-shown: CarpiState.title != "" || CarpiState.back-at >= 0;
+    property <bool> has-grid: CarpiState.cells.length > 0;
 
+    // Keeps the focused row in the middle third.
     changed focus-index => {
-        if (CarpiState.layout != CarpiLayout.list) {
+        if (CarpiState.layout != CarpiLayout.list || focus-index < 0 || focus-index >= CarpiState.spots.length) {
             return;
         }
-        if (focus-index < CarpiState.row-base) {
+        let s = CarpiState.spots[focus-index];
+        if (s.line == -1) {
+            return;
+        }
+        if (s.line >= 0) {
             flick.content-y = 0;
             return;
         }
-        let k = focus-index - CarpiState.row-base;
-        if (k >= CarpiState.scroll-rows.length) {
-            return;
-        }
-        let top = CarpiState.scroll-rows[k] * Metrics.row-h + CarpiState.scroll-sections[k] * root.caption-h;
-        if (top + flick.content-y < root.caption-h) {
-            flick.content-y = min(0, root.caption-h - top);
-        } else if (top + Metrics.row-h + flick.content-y > flick.height) {
-            flick.content-y = flick.height - top - Metrics.row-h;
+        let top = (root.has-grid ? flick.height + M.gap : 0) + s.rows * M.row-h + s.sections * M.caption-h;
+        let mid = top + M.row-h / 2 + flick.content-y;
+        if (mid < flick.height / 3 || mid > flick.height * 2 / 3) {
+            flick.content-y = clamp(flick.height / 2 - top - M.row-h / 2, min(0px, flick.height - list.preferred-height), 0px);
         }
     }
 
     VerticalLayout {
-        padding-left: Metrics.pad-x;
-        padding-right: Metrics.pad-x;
-        padding-top: Metrics.pad-top;
-        padding-bottom: Metrics.pad-bottom;
+        padding-left: M.pad-x;
+        padding-right: M.pad-x;
+        padding-top: 8px;
+        padding-bottom: 12px;
         spacing: 8px;
 
-        HorizontalLayout {
-            height: Metrics.header-h;
-            spacing: 8px;
-            if root.header-shown: SettingsHeader {
-                horizontal-stretch: 1;
-                title: CarpiState.title;
-                can-back: CarpiState.back-at >= 0;
-                back-focused: CarpiState.back-at >= 0 && Focus.main(CarpiState.back-at);
-                back => { CarpiState.back(); }
-            }
-            for p[i] in CarpiState.pills: RowButton {
-                y: (parent.height - self.height) / 2;
-                text: p.label;
-                outlined: !p.active;
-                enabled: p.enabled;
-                focused: Focus.main(p.focus-at);
-                clicked => { CarpiState.pill(i); }
-            }
-            Rectangle { horizontal-stretch: root.header-shown ? 0 : 1; }
-        }
+        Header { }
 
         if CarpiState.note != "": Text {
             text: CarpiState.note;
             color: Theme.text-secondary;
-            font-size: Metrics.row-font - 1px;
-            wrap: word-wrap;
+            font-size: M.small;
+            overflow: elide;
         }
 
-        Rectangle {
+        body := Rectangle {
             vertical-stretch: 1;
-            if CarpiState.plot-shown && CarpiState.layout == CarpiLayout.list: CarpiPlot {
+            if CarpiState.plot-shown && CarpiState.layout == CarpiLayout.list: Plot {
                 x: 0;
-                width: parent.width * 0.46;
+                width: parent.width * 0.44;
                 height: parent.height;
             }
             flick := Flickable {
-                x: CarpiState.plot-shown ? parent.width * 0.46 + 8px : 0;
+                x: CarpiState.plot-shown ? parent.width * 0.44 + 10px : 0;
                 width: parent.width - self.x;
                 height: parent.height;
                 visible: CarpiState.layout == CarpiLayout.list;
                 content-height: list.preferred-height;
                 list := VerticalLayout {
                     width: parent.width;
-                    padding-left: 0.5rem;
-                    padding-right: 0.5rem;
-                    padding-bottom: 2px;
-                    for r[i] in CarpiState.rows: Rectangle {
-                        height: r.section ? root.caption-h : Metrics.row-h;
-                        if r.section: Text {
-                            x: Metrics.row-pad;
-                            y: parent.height - self.height - 6px;
-                            text: r.title;
-                            color: Theme.primary;
-                            font-size: Metrics.row-font - 1px;
-                            font-weight: 500;
+                    if root.has-grid: VerticalLayout {
+                        height: flick.height + M.gap;
+                        padding-bottom: M.gap;
+                        Grid {
+                            focus-index: root.focus-index;
                         }
-                        if !r.section: SettingsRow {
+                    }
+                    for r[i] in CarpiState.rows: Rectangle {
+                        height: r.kind == CarpiKind.section ? M.caption-h : M.row-h;
+                        if r.kind == CarpiKind.section: Text {
+                            x: 18px;
+                            y: parent.height - self.height - 6px;
+                            text: r.label;
+                            color: Theme.primary;
+                            font-size: M.small;
+                            font-weight: 700;
+                        }
+                        if r.kind != CarpiKind.section: RowView {
                             width: parent.width;
                             height: parent.height;
-                            data: r.data;
-                            focused: Focus.main(r.data.focus-at);
-                            first: r.first;
-                            last: r.last;
-                            open => { CarpiState.row(i); }
-                            press => { CarpiState.row(i); }
-                            toggle => { CarpiState.row(i); }
+                            r: r;
+                            focused: root.focus-index == r.focus-at;
+                            pushed => { CarpiState.row(i); }
                         }
                     }
                 }
             }
-            if CarpiState.layout == CarpiLayout.grid: CarpiGrid {
+            if CarpiState.layout == CarpiLayout.grid: Grid {
                 width: parent.width;
                 height: parent.height;
+                focus-index: root.focus-index;
             }
+        }
+    }
+}
+
+// Over everything, AA and CarPlay included: a short line from carpid or the pages.
+export component CarpiToastView inherits Rectangle {
+    in property <length> window-width;
+    width: min(row.preferred-width, root.window-width - 48px);
+    height: row.preferred-height;
+    background: #141416eb;
+    border-radius: 14px;
+    border-width: 1px;
+    border-color: #ffffff2e;
+    drop-shadow-blur: 22px;
+    drop-shadow-offset-y: 6px;
+    drop-shadow-color: #00000066;
+    opacity: CarpiToast.shown ? 1 : 0;
+    animate opacity { duration: CarpiToast.shown ? 160ms : 300ms; easing: ease-in-out; }
+
+    row := HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 24px;
+        padding-top: 14px;
+        padding-bottom: 14px;
+        spacing: 14px;
+        Rectangle {
+            width: 6px;
+            border-radius: 3px;
+            background: CarpiToast.level == 2 ? #ff6b6b : (CarpiToast.level == 1 ? #ffb74d : #26c6c6);
+        }
+        Text {
+            text: CarpiToast.text;
+            color: #ffffff;
+            font-size: 24px;
+            font-weight: 500;
+            vertical-alignment: center;
+            overflow: elide;
         }
     }
 }

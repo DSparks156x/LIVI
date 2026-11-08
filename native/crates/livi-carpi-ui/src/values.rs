@@ -125,7 +125,7 @@ pub fn show(name: &str, seen: Option<&Seen>, now: Instant) -> Shown {
         .map(|v| text(v, d.kind))
         .unwrap_or_else(|| NONE.to_string());
     let unit = match seen.and_then(|s| s.value.as_ref()) {
-        Some(Value::Num(_)) if !matches!(d.kind, Kind::Selector) => d.unit,
+        Some(Value::Num(_)) if !matches!(d.kind, Kind::Selector | Kind::Text) => d.unit,
         _ => "",
     };
     Shown {
@@ -147,6 +147,7 @@ pub fn text(v: &Value, kind: Kind) -> String {
         (Value::Num(n), Kind::Selector) => selector(*n),
         (Value::Num(n), Kind::Num(dp)) => number(*n, dp),
         (Value::Num(n), Kind::Flag(on, off)) => if *n != 0.0 { on } else { off }.to_string(),
+        (Value::Num(n), Kind::Text) => number(*n, 0),
         (Value::Bool(b), Kind::Flag(on, off)) => if *b { on } else { off }.to_string(),
         (Value::Bool(b), _) => if *b { "Yes" } else { "No" }.to_string(),
         (Value::Text(t), _) => t.clone(),

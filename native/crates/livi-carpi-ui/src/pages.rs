@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Drew Sparks
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The three pages: what each shows, and what pressing things does.
+//! The three pages: what each shows, and what pushing and the D-pad do (docs/PAGES.md 1).
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -14,49 +14,39 @@ use carpi_proto::{
 use crate::PageId;
 use crate::client::{Capture, Client, Snapshot};
 use crate::config::{self, Saved};
-use crate::defs::{DEFS, GROUPS, MAX_CELLS, section};
+use crate::defs::{BRIDGE, DEFS, hidden};
 use crate::diag::{self, NO_POLL};
 use crate::light::{self, STEP_AMBIENT, STEP_PCT};
 use crate::settings::{self as cfg, DIS_SLOTS};
+use crate::slots::{self, Board, Editor, Picked, Picker, SlotAct, polled, reading, tile};
 use crate::values::{NONE, Store, age, show};
-use crate::view::{Act, CarScreen, Cell, Hit, Layout, Row, RowKind, View};
+use crate::view::{Act, CarScreen, Hit, Layout, Row, RowKind, View};
 
 /// The light model's curve, JSON for the plot: no use as a reading.
 const CURVE: &str = "light.curve";
 
-/// Where the bridge's sections land in carpid's store.
-const BRIDGE: [&str; 6] = ["projection.", "nav.", "media.", "call.", "phone.", "ui."];
-
-const SECTIONS: [&str; 10] = [
-    "Engine",
-    "Chassis",
-    "Body",
-    "Lights",
-    "Light model",
-    "Electrical",
-    "RNS-E",
-    "Haldex",
-    "Other",
-    "",
-];
-
 /// Longest portal PIN the entry takes.
 const PIN_MAX: usize = 8;
 
-/// After pressing something.
+/// After pushing something.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Moved {
     Stay,
-    /// A screen opened: focus its first row.
+    /// Another screen, or the same one moved on: focus the new view's start.
     Opened,
     /// Went back: focus this.
     Closed(i32),
+    /// Focus this on the new view.
+    Focus(i32),
 }
 
 pub struct Pages {
     saved: Saved,
     file: Option<PathBuf>,
-    editing: bool,
+    /// The Data page's pages.
+    board: Board,
+    /// The Data page's slot editor, while editing.
+    editor: Option<Editor>,
     module: Option<usize>,
     car: CarScreen,
     trail: Vec<i32>,
@@ -66,10 +56,12 @@ pub struct Pages {
     advanced: bool,
     /// Clearing this module's fault codes waits for a confirm.
     confirm: Option<u8>,
+    /// The picker of a cluster display reading.
+    reading: Picker,
 }
 
 impl Pages {
-    /// With the selection from `~/.config/LIVI/carpi-ui.json`.
+    /// With the pages from `~/.config/LIVI/carpi-ui.json`.
     pub fn load() -> Self {
         let file = config::path();
         let saved = file.as_deref().map(config::load).unwrap_or_default();
@@ -79,59 +71,75 @@ impl Pages {
     /// `file` is where changes go; `None` keeps them in memory.
     pub fn new(saved: Saved, file: Option<PathBuf>) -> Self {
         Self {
+            board: saved.board(),
             saved,
             file,
-            editing: false,
+            editor: None,
             module: None,
             car: CarScreen::Root,
             trail: Vec::new(),
             pin: String::new(),
             advanced: false,
             confirm: None,
+            reading: Picker::default(),
         }
     }
 
-    pub fn saved(&self) -> &Saved {
-        &self.saved
+    pub fn board(&self) -> &Board {
+        &self.board
+    }
+
+    pub fn recent(&self) -> &[String] {
+        &self.saved.recent
     }
 
     pub fn depth(&self, page: PageId) -> usize {
         match page {
-            PageId::Data => usize::from(self.editing),
+            PageId::Data => match &self.editor {
+                None => 0,
+                Some(Editor { picker: None, .. }) => 1,
+                Some(Editor {
+                    picker: Some(p), ..
+                }) => 2 + usize::from(p.cat.is_some()),
+            },
             PageId::Diagnostics => usize::from(self.module.is_some()),
-            PageId::Car => self.car.depth(),
-        }
-    }
-
-    /// One screen up.
-    fn close(&mut self, page: PageId) {
-        match page {
-            PageId::Data => self.editing = false,
-            PageId::Diagnostics => {
-                self.module = None;
-                self.confirm = None;
+            PageId::Car => {
+                let picking =
+                    matches!(self.car, CarScreen::Reading(_)) && self.reading.cat.is_some();
+                self.car.depth() + usize::from(picking)
             }
-            PageId::Car => self.car = self.car.parent().unwrap_or(CarScreen::Root),
-        }
-        if self.car != CarScreen::Pin {
-            self.pin.clear();
         }
     }
 
-    /// Diag catalog names to keep subscribed: the shown module's measuring values.
+    /// Diag catalog names to keep subscribed, so carpid polls them: the shown module's on the
+    /// diagnostics page, the shown page's on the Data page.
     pub fn watching(&self, page: PageId, snap: &Snapshot) -> Vec<String> {
-        let Some(i) = self.module.filter(|_| page == PageId::Diagnostics) else {
-            return Vec::new();
-        };
-        snap.diag
-            .modules()
-            .get(i)
-            .map(|m| {
-                diag::measured(m.module.tp2)
-                    .map(|v| v.0.to_string())
-                    .collect()
-            })
-            .unwrap_or_default()
+        match page {
+            PageId::Data => self
+                .board
+                .page()
+                .shown()
+                .iter()
+                .flatten()
+                .filter(|n| polled(n))
+                .cloned()
+                .collect(),
+            PageId::Diagnostics => {
+                let Some(i) = self.module else {
+                    return Vec::new();
+                };
+                snap.diag
+                    .modules()
+                    .get(i)
+                    .map(|m| {
+                        diag::measured(m.module.tp2)
+                            .map(|v| v.0.to_string())
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            }
+            PageId::Car => Vec::new(),
+        }
     }
 
     /// The UI path while `page` is shown. The light screens count as a page of their own.
@@ -155,22 +163,51 @@ impl Pages {
 
     /// Back to the page's first screen.
     pub fn reset(&mut self, page: PageId) {
-        while self.depth(page) > 0 {
-            self.close(page);
+        match page {
+            PageId::Data => self.editor = None,
+            PageId::Diagnostics => {
+                self.module = None;
+                self.confirm = None;
+            }
+            PageId::Car => {
+                self.car = CarScreen::Root;
+                self.reading = Picker::default();
+                self.pin.clear();
+            }
         }
         self.trail.clear();
     }
 
     /// One screen up. `None` on a page's first screen, where back leaves the page.
-    pub fn back(&mut self, page: PageId) -> Option<i32> {
-        if self.depth(page) == 0 {
-            return None;
+    pub fn back(&mut self, page: PageId) -> Option<Moved> {
+        match page {
+            PageId::Data => {
+                let e = self.editor.as_mut()?;
+                if !e.back() {
+                    self.editor = None;
+                }
+                Some(Moved::Opened)
+            }
+            PageId::Diagnostics => {
+                self.module.take()?;
+                self.confirm = None;
+                Some(Moved::Closed(self.trail.pop().unwrap_or(0)))
+            }
+            PageId::Car => {
+                if matches!(self.car, CarScreen::Reading(_)) && self.reading.back() {
+                    return Some(Moved::Opened);
+                }
+                self.car = self.car.parent()?;
+                self.reading = Picker::default();
+                if self.car != CarScreen::Pin {
+                    self.pin.clear();
+                }
+                Some(Moved::Closed(self.trail.pop().unwrap_or(0)))
+            }
         }
-        self.close(page);
-        Some(self.trail.pop().unwrap_or(0))
     }
 
-    /// Presses what `hit` points at on `view`, the view of `page` the user saw. `focus` is where
+    /// Pushes what `hit` points at on `view`, the view of `page` the user saw. `focus` is where
     /// focus was, to come back to.
     pub fn press(
         &mut self,
@@ -181,53 +218,58 @@ impl Pages {
         client: &Client,
     ) -> Moved {
         if *hit == Hit::Back {
-            return self.back(page).map_or(Moved::Stay, Moved::Closed);
+            return self.back(page).unwrap_or(Moved::Stay);
         }
-        let Some(act) = view.act(hit) else {
-            return Moved::Stay;
-        };
-        let group = self.saved.group();
+        match view.act(hit) {
+            Some(act) => self.run(page, act.clone(), focus, client),
+            None => Moved::Stay,
+        }
+    }
+
+    /// The D-pad on `hit`: `delta` < 0 is left.
+    pub fn side(
+        &mut self,
+        page: PageId,
+        view: &View,
+        hit: Option<&Hit>,
+        delta: i32,
+        focus: i32,
+        client: &Client,
+    ) -> Moved {
+        match view.side_act(hit, delta) {
+            Some(act) => self.run(page, act.clone(), focus, client),
+            None => Moved::Stay,
+        }
+    }
+
+    fn run(&mut self, page: PageId, act: Act, focus: i32, client: &Client) -> Moved {
         if !matches!(act, Act::ClearAsk(_)) {
             self.confirm = None;
         }
         let opened = match act {
             Act::None => false,
-            Act::Group(id) => {
-                self.saved.group = id.to_string();
-                self.store();
-                false
-            }
+            Act::Slots(a) => return self.slots(page, &a, client),
             Act::Edit => {
-                self.editing = true;
-                true
-            }
-            Act::Reset => {
-                self.saved.reset(group);
-                self.store();
-                false
-            }
-            Act::Toggle(name) => {
-                if self.saved.toggle(group, name) {
-                    self.store();
-                }
-                false
+                self.editor = Some(Editor::default());
+                return Moved::Opened;
             }
             Act::Module(i) => {
-                self.module = Some(*i);
+                self.module = Some(i);
                 true
             }
             Act::Car(screen) => {
-                self.car = *screen;
-                *screen != CarScreen::Root
+                self.car = screen;
+                self.reading = Picker::default();
+                screen != CarScreen::Root
             }
             Act::Capture => {
-                client.save_capture();
+                client.capture();
                 false
             }
             Act::Patch(patch, back) => {
-                client.set((**patch).clone());
-                if *back {
-                    return self.back(page).map_or(Moved::Stay, Moved::Closed);
+                client.set(*patch);
+                if back {
+                    return self.back(page).unwrap_or(Moved::Stay);
                 }
                 false
             }
@@ -242,16 +284,16 @@ impl Pages {
                 false
             }
             Act::Diag(action) => {
-                client.diag(*action);
+                client.diag(action);
                 false
             }
             Act::ClearAsk(module) => {
-                self.confirm = Some(*module);
+                self.confirm = Some(module);
                 false
             }
             Act::ClearCancel => false,
             Act::Light(action) => {
-                client.light(*action);
+                client.light(action);
                 false
             }
             Act::Advanced => {
@@ -264,7 +306,7 @@ impl Pages {
                     portal_pin: Some(PinChange::Set { pin }),
                     ..Default::default()
                 });
-                return self.back(page).map_or(Moved::Stay, Moved::Closed);
+                return self.back(page).unwrap_or(Moved::Stay);
             }
         };
         if opened {
@@ -275,96 +317,128 @@ impl Pages {
         }
     }
 
-    fn store(&self) {
+    /// The Data page's tabs and editor, and the cluster display's reading picker.
+    fn slots(&mut self, page: PageId, a: &SlotAct, client: &Client) -> Moved {
+        if page == PageId::Car {
+            return self.dis_pick(a, client);
+        }
+        let Some(e) = &mut self.editor else {
+            // The plain page: tabs and the D-pad.
+            let n = self.board.pages.len();
+            let moved = match a {
+                SlotAct::Page(i) => {
+                    self.board.shown = (*i).min(n - 1);
+                    Moved::Stay
+                }
+                SlotAct::PageStep(d) => {
+                    self.board.shown =
+                        (self.board.shown as i32 + d).clamp(0, n as i32 - 1) as usize;
+                    Moved::Focus(self.board.shown as i32)
+                }
+                _ => return Moved::Stay,
+            };
+            self.store();
+            return moved;
+        };
+        let (focus, save) = e.apply(a, &mut self.board, &mut self.saved.recent, &slots::DATA);
+        if save {
+            self.store();
+        }
+        match focus {
+            slots::Focus::Start => Moved::Opened,
+            slots::Focus::Stay => Moved::Stay,
+            slots::Focus::At(i) => Moved::Focus(i),
+        }
+    }
+
+    fn dis_pick(&mut self, a: &SlotAct, client: &Client) -> Moved {
+        let CarScreen::Reading(at) = self.car else {
+            return Moved::Stay;
+        };
+        match self.reading.apply(a, &slots::DIS, &self.saved.recent) {
+            Picked::Moved => Moved::Opened,
+            Picked::Stay => Moved::Stay,
+            Picked::Chose(name) => {
+                let Some(s) = client.snapshot().settings.clone() else {
+                    return Moved::Stay;
+                };
+                if let Some(n) = &name {
+                    slots::remember(&mut self.saved.recent, n);
+                    self.store();
+                }
+                client.set(SettingsPatch {
+                    dis_readings: Some(cfg::reading_set(&s.dis.readings, at, name.as_deref())),
+                    ..Default::default()
+                });
+                self.reading = Picker::default();
+                self.back(PageId::Car).unwrap_or(Moved::Stay)
+            }
+        }
+    }
+
+    fn store(&mut self) {
+        self.saved.data = Some(self.board.clone());
         let Some(file) = &self.file else { return };
         if let Err(e) = config::save(file, &self.saved) {
-            eprintln!("[carpi-ui] can't save {}: {e}", file.display());
+            eprintln!("[carpi-ui] can't save the pages: {e}");
         }
     }
 
     pub fn view(&self, page: PageId, snap: &Snapshot, now: Instant) -> View {
         match page {
-            PageId::Data if self.editing => self.edit(snap, now),
-            PageId::Data => self.grid(snap, now),
+            PageId::Data => match &self.editor {
+                Some(e) => {
+                    let mut v = e.view(&self.board, &self.saved.recent, snap, now, &slots::DATA);
+                    if !snap.connected {
+                        v.note = problem(snap);
+                    }
+                    v
+                }
+                None => self.grid(snap, now),
+            },
             PageId::Diagnostics => match self.module {
                 Some(i) => module(snap, now, i, self.confirm),
                 None => modules(snap),
             },
-            PageId::Car => car(self.car, snap, now, &self.pin, self.advanced),
+            PageId::Car => car(self.car, snap, now, &self.pin, self.advanced, self),
         }
     }
 
     fn grid(&self, snap: &Snapshot, now: Instant) -> View {
-        let group = self.saved.group();
-        let names = self.saved.values(group);
-        let note = if !snap.connected {
+        let page = self.board.page();
+        let mut v = View::new(Layout::Grid, "Data", false);
+        for (i, p) in self.board.pages.iter().enumerate() {
+            v.pill(
+                p.name.clone(),
+                i == self.board.shown,
+                Act::Slots(SlotAct::Page(i)),
+            )
+            .side = Some(steps());
+        }
+        v.pill("Edit", false, Act::Edit).side = Some(steps());
+        v.side = Some(steps());
+        v.cols = slots::cols(page.size);
+        for slot in page.shown() {
+            v.cell(tile(slot.as_deref(), snap, now), false);
+        }
+        v.note = if !snap.connected {
             problem(snap)
-        } else if names.is_empty() {
-            "Nothing picked. Edit adds values.".into()
+        } else if page.shown().iter().all(Option::is_none) {
+            "Nothing on this page yet. Edit adds values.".into()
         } else {
             String::new()
         };
-        let mut v = View::new(Layout::Grid, "", false).note(note);
-        for g in GROUPS {
-            v.pill(g.label, g.id == group, true, Act::Group(g.id));
-        }
-        v.pill("Edit", false, true, Act::Edit);
-        v.cells = names
-            .iter()
-            .map(|n| {
-                let s = show(n, snap.values.get(n), now);
-                Cell {
-                    dim: s.freshness.dim(),
-                    label: s.label,
-                    name: s.name,
-                    value: s.value,
-                    unit: s.unit,
-                    age: s.age,
-                }
-            })
-            .collect();
+        v.start = self.board.shown as i32;
         v.finish()
     }
+}
 
-    fn edit(&self, snap: &Snapshot, now: Instant) -> View {
-        let group = self.saved.group();
-        let label = GROUPS
-            .iter()
-            .find(|g| g.id == group)
-            .map_or("", |g| g.label);
-        let picked = self.saved.values(group);
-        let note = format!(
-            "{} of {MAX_CELLS} picked. Kept in ~/.config/LIVI/carpi-ui.json until carpid keeps page settings.",
-            picked.len()
-        );
-        let mut v = View::new(Layout::List, format!("{label} values"), true).note(note);
-        v.pill(
-            "Reset",
-            false,
-            self.saved.groups.contains_key(group),
-            Act::Reset,
-        );
-        let mut at = "";
-        for name in candidates(&snap.values) {
-            let sec = section(&name);
-            if sec != at {
-                v.section(sec);
-                at = sec;
-            }
-            let s = show(&name, snap.values.get(&name), now);
-            let checked = picked.contains(&name);
-            let mut row = Row::new(
-                RowKind::Toggle,
-                format!("{} ({name})", s.label),
-                reading(&s.value, &s.unit),
-            )
-            .enabled(checked || picked.len() < MAX_CELLS)
-            .act(Act::Toggle(name.clone()));
-            row.checked = checked;
-            v.row(row);
-        }
-        v.finish()
-    }
+/// The D-pad on the Data page: the page before or after.
+fn steps() -> (Act, Act) {
+    (
+        Act::Slots(SlotAct::PageStep(-1)),
+        Act::Slots(SlotAct::PageStep(1)),
+    )
 }
 
 fn problem(snap: &Snapshot) -> String {
@@ -373,49 +447,18 @@ fn problem(snap: &Snapshot) -> String {
         .unwrap_or_else(|| "carpid not connected".into())
 }
 
-fn reading(value: &str, unit: &str) -> String {
-    if unit.is_empty() || value == NONE {
-        value.to_string()
-    } else {
-        format!("{value} {unit}")
-    }
-}
-
-/// Every value the picker offers: the known ones, then whatever else carpid has, by section.
-fn candidates(store: &Store) -> Vec<String> {
-    let mut names: Vec<String> = DEFS.iter().map(|d| d.name.to_string()).collect();
-    let known = names.len();
-    names.extend(
-        store
-            .names()
-            .filter(|n| !BRIDGE.iter().any(|p| n.starts_with(p)) && *n != CURVE)
-            .filter(|n| !DEFS.iter().any(|d| d.name == *n))
-            .map(str::to_string),
-    );
-    let rank = |n: &str| {
-        SECTIONS
-            .iter()
-            .position(|s| *s == section(n))
-            .unwrap_or(SECTIONS.len())
-    };
-    let mut ordered: Vec<(usize, usize, String)> = names
-        .into_iter()
-        .enumerate()
-        .map(|(i, n)| (rank(&n), if i < known { i } else { known }, n))
-        .collect();
-    ordered.sort();
-    ordered.into_iter().map(|(_, _, n)| n).collect()
-}
-
-/// A value as an info row: "Label (name)" and its reading, dimmed when not fresh.
+/// A value as an info row: its label and reading, dimmed when not fresh. One line why when
+/// there is no reading.
 fn value_row(name: &str, snap: &Snapshot, now: Instant) -> Row {
-    let s = show(name, snap.values.get(name), now);
-    let value = if s.freshness.dim() && s.value != NONE {
-        format!("{} · {}", reading(&s.value, &s.unit), s.age)
-    } else {
-        reading(&s.value, &s.unit)
+    let seen = snap.values.get(name);
+    let s = show(name, seen, now);
+    let value = match seen {
+        None => "not seen since start".to_string(),
+        Some(x) if x.value.is_none() => "no value".to_string(),
+        Some(_) if s.freshness.dim() => format!("{} · {}", reading(&s.value, &s.unit), s.age),
+        Some(_) => reading(&s.value, &s.unit),
     };
-    Row::new(RowKind::Info, format!("{} ({name})", s.label), value).dimmed(s.freshness.dim())
+    Row::new(RowKind::Info, s.label, value).dimmed(s.freshness.dim())
 }
 
 /// Known names under `prefix` in table order, then any others carpid has.
@@ -426,14 +469,14 @@ fn names_under(prefix: &str, store: &Store) -> Vec<String> {
         .map(|d| d.name.to_string())
         .collect();
     for (n, _) in store.under(prefix) {
-        if !names.iter().any(|m| m == n) {
+        if !names.iter().any(|m| m == n) && !hidden(n) && n != CURVE {
             names.push(n.to_string());
         }
     }
     names
 }
 
-/// The note over a diagnostics screen: no connection, or the job running or last run.
+/// The line under a diagnostics screen's header: no connection, or the job running or last run.
 fn diag_note(snap: &Snapshot, module: Option<u8>) -> String {
     if !snap.connected {
         return problem(snap);
@@ -443,17 +486,19 @@ fn diag_note(snap: &Snapshot, module: Option<u8>) -> String {
 
 fn modules(snap: &Snapshot) -> View {
     let diag = &snap.diag;
-    let mut note = diag_note(snap, None);
-    if note.is_empty() && diag.installed.is_none() {
-        note = "Default module list. Scan reads the gateway's install list.".into();
+    let mut v = View::new(Layout::List, "Diagnostics", false).note(diag_note(snap, None));
+    if snap.connected && !diag.busy() {
+        let label = if diag.installed.is_some() {
+            "Scan again"
+        } else {
+            "Scan"
+        };
+        v.pill(label, false, Act::Diag(DiagAction::InstallList));
     }
-    let mut v = View::new(Layout::List, "Diagnostics", false).note(note);
-    let free = snap.connected && !diag.busy();
-    v.pill("Scan", false, free, Act::Diag(DiagAction::InstallList));
     v.section(if diag.installed.is_some() {
-        "Install list"
+        "Installed modules"
     } else {
-        "Modules"
+        "Modules (not scanned yet)"
     });
     for (i, m) in diag.modules().iter().enumerate() {
         let faults = diag.dtcs.get(&m.module.tp2).map(Vec::len);
@@ -462,11 +507,11 @@ fn modules(snap: &Snapshot) -> View {
             (Some(1), _) => "1 fault".to_string(),
             (Some(n), _) => format!("{n} faults"),
             (None, Some(false)) => "not coded".to_string(),
-            (None, _) => NONE.to_string(),
+            (None, _) => String::new(),
         };
         let mut row = Row::new(
             RowKind::Route,
-            format!("{:02X} {}", m.module.address, m.module.name),
+            format!("{:02X}  {}", m.module.address, m.module.name),
             value,
         )
         .act(Act::Module(i));
@@ -474,6 +519,15 @@ fn modules(snap: &Snapshot) -> View {
         v.row(row);
     }
     v.finish()
+}
+
+/// A diag job's button: dimmed with "busy" while another runs.
+fn job_row(label: &str, word: &str, free: bool, act: Act) -> Row {
+    if free {
+        Row::new(RowKind::Button, label, "").button(word).act(act)
+    } else {
+        Row::new(RowKind::Info, label, "busy").dimmed(true)
+    }
 }
 
 fn module(snap: &Snapshot, now: Instant, i: usize, confirm: Option<u8>) -> View {
@@ -484,96 +538,117 @@ fn module(snap: &Snapshot, now: Instant, i: usize, confirm: Option<u8>) -> View 
     };
     let (addr, tp2) = (m.module.address, m.module.tp2);
     let note = diag_note(snap, Some(tp2));
-    let mut v = View::new(Layout::List, format!("{addr:02X} {}", m.module.name), true).note(note);
+    let mut v = View::new(Layout::List, format!("{addr:02X}  {}", m.module.name), true).note(note);
     let free = snap.connected && !diag.busy();
-
-    v.section("Identification");
-    let mut id = Row::new(
-        RowKind::Info,
-        "VCDS address, TP2 ID",
-        format!("{addr:02X}, 0x{tp2:02X}"),
-    );
-    id.mono = true;
-    v.row(id);
-    let coded = match m.coded {
-        Some(true) => "yes",
-        Some(false) => "no",
-        None => NONE,
-    };
-    v.row(Row::new(RowKind::Info, "Coded", coded));
-    let mut status = Row::new(
-        RowKind::Info,
-        "Install list status",
-        m.status
-            .map_or_else(|| NONE.to_string(), |s| format!("0x{s:02X}")),
-    );
-    status.mono = true;
-    v.row(status);
 
     v.section("Fault codes");
     match diag.dtcs.get(&tp2) {
-        Some(codes) if codes.is_empty() => v.row(Row::new(RowKind::Info, "No faults", "")),
+        Some(codes) if codes.is_empty() => {
+            v.row(Row::new(RowKind::Info, "No fault codes", ""));
+        }
         Some(codes) => {
             for c in codes {
                 let mut row = Row::new(
                     RowKind::Info,
                     c.code.clone(),
-                    format!("status 0x{:02X}", c.status),
+                    format!("status {:02X}", c.status),
                 );
                 row.alert = true;
                 row.mono = true;
                 v.row(row);
             }
         }
-        None => v.row(Row::new(RowKind::Info, "Fault codes", "not read")),
+        None => {
+            v.row(Row::new(RowKind::Info, "Not read yet", "").dimmed(true));
+        }
     }
-    let mut read = Row::new(RowKind::Button, "Read fault codes", "")
-        .enabled(free)
-        .act(Act::Diag(DiagAction::ReadDtcs { module: tp2 }));
-    read.button = "Read".into();
-    v.row(read);
+    v.row(job_row(
+        "Read fault codes",
+        "Read",
+        free,
+        Act::Diag(DiagAction::ReadDtcs { module: tp2 }),
+    ));
     if confirm == Some(tp2) {
-        let mut sure = Row::new(RowKind::Button, "Clear all of this module's codes?", "")
-            .enabled(free)
-            .act(Act::Diag(DiagAction::ClearDtcs {
+        let mut sure = job_row(
+            "Clear all of this module's codes?",
+            "Clear",
+            free,
+            Act::Diag(DiagAction::ClearDtcs {
                 module: tp2,
                 confirm: true,
-            }));
-        sure.button = "Confirm".into();
+            }),
+        );
         sure.alert = true;
         v.row(sure);
-        let mut keep = Row::new(RowKind::Button, "Keep them", "").act(Act::ClearCancel);
-        keep.button = "Cancel".into();
-        v.row(keep);
+        v.row(
+            Row::new(RowKind::Button, "Keep them", "")
+                .button("Cancel")
+                .act(Act::ClearCancel),
+        );
     } else {
-        let mut clear = Row::new(RowKind::Button, "Clear fault codes", "")
-            .enabled(free)
-            .act(Act::ClearAsk(tp2));
-        clear.button = "Clear".into();
-        v.row(clear);
+        v.row(job_row(
+            "Clear fault codes",
+            "Clear",
+            free,
+            Act::ClearAsk(tp2),
+        ));
     }
 
-    v.section("Measuring groups");
+    v.section("Measuring values");
     let mut any = false;
     for &(name, _, group, field) in diag::measured(tp2) {
         any = true;
         let mut row = value_row(name, snap, now);
-        let label = show(name, None, now).label;
-        row.label = format!("{group:03}.{field} {label}");
+        if snap.values.get(name).is_none() {
+            row.value = if snap.connected {
+                "polling…".into()
+            } else {
+                String::new()
+            };
+        }
+        row.tag = format!("{group:03}.{field}");
         v.row(row);
     }
     if !any {
         let why = if tp2 == NO_POLL {
-            "never polled: it upsets ESP and the Haldex"
+            "Never polled: it upsets ESP and the Haldex"
         } else {
-            "none in carpid's catalog"
+            "None in carpid's catalog"
         };
-        v.row(Row::new(RowKind::Info, "Values", why).dimmed(true));
+        v.row(Row::new(RowKind::Info, why, "").dimmed(true));
+    }
+
+    v.section("Module");
+    let mut id = Row::new(
+        RowKind::Info,
+        "Address",
+        format!("{addr:02X} (TP2 {tp2:02X})"),
+    );
+    id.mono = true;
+    v.row(id);
+    if let Some(coded) = m.coded {
+        v.row(Row::new(
+            RowKind::Info,
+            "Coded",
+            if coded { "yes" } else { "no" },
+        ));
+    }
+    if let Some(s) = m.status {
+        let mut status = Row::new(RowKind::Info, "Install list status", format!("{s:02X}"));
+        status.mono = true;
+        v.row(status);
     }
     v.finish()
 }
 
-fn car(screen: CarScreen, snap: &Snapshot, now: Instant, pin: &str, advanced: bool) -> View {
+fn car(
+    screen: CarScreen,
+    snap: &Snapshot,
+    now: Instant,
+    pin: &str,
+    advanced: bool,
+    pages: &Pages,
+) -> View {
     let note = if snap.connected {
         String::new()
     } else {
@@ -593,7 +668,7 @@ fn car(screen: CarScreen, snap: &Snapshot, now: Instant, pin: &str, advanced: bo
         CarScreen::Bridge => bridge(snap, now, note),
         CarScreen::Settings => settings(snap),
         CarScreen::Readings => readings(snap),
-        CarScreen::Reading(i) => dis_slot(snap, now, i),
+        CarScreen::Reading(i) => dis_slot(snap, now, i, pages),
         CarScreen::Bindings => bindings(snap),
         CarScreen::Binding(i) => binding(snap, i),
         CarScreen::Pin => pin_entry(snap, pin),
@@ -630,66 +705,70 @@ fn car_root(snap: &Snapshot, note: String) -> View {
             .map(|b| format!("{} {}", b.role, b.state.as_deref().unwrap_or("up")))
             .collect::<Vec<_>>()
             .join(", "),
-        _ => NONE.into(),
+        _ => String::new(),
     };
     let light = match flag(snap, "light.night") {
         Some(true) => "Night",
         Some(false) => "Day",
-        None => NONE,
+        None => "",
     };
     let rnse = match (flag(snap, "rnse.on_tv"), flag(snap, "rnse.radio_on")) {
         (Some(true), _) => "On TV",
         (_, Some(true)) => "On",
         (_, Some(false)) => "Off",
-        _ => NONE,
+        _ => "",
     };
-    let projection = match snap
-        .values
-        .get("projection.kind")
-        .and_then(|s| s.value.as_ref())
-    {
-        Some(Value::Text(k)) if k == "android_auto" => "Android Auto",
-        Some(Value::Text(k)) if k == "carplay" => "CarPlay",
+    let projection = match text_of(snap, "projection.kind") {
+        Some("android_auto") => "Android Auto",
+        Some("carplay") => "CarPlay",
         _ => "None",
     };
-    v.section("State");
     for (label, value, screen) in [
-        ("Buses", buses.as_str(), CarScreen::Buses),
         ("Light", light, CarScreen::Light),
+        ("Buses", buses.as_str(), CarScreen::Buses),
         ("RNS-E", rnse, CarScreen::Rnse),
-        ("Projection and bridge", projection, CarScreen::Bridge),
+        ("Phone and bridge", projection, CarScreen::Bridge),
     ] {
         v.row(Row::new(RowKind::Route, label, value).act(Act::Car(screen)));
     }
-    v.section("Capture");
-    let mut save = Row::new(RowKind::Button, "CAN capture", "")
-        .enabled(snap.connected && snap.capture != Capture::Saving)
-        .act(Act::Capture);
-    save.button = "Save capture".into();
-    v.row(save);
-    let (last, alert) = match &snap.capture {
-        Capture::Idle => (NONE.to_string(), false),
-        Capture::Saving => ("saving…".to_string(), false),
-        Capture::Saved { path, frames } => (format!("{path} ({frames} frames)"), false),
-        Capture::Failed(why) => (format!("failed: {why}"), true),
-    };
-    let mut row = Row::new(RowKind::Info, "Last capture", last);
-    row.alert = alert;
-    row.mono = matches!(snap.capture, Capture::Saved { .. });
-    v.row(row);
-    v.section("Settings");
     let tx = match &snap.settings {
         Some(s) if s.tx_enabled => "TX on",
         Some(_) => "TX off",
-        None => NONE,
+        None => "",
     };
     v.row(Row::new(RowKind::Route, "Settings", tx).act(Act::Car(CarScreen::Settings)));
+    v.section("Capture");
+    let saving = snap.capture == Capture::Saving;
+    if saving {
+        v.row(Row::new(RowKind::Info, "Saving a capture", "…").dimmed(true));
+    } else if snap.connected {
+        v.row(
+            Row::new(RowKind::Button, "Save the last 5 minutes", "")
+                .button("Capture")
+                .act(Act::Capture),
+        );
+    }
+    match &snap.capture {
+        Capture::Saved { label, summary } => {
+            v.row(Row::new(
+                RowKind::Info,
+                format!("Last: {label}"),
+                summary.clone(),
+            ));
+        }
+        Capture::Failed(why) => {
+            let mut row = Row::new(RowKind::Info, "Last capture failed", why.clone());
+            row.alert = true;
+            v.row(row);
+        }
+        Capture::Idle | Capture::Saving => {}
+    }
     v.finish()
 }
 
 fn bus_rows(v: &mut View, buses: Option<&[BusInfo]>) {
     let Some(buses) = buses.filter(|b| !b.is_empty()) else {
-        v.row(Row::new(RowKind::Info, "No bus data", NONE));
+        v.row(Row::new(RowKind::Info, "No bus data from carpid yet", "").dimmed(true));
         return;
     };
     for b in buses {
@@ -713,9 +792,9 @@ fn bus_rows(v: &mut View, buses: Option<&[BusInfo]>) {
             }
             let mut row = Row::new(
                 RowKind::Info,
-                format!("Node 0x{:02X}", m.node),
+                format!("Node {:02X}", m.node),
                 format!(
-                    "next 0x{:02X} · {} · {}",
+                    "next {:02X} · {} · {}",
                     m.successor,
                     flags.join(", "),
                     age(Duration::from_millis(m.age_ms))
@@ -738,12 +817,12 @@ fn listed(snap: &Snapshot, now: Instant, note: String, title: &str, prefixes: &[
 }
 
 fn bridge(snap: &Snapshot, now: Instant, note: String) -> View {
-    let mut v = View::new(Layout::List, "Projection and bridge", true).note(note);
+    let mut v = View::new(Layout::List, "Phone and bridge", true).note(note);
     v.section("carpid");
     v.row(Row::new(
         RowKind::Info,
         "Daemon",
-        snap.daemon.clone().unwrap_or_else(|| NONE.into()),
+        snap.daemon.clone().unwrap_or_default(),
     ));
     let link = if snap.connected {
         "connected".to_string()
@@ -752,7 +831,14 @@ fn bridge(snap: &Snapshot, now: Instant, note: String) -> View {
     };
     v.row(Row::new(RowKind::Info, "Pages link", link));
     let mut any = false;
-    for p in BRIDGE {
+    for (p, title) in BRIDGE.iter().zip([
+        "Projection",
+        "Navigation",
+        "Media",
+        "Call",
+        "Phone",
+        "Focus",
+    ]) {
         let names: Vec<String> = snap
             .values
             .under(p)
@@ -763,23 +849,20 @@ fn bridge(snap: &Snapshot, now: Instant, note: String) -> View {
             continue;
         }
         any = true;
-        v.section(format!("Bridge: {}", p.trim_end_matches('.')));
+        v.section(title);
         for n in names {
             v.row(value_row(&n, snap, now));
         }
     }
     if !any {
         v.section("Bridge");
-        v.row(Row::new(
-            RowKind::Info,
-            "Nothing pushed",
-            "is livi-carpi connected?",
-        ));
+        v.row(Row::new(RowKind::Info, "LIVI hasn't pushed anything to carpid", "").dimmed(true));
     }
     v.finish()
 }
 
-/// The note over a settings screen: no connection, a failed change, or a restart to do.
+/// The line under a settings screen's header: no connection, a failed change, or a restart to
+/// do.
 fn settings_note(snap: &Snapshot) -> String {
     if !snap.connected {
         return problem(snap);
@@ -802,26 +885,32 @@ fn patch(p: SettingsPatch, back: bool) -> Act {
 }
 
 fn toggle(label: &str, on: bool, act: Act) -> Row {
-    let mut row = Row::new(RowKind::Toggle, label, "").act(act);
-    row.checked = on;
-    row
+    Row::new(RowKind::Toggle, label, "").act(act).checked(on)
 }
 
-/// A settings screen, or one saying they haven't come yet.
+/// A choice the D-pad flips both ways, and push flips too: for settings with two values.
+fn flip(label: &str, value: &str, act: Act) -> Row {
+    Row::new(RowKind::Choice, label, value)
+        .act(act.clone())
+        .side(act.clone(), act)
+}
+
+/// A settings screen, or one line saying they haven't come yet.
 fn with_settings(snap: &Snapshot, title: &str, body: impl FnOnce(&mut View, &Settings)) -> View {
     let mut v = View::new(Layout::List, title, true).note(settings_note(snap));
     match &snap.settings {
         Some(s) => body(&mut v, s),
-        None => v.row(Row::new(RowKind::Info, "Settings", "not from carpid yet").dimmed(true)),
+        None => {
+            v.row(Row::new(RowKind::Info, "Waiting for carpid's settings", "").dimmed(true));
+        }
     }
     v.finish()
 }
 
 fn settings(snap: &Snapshot) -> View {
     with_settings(snap, "Settings", |v, s| {
-        v.section("CAN");
         v.row(toggle(
-            "TX enabled",
+            "CAN TX",
             s.tx_enabled,
             patch(
                 SettingsPatch {
@@ -831,9 +920,8 @@ fn settings(snap: &Snapshot) -> View {
                 false,
             ),
         ));
-        v.section("Power");
         v.row(toggle(
-            "Shutdown on request",
+            "Shut down when the car sleeps",
             s.power_shutdown,
             patch(
                 SettingsPatch {
@@ -863,7 +951,7 @@ fn settings(snap: &Snapshot) -> View {
             )
             .act(Act::Car(CarScreen::Readings)),
         );
-        v.section("Keys");
+        v.section("Keys and portal");
         v.row(
             Row::new(
                 RowKind::Route,
@@ -872,20 +960,21 @@ fn settings(snap: &Snapshot) -> View {
             )
             .act(Act::Car(CarScreen::Bindings)),
         );
-        v.section("Phone portal");
         let set = if s.portal_pin_set { "set" } else { "not set" };
-        v.row(Row::new(RowKind::Route, "PIN", set).act(Act::Car(CarScreen::Pin)));
-        let mut clear = Row::new(RowKind::Button, "Clear the PIN", "")
-            .enabled(s.portal_pin_set)
-            .act(patch(
-                SettingsPatch {
-                    portal_pin: Some(PinChange::Clear),
-                    ..Default::default()
-                },
-                false,
-            ));
-        clear.button = "Clear".into();
-        v.row(clear);
+        v.row(Row::new(RowKind::Route, "Portal PIN", set).act(Act::Car(CarScreen::Pin)));
+        if s.portal_pin_set {
+            v.row(
+                Row::new(RowKind::Button, "Clear the portal PIN", "")
+                    .button("Clear")
+                    .act(patch(
+                        SettingsPatch {
+                            portal_pin: Some(PinChange::Clear),
+                            ..Default::default()
+                        },
+                        false,
+                    )),
+            );
+        }
     })
 }
 
@@ -904,13 +993,15 @@ fn ambient_text(a: f64) -> String {
     format!("{a:.2} (sensor {:.0})", light::raw(a))
 }
 
-fn button(label: &str, value: impl Into<String>, text: &str, act: Act) -> Row {
-    let mut row = Row::new(RowKind::Button, label, value).act(act);
-    row.button = text.into();
-    row
+fn capital(s: &str) -> String {
+    match s.get(..1) {
+        Some(f) => f.to_uppercase() + &s[1..],
+        None => String::new(),
+    }
 }
 
-/// PLAN.md 2.6: the plot and the nudge first, the options after, manual editing behind a switch.
+/// PLAN.md 2.6: the plot and the brightness first, the options after, manual editing behind a
+/// switch. The D-pad steps the panel and flips the choices in place.
 fn light_page(snap: &Snapshot, advanced: bool) -> View {
     let settings = snap.settings.as_ref().map(|s| &s.light);
     let ambient = num(snap, "light.ambient");
@@ -918,10 +1009,6 @@ fn light_page(snap: &Snapshot, advanced: bool) -> View {
     let curve = text_of(snap, CURVE).and_then(light::parse);
     let auto = settings.is_none_or(|l| l.auto_brightness);
     let mut v = View::new(Layout::List, "Light", true).note(settings_note(snap));
-    let nudge = |delta_pct| Act::Light(LightAction::Nudge { delta_pct });
-    let can = snap.connected && auto;
-    v.pill("Darker", false, can, nudge(-(STEP_PCT as i8)));
-    v.pill("Brighter", false, can, nudge(STEP_PCT as i8));
     v.plot = Some(light::plot(
         curve.as_ref(),
         settings,
@@ -930,18 +1017,26 @@ fn light_page(snap: &Snapshot, advanced: bool) -> View {
         advanced,
     ));
 
-    v.section("Now");
+    let nudge = |delta_pct| Act::Light(LightAction::Nudge { delta_pct });
+    let panel = pct.map_or_else(|| NONE.to_string(), |p| format!("{p:.0} %"));
+    if snap.connected && auto && pct.is_some() {
+        v.row(
+            Row::new(RowKind::Step, "Panel brightness", panel)
+                .side(nudge(-(STEP_PCT as i8)), nudge(STEP_PCT as i8)),
+        );
+    } else {
+        let why = if auto {
+            panel
+        } else {
+            format!("{panel}, the car's dimming")
+        };
+        v.row(Row::new(RowKind::Info, "Panel brightness", why));
+    }
     v.row(Row::new(
         RowKind::Info,
         "Ambient",
         ambient.map_or_else(|| NONE.to_string(), ambient_text),
     ));
-    let panel = match pct {
-        Some(p) if auto => format!("{p:.0} %"),
-        Some(p) => format!("{p:.0} %, the car's dimming"),
-        None => NONE.to_string(),
-    };
-    v.row(Row::new(RowKind::Info, "RNS-E panel", panel));
     let night = match flag(snap, "light.night") {
         Some(true) => "Night",
         Some(false) => "Day",
@@ -951,10 +1046,10 @@ fn light_page(snap: &Snapshot, advanced: bool) -> View {
         Some(by) => format!("{night}, by the {by}"),
         None => night.to_string(),
     };
-    v.row(Row::new(RowKind::Info, "Dark mode", dark));
+    v.row(Row::new(RowKind::Info, "Now", dark));
 
     let Some(l) = settings else {
-        v.row(Row::new(RowKind::Info, "Settings", "not from carpid yet").dimmed(true));
+        v.row(Row::new(RowKind::Info, "Waiting for carpid's settings", "").dimmed(true));
         return v.finish();
     };
     v.section("Brightness");
@@ -980,26 +1075,34 @@ fn light_page(snap: &Snapshot, advanced: bool) -> View {
             false,
         ),
     ));
-    v.row(button(
-        "Ambient sensor",
-        light::source_name(l.ambient_source),
-        "Change",
+    let source = |s| {
         light_patch(
             LightPatch {
-                ambient_source: Some(light::next_source(l.ambient_source)),
+                ambient_source: Some(s),
                 ..Default::default()
             },
             false,
+        )
+    };
+    v.row(
+        Row::new(
+            RowKind::Choice,
+            "Light sensor",
+            capital(light::source_name(l.ambient_source)),
+        )
+        .act(source(light::next_source(l.ambient_source)))
+        .side(
+            source(light::prev_source(l.ambient_source)),
+            source(light::next_source(l.ambient_source)),
         ),
-    ));
+    );
     let other = match l.curve_mode {
         CurveMode::Manual => CurveMode::Learned,
         CurveMode::Learned => CurveMode::Manual,
     };
-    v.row(button(
+    v.row(flip(
         "Curve",
-        light::mode_name(l.curve_mode),
-        "Change",
+        &capital(light::mode_name(l.curve_mode)),
         light_patch(
             LightPatch {
                 curve_mode: Some(other),
@@ -1013,15 +1116,13 @@ fn light_page(snap: &Snapshot, advanced: bool) -> View {
         .iter()
         .filter(|p| p.source == l.ambient_source)
         .count();
-    v.row(
-        button(
-            "Learned points",
-            format!("{learned} for this sensor"),
-            "Reset",
-            Act::Light(LightAction::ResetLearned { source: None }),
-        )
-        .enabled(snap.connected && learned > 0),
-    );
+    if snap.connected && learned > 0 {
+        v.row(
+            Row::new(RowKind::Button, "Learned points", learned.to_string())
+                .button("Reset")
+                .act(Act::Light(LightAction::ResetLearned { source: None })),
+        );
+    }
     v.row(toggle("Edit the manual curve", advanced, Act::Advanced));
     if advanced {
         v.section("Manual curve");
@@ -1035,40 +1136,30 @@ fn light_page(snap: &Snapshot, advanced: bool) -> View {
                 .act(Act::Car(CarScreen::Point(i))),
             );
         }
-        let here = ambient.unwrap_or(0.0);
-        let level = pct.map_or(50, |p| p.round().clamp(0.0, 100.0) as u8);
-        v.row(
-            button(
-                "Add a point at the current ambient",
-                format!("{level} %"),
-                "Add",
-                light_patch(
-                    LightPatch {
-                        manual_curve: Some(light::added(&l.manual_curve, here, level)),
-                        ..Default::default()
-                    },
-                    false,
-                ),
-            )
-            .enabled(ambient.is_some()),
-        );
+        if let Some(here) = ambient {
+            let level = pct.map_or(50, |p| p.round().clamp(0.0, 100.0) as u8);
+            v.row(
+                Row::new(RowKind::Button, "Add a point here", format!("{level} %"))
+                    .button("Add")
+                    .act(light_patch(
+                        LightPatch {
+                            manual_curve: Some(light::added(&l.manual_curve, here, level)),
+                            ..Default::default()
+                        },
+                        false,
+                    )),
+            );
+        }
     }
 
     v.section("Dark mode");
     let (by, other) = match l.dark_mode_source {
-        DarkModeSource::Headlights => (
-            "headlights; the clock with the ignition off",
-            DarkModeSource::Ambient,
-        ),
-        DarkModeSource::Ambient => (
-            "light sensor; the clock while it's stale",
-            DarkModeSource::Headlights,
-        ),
+        DarkModeSource::Headlights => ("Headlights", DarkModeSource::Ambient),
+        DarkModeSource::Ambient => ("Light sensor", DarkModeSource::Headlights),
     };
-    v.row(button(
+    v.row(flip(
         "Decided by",
         by,
-        "Change",
         light_patch(
             LightPatch {
                 dark_mode_source: Some(other),
@@ -1079,7 +1170,7 @@ fn light_page(snap: &Snapshot, advanced: bool) -> View {
     ));
     v.row(Row::new(
         RowKind::Info,
-        "Night threshold",
+        "Night below",
         format!(
             "{} ± {:.2}",
             ambient_text(l.night_threshold),
@@ -1090,8 +1181,8 @@ fn light_page(snap: &Snapshot, advanced: bool) -> View {
         (Some(la), Some(lo)) => format!("sunset to sunrise at {la:.1}, {lo:.1}"),
         _ => format!("night {} to {}", l.night_from, l.day_from),
     };
-    v.row(Row::new(RowKind::Info, "Clock", clock));
-    v.section("Values");
+    v.row(Row::new(RowKind::Info, "Without either", clock));
+    v.section("");
     v.row(Row::new(RowKind::Route, "All light values", "").act(Act::Car(CarScreen::LightValues)));
     v.finish()
 }
@@ -1100,15 +1191,9 @@ fn curve_point(snap: &Snapshot, at: usize) -> View {
     with_settings(snap, &format!("Curve point {}", at + 1), |v, s| {
         let c = &s.light.manual_curve;
         let Some(p) = c.get(at) else {
-            v.row(Row::new(RowKind::Info, "No such point", NONE));
+            v.row(Row::new(RowKind::Info, "This point is gone", "").dimmed(true));
             return;
         };
-        v.row(Row::new(RowKind::Info, "Ambient", ambient_text(p.ambient)));
-        v.row(Row::new(
-            RowKind::Info,
-            "RNS-E panel",
-            format!("{} %", p.pct),
-        ));
         let edit = |pct: i16, ambient: f64| {
             light_patch(
                 LightPatch {
@@ -1118,26 +1203,27 @@ fn curve_point(snap: &Snapshot, at: usize) -> View {
                 false,
             )
         };
-        v.section("Change");
-        v.row(button("Panel", "brighter", "+5 %", edit(STEP_PCT, 0.0)));
-        v.row(button("Panel", "darker", "−5 %", edit(-STEP_PCT, 0.0)));
-        v.row(button("Ambient", "brighter", "+0.1", edit(0, STEP_AMBIENT)));
-        v.row(button("Ambient", "darker", "−0.1", edit(0, -STEP_AMBIENT)));
         v.row(
-            button(
-                "Remove this point",
-                "",
-                "Remove",
-                light_patch(
-                    LightPatch {
-                        manual_curve: Some(light::removed(c, at)),
-                        ..Default::default()
-                    },
-                    true,
-                ),
-            )
-            .enabled(c.len() > 2),
+            Row::new(RowKind::Step, "Panel", format!("{} %", p.pct))
+                .side(edit(-STEP_PCT, 0.0), edit(STEP_PCT, 0.0)),
         );
+        v.row(
+            Row::new(RowKind::Step, "Ambient", ambient_text(p.ambient))
+                .side(edit(0, -STEP_AMBIENT), edit(0, STEP_AMBIENT)),
+        );
+        if c.len() > 2 {
+            v.row(
+                Row::new(RowKind::Button, "Remove this point", "")
+                    .button("Remove")
+                    .act(light_patch(
+                        LightPatch {
+                            manual_curve: Some(light::removed(c, at)),
+                            ..Default::default()
+                        },
+                        true,
+                    )),
+            );
+        }
     })
 }
 
@@ -1155,10 +1241,9 @@ fn readings(snap: &Snapshot) -> View {
     with_settings(snap, "Cluster readings", |v, s| {
         let list = &s.dis.readings;
         for i in 0..(list.len() + 1).min(DIS_SLOTS) {
-            let value = list.get(i).map_or_else(
-                || "empty".to_string(),
-                |r| format!("{} · {}", r.label, r.key),
-            );
+            let value = list
+                .get(i)
+                .map_or_else(|| "empty".to_string(), |r| slots::label(&r.key));
             v.row(
                 Row::new(RowKind::Route, slot_name(i), value).act(Act::Car(CarScreen::Reading(i))),
             );
@@ -1166,37 +1251,21 @@ fn readings(snap: &Snapshot) -> View {
     })
 }
 
-fn dis_slot(snap: &Snapshot, now: Instant, at: usize) -> View {
-    with_settings(snap, &slot_name(at), |v, s| {
-        let list = &s.dis.readings;
-        let current = list.get(at).map(|r| r.key.as_str());
-        let set = |name: Option<&str>| {
-            patch(
-                SettingsPatch {
-                    dis_readings: Some(cfg::reading_set(list, at, name)),
-                    ..Default::default()
-                },
-                true,
-            )
-        };
-        v.row(toggle("Nothing", current.is_none(), set(None)).enabled(at < list.len()));
-        let mut section_at = "";
-        for name in candidates(&snap.values) {
-            let sec = section(&name);
-            if sec != section_at {
-                v.section(sec);
-                section_at = sec;
-            }
-            let shown = show(&name, snap.values.get(&name), now);
-            let mut row = toggle(
-                &format!("{} ({name})", shown.label),
-                current == Some(name.as_str()),
-                set(Some(&name)),
-            );
-            row.value = reading(&shown.value, &shown.unit);
-            v.row(row);
-        }
-    })
+fn dis_slot(snap: &Snapshot, now: Instant, at: usize, pages: &Pages) -> View {
+    let Some(s) = &snap.settings else {
+        return with_settings(snap, &slot_name(at), |_, _| {});
+    };
+    let current = s.dis.readings.get(at).map(|r| r.key.as_str());
+    let mut v = pages.reading.view(
+        &slot_name(at),
+        current,
+        pages.recent(),
+        snap,
+        now,
+        &slots::DIS,
+    );
+    v.note = settings_note(snap);
+    v
 }
 
 fn bindings(snap: &Snapshot) -> View {
@@ -1204,17 +1273,17 @@ fn bindings(snap: &Snapshot) -> View {
         let mut table = "";
         for (i, b) in s.bindings.iter().enumerate() {
             if b.table != table {
-                v.section(b.table.clone());
+                v.section(b.table.replace('_', " "));
                 table = &b.table;
             }
-            let mut row = Row::new(
-                RowKind::Route,
-                format!("{} {}", b.key, b.gesture),
-                b.action.clone(),
-            )
-            .act(Act::Car(CarScreen::Binding(i)));
-            row.mono = true;
-            v.row(row);
+            v.row(
+                Row::new(
+                    RowKind::Route,
+                    format!("{} {}", b.key, b.gesture),
+                    b.action.replace('_', " "),
+                )
+                .act(Act::Car(CarScreen::Binding(i))),
+            );
         }
     })
 }
@@ -1227,48 +1296,55 @@ fn binding(snap: &Snapshot, at: usize) -> View {
         .map_or_else(|| "Key binding".to_string(), cfg::binding_label);
     with_settings(snap, &title, |v, s| {
         let Some(b) = s.bindings.get(at) else {
-            v.row(Row::new(RowKind::Info, "No such row", NONE));
+            v.row(Row::new(RowKind::Info, "This row is gone", "").dimmed(true));
             return;
         };
         let mut actions: Vec<&str> = cfg::actions(&b.table).to_vec();
         if !actions.contains(&b.action.as_str()) {
             actions.insert(0, &b.action);
         }
-        v.section("Action");
         for a in actions {
             let set = SettingsPatch {
                 bindings: Some(cfg::rebound(&s.bindings, at, a)),
                 ..Default::default()
             };
-            v.row(toggle(a, a == b.action, patch(set, true)));
+            let at = v.row(
+                Row::new(RowKind::Info, a.replace('_', " "), "")
+                    .act(patch(set, true))
+                    .checked(a == b.action),
+            );
+            if a == b.action {
+                v.start = at;
+            }
         }
     })
 }
 
 fn pin_entry(snap: &Snapshot, pin: &str) -> View {
     let mut v = View::new(Layout::List, "Portal PIN", true).note(settings_note(snap));
-    v.pill("Delete", false, !pin.is_empty(), Act::PinDelete);
-    v.pill(
-        "Save",
-        true,
-        snap.connected && !pin.is_empty(),
-        Act::PinSave,
-    );
+    if !pin.is_empty() {
+        v.pill("Delete", false, Act::PinDelete);
+        if snap.connected {
+            v.pill("Save", true, Act::PinSave);
+        }
+    }
     let shown = if pin.is_empty() {
-        NONE.to_string()
+        "push digits below".to_string()
     } else {
         "•".repeat(pin.len())
     };
-    v.section("New PIN");
-    v.row(Row::new(RowKind::Info, "PIN", shown));
+    v.row(Row::new(RowKind::Info, "New PIN", shown).dimmed(pin.is_empty()));
     v.section("Digits");
-    for d in (1..=9).chain([0]) {
-        let mut row = Row::new(RowKind::Button, d.to_string(), "")
-            .enabled(pin.len() < PIN_MAX)
-            .act(Act::PinDigit(d));
-        row.button = "Add".into();
-        v.row(row);
+    if pin.len() < PIN_MAX {
+        for d in (1..=9).chain([0]) {
+            v.row(
+                Row::new(RowKind::Button, d.to_string(), "")
+                    .button("Add")
+                    .act(Act::PinDigit(d)),
+            );
+        }
     }
+    v.start = v.first_body() + 1;
     v.finish()
 }
 
@@ -1298,8 +1374,15 @@ mod tests {
         s
     }
 
+    fn find(v: &View, label: &str) -> usize {
+        v.rows
+            .iter()
+            .position(|r| r.label == label)
+            .unwrap_or_else(|| panic!("no row {label}"))
+    }
+
     #[test]
-    fn the_grid_shows_the_group_and_greys_invalid_values() {
+    fn the_grid_shows_the_page_and_why_values_are_missing() {
         let p = Pages::new(Saved::default(), None);
         let s = snap(&[
             ("engine.rpm", Some(Value::Num(900.0))),
@@ -1307,42 +1390,95 @@ mod tests {
         ]);
         let v = p.view(PageId::Data, &s, Instant::now());
         assert_eq!(v.layout, Layout::Grid);
-        assert_eq!(v.pills.len(), GROUPS.len() + 1);
+        let tabs: Vec<&str> = v.pills.iter().map(|p| p.label.as_str()).collect();
+        assert_eq!(tabs, ["Engine", "Drivetrain", "Body", "Electrical", "Edit"]);
         assert!(v.pills[0].active);
+        assert_eq!(v.start, 0);
+        assert_eq!((v.cols, v.cells.len()), (3, 9));
         assert_eq!(v.cells[0].value, "900");
-        assert!(!v.cells[0].dim);
-        let coolant = v
-            .cells
-            .iter()
-            .find(|c| c.name == "engine.coolant_c")
-            .unwrap();
-        assert!(coolant.dim);
-        assert_eq!(coolant.value, NONE);
+        assert!(!v.cells[0].dim && v.cells[0].focus_at < 0);
+        assert_eq!(v.cells[2].why, "no value");
+        assert!(v.cells[2].dim);
+        assert_eq!(v.cells[3].why, "not seen");
+        assert!(v.cells[8].empty);
+        assert!(v.note.is_empty());
     }
 
     #[test]
-    fn edit_opens_toggles_and_comes_back() {
+    fn the_dpad_steps_pages_and_tabs_pick_them() {
         let client = Client::offline("test");
         let mut p = Pages::new(Saved::default(), None);
         let s = snap(&[]);
-        let v = p.view(PageId::Data, &s, Instant::now());
-        let edit = Hit::Pill(GROUPS.len());
-        assert_eq!(p.press(PageId::Data, &v, &edit, 4, &client), Moved::Opened);
+        let now = Instant::now();
+        let v = p.view(PageId::Data, &s, now);
+        assert_eq!(
+            p.side(PageId::Data, &v, v.hit(4).as_ref(), 1, 4, &client),
+            Moved::Focus(1)
+        );
+        let v = p.view(PageId::Data, &s, now);
+        assert!(v.pills[1].active);
+        assert_eq!(v.cells.len(), 16);
+        p.press(PageId::Data, &v, &Hit::Pill(3), 3, &client);
+        assert_eq!(p.board().shown, 3);
+        p.side(PageId::Data, &v, None, 1, 3, &client);
+        assert_eq!(p.board().shown, 3);
+    }
+
+    #[test]
+    fn edit_picks_a_value_in_two_levels_and_comes_back() {
+        let client = Client::offline("test");
+        let mut p = Pages::new(Saved::default(), None);
+        let s = snap(&[("engine.rpm", Some(Value::Num(900.0)))]);
+        let now = Instant::now();
+        let v = p.view(PageId::Data, &s, now);
+        assert_eq!(
+            p.press(PageId::Data, &v, &Hit::Pill(4), 4, &client),
+            Moved::Opened
+        );
         assert_eq!(p.depth(PageId::Data), 1);
-        let v = p.view(PageId::Data, &s, Instant::now());
-        assert_eq!(v.back_at, 0);
-        let rpm = v
+        let v = p.view(PageId::Data, &s, now);
+        assert!(v.back && v.outlined);
+        assert_eq!(v.title, "Edit");
+        let Some(Hit::Cell(0)) = v.hit(v.start) else {
+            panic!("starts on the first slot")
+        };
+        assert!(v.rows.iter().all(|r| !r.label.contains('.')));
+
+        // Push the last slot: level 1, then Engine, then a value.
+        p.press(PageId::Data, &v, &Hit::Cell(8), v.start, &client);
+        assert_eq!(p.depth(PageId::Data), 2);
+        let v = p.view(PageId::Data, &s, now);
+        assert_eq!(v.title, "Slot 9");
+        let engine = find(&v, "Engine");
+        p.press(PageId::Data, &v, &Hit::Row(engine), 0, &client);
+        assert_eq!(p.depth(PageId::Data), 3);
+        let v = p.view(PageId::Data, &s, now);
+        let boost = v
             .rows
             .iter()
-            .position(|r| r.act == Act::Toggle("engine.rpm".into()))
+            .position(|r| r.act == Act::Slots(SlotAct::Pick("engine.boost.actual".into())))
             .unwrap();
-        assert!(v.rows[rpm].checked);
-        p.press(PageId::Data, &v, &Hit::Row(rpm), 9, &client);
-        assert!(!p.saved().values("engine").contains(&"engine.rpm".into()));
+        assert_eq!(v.rows[boost].tag, "diag");
         assert_eq!(
-            p.press(PageId::Data, &v, &Hit::Back, 0, &client),
-            Moved::Closed(4)
+            p.press(PageId::Data, &v, &Hit::Row(boost), 0, &client),
+            Moved::Opened
         );
+        assert_eq!(p.depth(PageId::Data), 1);
+        assert_eq!(
+            p.board().page().slots[8].as_deref(),
+            Some("engine.boost.actual")
+        );
+        assert_eq!(p.recent(), ["engine.boost.actual"]);
+        assert_eq!(
+            p.watching(PageId::Data, &s),
+            vec!["engine.boost.actual".to_string()]
+        );
+        let v = p.view(PageId::Data, &s, now);
+        assert_eq!(v.hit(v.start), Some(Hit::Cell(8)));
+        assert_eq!(v.cells[8].why, "polling…");
+
+        // Back leaves the editor.
+        assert_eq!(p.back(PageId::Data), Some(Moved::Opened));
         assert_eq!(p.depth(PageId::Data), 0);
         assert_eq!(p.back(PageId::Data), None);
     }
@@ -1354,10 +1490,10 @@ mod tests {
         let mut s = snap(&[("engine.maf_gs", Some(Value::Num(4.5)))]);
         let now = Instant::now();
         let v = p.view(PageId::Diagnostics, &s, now);
-        assert!(v.note.contains("Default module list"));
+        assert!(v.note.is_empty());
         assert_eq!(v.pills[0].act, Act::Diag(DiagAction::InstallList));
-        assert!(v.pills[0].enabled);
-        assert_eq!(v.rows[1].label, "01 Engine");
+        assert_eq!(v.rows[0].label, "Modules (not scanned yet)");
+        assert_eq!(v.rows[1].label, "01  Engine");
         assert!(p.watching(PageId::Diagnostics, &s).is_empty());
         assert_eq!(
             p.press(PageId::Diagnostics, &v, &Hit::Row(1), 1, &client),
@@ -1367,13 +1503,10 @@ mod tests {
         assert_eq!(names.len(), 21);
         assert!(names.contains(&"engine.boost.actual".to_string()));
         let v = p.view(PageId::Diagnostics, &s, now);
-        assert_eq!(v.title, "01 Engine");
-        let maf = v
-            .rows
-            .iter()
-            .find(|r| r.label.starts_with("003.2 "))
-            .unwrap();
-        assert_eq!(maf.value, "4.5 g/s");
+        assert_eq!(v.title, "01  Engine");
+        let maf = &v.rows[find(&v, "Air mass")];
+        assert_eq!((maf.value.as_str(), maf.tag.as_str()), ("4.5 g/s", "003.2"));
+        assert_eq!(v.rows[find(&v, "Boost")].value, "polling…");
 
         // Clear asks first, then sends confirm: true.
         let at = v
@@ -1381,12 +1514,9 @@ mod tests {
             .iter()
             .position(|r| r.act == Act::ClearAsk(1))
             .unwrap();
-        assert_eq!(
-            p.press(PageId::Diagnostics, &v, &Hit::Row(at), 9, &client),
-            Moved::Stay
-        );
+        p.press(PageId::Diagnostics, &v, &Hit::Row(at), 9, &client);
         let v = p.view(PageId::Diagnostics, &s, now);
-        let sure = v.rows.iter().find(|r| r.button == "Confirm").unwrap();
+        let sure = &v.rows[find(&v, "Clear all of this module's codes?")];
         assert_eq!(
             sure.act,
             Act::Diag(DiagAction::ClearDtcs {
@@ -1394,11 +1524,11 @@ mod tests {
                 confirm: true
             })
         );
-        let cancel = v.rows.iter().position(|r| r.button == "Cancel").unwrap();
+        let cancel = find(&v, "Keep them");
         p.press(PageId::Diagnostics, &v, &Hit::Row(cancel), 9, &client);
         let v = p.view(PageId::Diagnostics, &s, now);
-        assert!(!v.rows.iter().any(|r| r.button == "Confirm"));
-        let read = v.rows.iter().position(|r| r.button == "Read").unwrap();
+        assert!(!v.rows.iter().any(|r| r.button == "Cancel"));
+        let read = find(&v, "Read fault codes");
         p.press(PageId::Diagnostics, &v, &Hit::Row(read), 9, &client);
         assert_eq!(
             client.snapshot().diag.line(Some(1)).as_deref(),
@@ -1419,15 +1549,12 @@ mod tests {
         let v = p.view(PageId::Diagnostics, &s, now);
         assert!(v.note.starts_with("Reading fault codes"));
         assert!(v.rows.iter().any(|r| r.label == "16684" && r.alert));
-        assert!(
-            v.rows
-                .iter()
-                .filter(|r| r.kind == RowKind::Button)
-                .all(|r| !r.enabled)
-        );
-        p.back(PageId::Diagnostics);
+        let read = &v.rows[find(&v, "Read fault codes")];
+        assert_eq!((read.value.as_str(), read.act.clone()), ("busy", Act::None));
+        assert_eq!(p.back(PageId::Diagnostics), Some(Moved::Closed(1)));
         assert!(p.watching(PageId::Diagnostics, &s).is_empty());
         let v = p.view(PageId::Diagnostics, &s, now);
+        assert!(v.pills.is_empty(), "no scan while a job runs");
         assert_eq!(v.rows[1].value, "1 fault");
     }
 
@@ -1453,21 +1580,30 @@ mod tests {
                 age_ms: 80,
             }],
         }]);
+        let p = Pages::new(Saved::default(), None);
         let now = Instant::now();
-        let v = car(CarScreen::Root, &s, now, "", false);
+        let at = |screen| car(screen, &s, now, "", false, &p);
+        let v = at(CarScreen::Root);
         let values: Vec<&str> = v.rows.iter().map(|r| r.value.as_str()).collect();
         assert!(values.contains(&"ican awake"));
         assert!(values.contains(&"Night"));
         assert!(values.contains(&"On TV"));
         assert!(values.contains(&"Android Auto"));
-        let v = car(CarScreen::Buses, &s, now, "", false);
+        let v = at(CarScreen::Buses);
         assert!(v.rows.iter().any(|r| r.value == "1234"));
-        assert!(v.rows.iter().any(|r| r.label == "Node 0x20"));
-        let v = car(CarScreen::Bridge, &s, now, "", false);
-        assert!(v.rows.iter().any(|r| r.label.contains("nav.road")));
-        assert!(!v.rows.iter().any(|r| r.label.contains("base64")));
-        let v = car(CarScreen::Settings, &s, now, "", false);
-        assert!(v.rows.iter().any(|r| r.value == "not from carpid yet"));
+        assert!(v.rows.iter().any(|r| r.label == "Node 20"));
+        let v = at(CarScreen::Bridge);
+        let road = &v.rows[find(&v, "Road")];
+        assert_eq!(road.value, "A9");
+        assert!(!v.rows.iter().any(|r| r.label.contains('.')));
+        let v = at(CarScreen::Settings);
+        assert!(
+            v.rows
+                .iter()
+                .any(|r| r.label == "Waiting for carpid's settings")
+        );
+        let v = at(CarScreen::Rnse);
+        assert_eq!(v.rows[find(&v, "RNS-E on")].value, "not seen since start");
     }
 
     #[test]
@@ -1477,30 +1613,23 @@ mod tests {
         let mut s = snap(&[("engine.rpm", Some(Value::Num(800.0)))]);
         s.settings = Some(cfg::sample());
         let now = Instant::now();
-        let v = car(CarScreen::Settings, &s, now, "", false);
-        let tx = v.rows.iter().find(|r| r.label == "TX enabled").unwrap();
+        let v = car(CarScreen::Settings, &s, now, "", false, &p);
+        let tx = &v.rows[find(&v, "CAN TX")];
         assert!(!tx.checked);
         let Act::Patch(patch, false) = &tx.act else {
             panic!("{:?}", tx.act)
         };
         assert_eq!(patch.tx_enabled, Some(true));
-        let clear = v.rows.iter().find(|r| r.button == "Clear").unwrap();
-        assert!(!clear.enabled);
+        assert!(
+            !v.rows.iter().any(|r| r.button == "Clear"),
+            "no PIN to clear"
+        );
 
         // Settings, then bindings, then one row: three deep, and back twice after picking.
         let v = p.view(PageId::Car, &s, now);
-        let at = v
-            .rows
-            .iter()
-            .position(|r| r.label == "Settings" && r.kind == RowKind::Route)
-            .unwrap();
-        p.press(PageId::Car, &v, &Hit::Row(at), 3, &client);
+        p.press(PageId::Car, &v, &Hit::Row(find(&v, "Settings")), 3, &client);
         let v = p.view(PageId::Car, &s, now);
-        let at = v
-            .rows
-            .iter()
-            .position(|r| r.label == "Key bindings")
-            .unwrap();
+        let at = find(&v, "Key bindings");
         assert_eq!(
             p.press(PageId::Car, &v, &Hit::Row(at), 5, &client),
             Moved::Opened
@@ -1511,7 +1640,7 @@ mod tests {
         p.press(PageId::Car, &v, &Hit::Row(3), 7, &client);
         assert_eq!(p.depth(PageId::Car), 3);
         let v = p.view(PageId::Car, &s, now);
-        let select = v.rows.iter().position(|r| r.label == "select").unwrap();
+        let select = find(&v, "select");
         let Act::Patch(patch, true) = &v.rows[select].act else {
             panic!("picking goes back")
         };
@@ -1530,7 +1659,35 @@ mod tests {
     }
 
     #[test]
-    fn the_light_page_plots_nudges_and_edits_the_curve() {
+    fn dis_readings_use_the_picker() {
+        let client = Client::offline("test");
+        client.snapshot().settings = Some(cfg::sample());
+        let mut p = Pages::new(Saved::default(), None);
+        let mut s = snap(&[("nav.road", Some(Value::Text("A9".into())))]);
+        s.settings = Some(cfg::sample());
+        let now = Instant::now();
+        p.car = CarScreen::Readings;
+        let v = p.view(PageId::Car, &s, now);
+        assert_eq!(v.rows[0].value, "Coolant");
+        p.press(PageId::Car, &v, &Hit::Row(0), 0, &client);
+        assert_eq!(p.car, CarScreen::Reading(0));
+        let v = p.view(PageId::Car, &s, now);
+        assert_eq!(v.title, "Left 1");
+        let phone = find(&v, "Phone & nav");
+        p.press(PageId::Car, &v, &Hit::Row(phone), 0, &client);
+        assert_eq!(p.depth(PageId::Car), 4);
+        let v = p.view(PageId::Car, &s, now);
+        let road = find(&v, "Road");
+        assert_eq!(
+            p.press(PageId::Car, &v, &Hit::Row(road), 0, &client),
+            Moved::Closed(0)
+        );
+        assert_eq!(p.car, CarScreen::Readings);
+        assert_eq!(p.recent(), ["nav.road"]);
+    }
+
+    #[test]
+    fn the_light_page_plots_steps_and_edits_the_curve() {
         let client = Client::offline("test");
         let mut p = Pages::new(Saved::default(), None);
         let curve = r#"{"source":"cluster","mode":"learned","trim":0.0,"points":[[0.00,12],[2.40,100]],"learned":[[0.60,18]]}"#;
@@ -1549,13 +1706,15 @@ mod tests {
         let plot = v.plot.as_ref().unwrap();
         assert_eq!(plot.curve, "M 0 880 L 960 0");
         assert_eq!(plot.now, Some((0.48, 0.44)));
+        assert!(v.pills.is_empty());
         assert!(v.rows.iter().any(|r| r.value == "Day, by the headlights"));
-        assert!(v.rows.iter().any(|r| r.value == "not from carpid yet"));
+        let b = find(&v, "Panel brightness");
+        assert_eq!(v.rows[b].kind, RowKind::Step);
         assert_eq!(
-            v.pills[1].act,
-            Act::Light(LightAction::Nudge { delta_pct: 5 })
+            v.side_act(Some(&Hit::Row(b)), 1),
+            Some(&Act::Light(LightAction::Nudge { delta_pct: 5 }))
         );
-        p.press(PageId::Car, &v, &Hit::Pill(1), 1, &client);
+        p.side(PageId::Car, &v, Some(&Hit::Row(b)), -1, b as i32, &client);
         assert_eq!(
             client.snapshot().settings_note.as_deref(),
             Some("not connected")
@@ -1563,12 +1722,16 @@ mod tests {
 
         s.settings = Some(cfg::sample());
         let v = p.view(PageId::Car, &s, now);
-        let trim = v.rows.iter().find(|r| r.label == "Scroll trim").unwrap();
-        assert!(trim.checked);
-        assert!(v.rows.iter().any(|r| r.label == "Night threshold"));
-        let by = v.rows.iter().find(|r| r.label == "Decided by").unwrap();
-        let Act::Patch(patch, false) = &by.act else {
-            panic!("{:?}", by.act)
+        assert!(v.rows[find(&v, "Scroll trim")].checked);
+        let by = &v.rows[find(&v, "Decided by")];
+        assert_eq!(
+            (by.kind, by.value.as_str()),
+            (RowKind::Choice, "Headlights")
+        );
+        let Some(Act::Patch(patch, false)) =
+            v.side_act(Some(&Hit::Row(find(&v, "Decided by"))), -1)
+        else {
+            panic!()
         };
         assert_eq!(
             patch.light.as_ref().unwrap().dark_mode_source,
@@ -1589,14 +1752,13 @@ mod tests {
         );
         assert_eq!(p.path(PageId::Car), crate::LIGHT_PATH);
         let v = p.view(PageId::Car, &s, now);
-        let up = v.rows.iter().find(|r| r.button == "+5 %").unwrap();
-        let Act::Patch(patch, false) = &up.act else {
-            panic!("{:?}", up.act)
+        let Some(Act::Patch(patch, false)) = v.side_act(Some(&Hit::Row(0)), 1) else {
+            panic!()
         };
         let points = patch.light.as_ref().unwrap().manual_curve.as_ref().unwrap();
         assert_eq!(points[1].pct, 55);
-        assert_eq!(p.back(PageId::Car), Some(4));
-        assert_eq!(p.back(PageId::Car), Some(0));
+        assert_eq!(p.back(PageId::Car), Some(Moved::Closed(4)));
+        assert_eq!(p.back(PageId::Car), Some(Moved::Closed(0)));
         assert_eq!(p.path(PageId::Car), "/carpi/car");
     }
 
@@ -1609,8 +1771,9 @@ mod tests {
         let now = Instant::now();
         p.car = CarScreen::Pin;
         let v = p.view(PageId::Car, &s, now);
-        assert!(!v.pills[1].enabled);
+        assert!(v.pills.is_empty());
         for d in [4, 7, 1, 1] {
+            let v = p.view(PageId::Car, &s, now);
             let at = v
                 .rows
                 .iter()
@@ -1633,30 +1796,20 @@ mod tests {
     }
 
     #[test]
-    fn capture_asks_carpid() {
+    fn capture_asks_carpid_and_toasts() {
         let client = Client::offline("test");
         let mut p = Pages::new(Saved::default(), None);
-        let s = snap(&[]);
-        let v = p.view(PageId::Car, &s, Instant::now());
+        let v = p.view(PageId::Car, &snap(&[]), Instant::now());
         let at = v.rows.iter().position(|r| r.act == Act::Capture).unwrap();
         assert_eq!(
             p.press(PageId::Car, &v, &Hit::Row(at), 0, &client),
             Moved::Stay
         );
-        assert!(matches!(client.snapshot().capture, Capture::Failed(_)));
-    }
-
-    #[test]
-    fn the_picker_lists_known_values_then_carpids_own() {
-        let s = snap(&[("engine.new_thing_c", Some(Value::Num(1.0)))]);
-        let names = candidates(&s.values);
-        assert_eq!(names[0], "engine.rpm");
-        let new = names
-            .iter()
-            .position(|n| n == "engine.new_thing_c")
-            .unwrap();
-        let next = &names[new + 1];
-        assert_ne!(section(next), "Engine");
-        assert!(!names.iter().any(|n| n.starts_with("nav.")));
+        let s = client.snapshot();
+        assert!(matches!(s.capture, Capture::Failed(_)));
+        assert_eq!(
+            s.toast.as_ref().unwrap().text,
+            "Capture failed: not connected"
+        );
     }
 }

@@ -14,7 +14,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use carpi_proto::{BusInfo, DiagAction, LightAction, Reading, Settings, SettingsPatch};
+use carpi_proto::{BusInfo, DiagAction, LightAction, Reading, Settings, SettingsPatch, ToastLevel};
 use serde::Deserialize;
 
 use crate::diag::Diag;
@@ -24,8 +24,20 @@ use crate::values::Store;
 pub enum Capture {
     Idle,
     Saving,
-    Saved { path: String, frames: usize },
+    /// carpid's `2026-11-08 #03` and what went in.
+    Saved {
+        label: String,
+        summary: String,
+    },
     Failed(String),
+}
+
+/// A short message over whatever is on screen. `seq` tells a new one from the last.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Toast {
+    pub seq: u64,
+    pub text: String,
+    pub level: ToastLevel,
 }
 
 /// What the pages know about carpid.
@@ -47,6 +59,33 @@ pub struct Snapshot {
     pub restart_needed: Vec<String>,
     /// Why the last settings change didn't go through, or a note about one.
     pub settings_note: Option<String>,
+    /// The last toast the pages raised.
+    pub toast: Option<Toast>,
+}
+
+impl Snapshot {
+    pub fn toast(&mut self, text: impl Into<String>, level: ToastLevel) {
+        let seq = self.toast.as_ref().map_or(1, |t| t.seq + 1);
+        self.toast = Some(Toast {
+            seq,
+            text: text.into(),
+            level,
+        });
+    }
+
+    /// A capture that came back, or didn't.
+    fn captured(&mut self, result: Result<(String, String), String>) {
+        match result {
+            Ok((label, summary)) => {
+                self.toast(format!("Capture {label}"), ToastLevel::Info);
+                self.capture = Capture::Saved { label, summary };
+            }
+            Err(why) => {
+                self.toast(format!("Capture failed: {why}"), ToastLevel::Error);
+                self.capture = Capture::Failed(why);
+            }
+        }
+    }
 }
 
 impl Default for Snapshot {
@@ -62,6 +101,7 @@ impl Default for Snapshot {
             settings: None,
             restart_needed: Vec::new(),
             settings_note: None,
+            toast: None,
         }
     }
 }
@@ -69,7 +109,7 @@ impl Default for Snapshot {
 #[cfg_attr(not(unix), allow(dead_code))]
 enum Ask {
     Shown(bool),
-    SaveCapture,
+    Capture,
     /// `None` asks for the settings, a patch changes them.
     Settings(Option<Box<SettingsPatch>>),
     Light(LightAction),
@@ -145,11 +185,12 @@ impl Client {
         self.ask(Ask::Shown(on));
     }
 
-    pub fn save_capture(&self) {
+    /// Asks carpid for a capture, as the page's trigger; the answer comes back as a toast.
+    pub fn capture(&self) {
         if self.asks.is_none() {
-            self.snapshot().capture = Capture::Failed("not connected".into());
+            self.snapshot().captured(Err("not connected".into()));
         }
-        self.ask(Ask::SaveCapture);
+        self.ask(Ask::Capture);
     }
 
     /// Asks carpid for its settings again.
@@ -282,7 +323,7 @@ mod link {
                 s.connected = false;
                 s.problem = Some(why);
                 if s.capture == Capture::Saving {
-                    s.capture = Capture::Failed("carpid went away".into());
+                    s.captured(Err("carpid went away".into()));
                 }
                 if let Some(crate::diag::Job::Running { action, .. }) = s.diag.job {
                     s.diag.refused(action, "carpid went away".into());
@@ -294,8 +335,8 @@ mod link {
             while let Some(left) = until.checked_duration_since(Instant::now()) {
                 match rx.recv_timeout(left) {
                     Ok(Ev::Ask(Ask::Shown(on))) => shown = on,
-                    Ok(Ev::Ask(Ask::SaveCapture)) => {
-                        lock(&shared).capture = Capture::Failed("not connected".into())
+                    Ok(Ev::Ask(Ask::Capture)) => {
+                        lock(&shared).captured(Err("not connected".into()))
                     }
                     Ok(Ev::Ask(Ask::Settings(Some(_)) | Ask::Light(_))) => {
                         lock(&shared).settings_note = Some("not connected".into())
@@ -476,9 +517,12 @@ mod link {
                             Ok(())
                         }
                     }
-                    Ok(Ev::Ask(Ask::SaveCapture)) => {
+                    Ok(Ev::Ask(Ask::Capture)) => {
                         lock(shared).capture = Capture::Saving;
-                        self.send(&Request::SaveCapture { path: None }, Pending::Capture)
+                        let req = Request::Capture {
+                            trigger: "page".into(),
+                        };
+                        self.send(&req, Pending::Capture)
                     }
                     Ok(Ev::Ask(Ask::Settings(patch))) => self.settings(patch),
                     Ok(Ev::Ask(Ask::Light(action))) => {
@@ -538,12 +582,8 @@ mod link {
                 }
                 (_, Response::Values { items }) => s.values.take(items, now),
                 (_, Response::Bus { buses }) => s.buses = Some(buses),
-                (_, Response::CaptureSaved { path, frames }) => {
-                    s.capture = Capture::Saved { path, frames }
-                }
-                (Some(Pending::Capture), Response::Error { message }) => {
-                    s.capture = Capture::Failed(message)
-                }
+                (_, Response::Captured { label, summary, .. }) => s.captured(Ok((label, summary))),
+                (Some(Pending::Capture), Response::Error { message }) => s.captured(Err(message)),
                 (
                     _,
                     Response::Settings {
@@ -622,11 +662,8 @@ impl Fixture {
             let ask = rx.recv_timeout(Duration::from_secs(1));
             let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
             match ask {
-                Ok(Ev::Ask(Ask::SaveCapture)) => {
-                    s.capture = Capture::Saved {
-                        path: "fixture.log".into(),
-                        frames: 0,
-                    }
+                Ok(Ev::Ask(Ask::Capture)) => {
+                    s.captured(Ok(("2026-11-08 #01".into(), "fixture".into())))
                 }
                 Ok(Ev::Ask(Ask::Settings(Some(patch)))) => {
                     if let Some(settings) = &mut s.settings {
@@ -672,11 +709,13 @@ mod tests {
         };
         assert_eq!(crate::light::parse(curve).unwrap().points.len(), 7);
         drop(s);
-        client.save_capture();
+        client.capture();
         assert!(wait(&client, |s| matches!(
             s.capture,
             Capture::Saved { .. }
         )));
+        let toast = client.snapshot().toast.clone().unwrap();
+        assert_eq!(toast.text, "Capture 2026-11-08 #01");
     }
 
     #[cfg(unix)]
@@ -827,11 +866,14 @@ mod tests {
         assert!(wait(&client, |s| !s.diag.busy()
             && s.diag.installed.as_ref().is_some_and(|l| l.len() == 1)));
 
-        client.save_capture();
+        client.capture();
         // Polls may come first.
         loop {
             match request(&mut s) {
-                Request::SaveCapture { path: None } => break,
+                Request::Capture { trigger } => {
+                    assert_eq!(trigger, "page");
+                    break;
+                }
                 Request::Values { .. } => reply(&mut s, &Response::Values { items: vec![] }),
                 Request::Bus => reply(&mut s, &Response::Bus { buses: vec![] }),
                 other => panic!("{other:?}"),
@@ -839,16 +881,18 @@ mod tests {
         }
         reply(
             &mut s,
-            &Response::CaptureSaved {
-                path: "/x/cap.log".into(),
-                frames: 9,
+            &Response::Captured {
+                date: "2026-11-08".into(),
+                number: 3,
+                label: "2026-11-08 #03".into(),
+                dir: "/home/pi/logs/2026-11-08/03".into(),
+                summary: "CAN, journal, values".into(),
             },
         );
-        assert!(wait(&client, |s| s.capture
-            == Capture::Saved {
-                path: "/x/cap.log".into(),
-                frames: 9
-            }));
+        assert!(wait(&client, |s| s
+            .toast
+            .as_ref()
+            .is_some_and(|t| t.text == "Capture 2026-11-08 #03")));
         drop(s);
         assert!(wait(&client, |s| !s.connected));
         let _ = std::fs::remove_dir_all(&dir);

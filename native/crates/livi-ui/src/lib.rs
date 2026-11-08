@@ -243,6 +243,9 @@ pub fn report_page(ui: &AppWindow) {
 }
 
 fn open_path(ui: &AppWindow, path: &str) {
+    if carpi_ui::toast_path(ui, path) {
+        return;
+    }
     let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
     let page = match parts.first().copied() {
         None | Some("projection") => Page::Projection,

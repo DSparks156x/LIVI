@@ -466,6 +466,9 @@ pub fn key(ui: &AppWindow, client: &Client, code: &str, down: bool, repeat: bool
         return false;
     }
     KEY_REPEAT.set(repeat);
+    if crate::carpi_ui::key(ui, &config, code) {
+        return true;
+    }
     let ctx = context(ui, repeat);
     let outcome = decide(code, ctx, &config);
     apply(ui, client, code, outcome)

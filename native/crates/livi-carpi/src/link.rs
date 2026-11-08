@@ -260,6 +260,11 @@ async fn follow(
                             let now = state.borrow();
                             act(out, &now, action).err()
                         }
+                        // The UI shows it over whatever is on screen.
+                        Command::Toast { text, level } => {
+                            let _ = out.open_page.send(livi_carpi_ui::toast_path(&text, level));
+                            None
+                        }
                         other => obey(ap, other).await.err(),
                     };
                     send(writer, &Request::CommandDone { id, error }).await?;
@@ -284,7 +289,7 @@ async fn obey(ap: &mut Ap<impl Service>, command: Command) -> Result<(), String>
         Command::Ap {
             ap: ApAction::Resume,
         } => ap.resume().await,
-        Command::Input { .. } => Ok(()),
+        Command::Input { .. } | Command::Toast { .. } => Ok(()),
     }
 }
 
@@ -423,6 +428,7 @@ mod tests {
         let (telemetry, mut pushed) = mpsc::unbounded_channel();
         let hotspot = Fake::default();
         *hotspot.on.lock().unwrap() = true;
+        let (out, mut pages, _given) = outlets();
         let client = {
             let path = path.clone();
             let hotspot = hotspot.clone();
@@ -430,7 +436,6 @@ mod tests {
                 let mut values = Values::default();
                 let mut connected = false;
                 let mut ap = Ap::new(hotspot, None);
-                let (out, _pages, _given) = outlets();
                 session(
                     &path,
                     &mut state,
@@ -499,6 +504,31 @@ mod tests {
             );
             assert_eq!(*hotspot.on.lock().unwrap(), on);
         }
+        reply(
+            &mut daemon,
+            &Response::Command {
+                id: 3,
+                command: Command::Toast {
+                    text: "Capture 2026-11-08 #03".into(),
+                    level: carpi_proto::ToastLevel::Info,
+                },
+            },
+        )
+        .await;
+        assert_eq!(
+            request(&mut daemon).await,
+            Request::CommandDone { id: 3, error: None }
+        );
+        assert_eq!(
+            pages
+                .try_recv()
+                .ok()
+                .and_then(|p| livi_carpi_ui::toast_of(&p)),
+            Some((
+                "Capture 2026-11-08 #03".into(),
+                carpi_proto::ToastLevel::Info
+            ))
+        );
         drop(daemon);
         assert!(matches!(client.await.unwrap(), Ok(Ended::Closed)));
         drop(state_tx);

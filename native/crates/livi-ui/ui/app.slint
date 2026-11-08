@@ -16,10 +16,10 @@ import { Dashboard, DashState, GaugeData, CapData, TrailData, LabelData, LaneDat
 import { LevelOverlay, PhoneOverlay, OverlayState } from "overlays.slint";
 import { MaskData } from "mask.slint";
 import { TouchCalibration, TouchCalibrationState } from "touch_calibration.slint";
-import { CarpiView, CarpiState, CarpiLayout, CarpiPill, CarpiRow, CarpiCell, CarpiPoint, CarpiTick } from "../../livi-carpi-ui/ui/carpi.slint";
+import { CarpiView, CarpiState, CarpiLayout, CarpiKind, CarpiPill, CarpiRow, CarpiCell, CarpiSpot, CarpiPoint, CarpiTick, CarpiToast, CarpiToastView } from "../../livi-carpi-ui/ui/carpi.slint";
 
 export { Theme, Focus, FocusZone, Page, PhoneState, TabData, TouchPhase, SettingsState, ScreenKind, RowData, RowKind, PickData, KnobData, MediaSource, MediaText, Press, DabState, StationData, DashState, GaugeData, CapData, TrailData, LabelData, LaneData, LaneArrowData, LampData, OverlayState, MaskData, TouchCalibrationState }
-export { CarpiState, CarpiLayout, CarpiPill, CarpiRow, CarpiCell, CarpiPoint, CarpiTick }
+export { CarpiState, CarpiLayout, CarpiKind, CarpiPill, CarpiRow, CarpiCell, CarpiSpot, CarpiPoint, CarpiTick, CarpiToast }
 
 export component AppWindow inherits Window {
     in-out property <Page> page: Page.media;
@@ -224,6 +224,11 @@ export component AppWindow inherits Window {
         window-width: root.content-width;
         x: root.content-left + root.content-width - self.width - 16px;
         y: root.content-top + 16px;
+    }
+    CarpiToastView {
+        window-width: root.content-width;
+        x: root.content-left + (root.content-width - self.width) / 2;
+        y: root.content-top + root.content-height - self.height - 20px;
     }
     if TouchCalibrationState.active: TouchCalibration {
         width: root.width;

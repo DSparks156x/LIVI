@@ -92,6 +92,10 @@ pub fn next_source(s: AmbientSource) -> AmbientSource {
     }
 }
 
+pub fn prev_source(s: AmbientSource) -> AmbientSource {
+    next_source(next_source(s))
+}
+
 pub fn mode_name(m: CurveMode) -> &'static str {
     match m {
         CurveMode::Manual => "manual",

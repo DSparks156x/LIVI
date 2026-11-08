@@ -736,6 +736,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "carpi-proto"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "cc"
 version = "1.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4004,6 +4012,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "livi-carpi"
+version = "0.1.0"
+dependencies = [
+ "carpi-proto",
+ "livi-core-proto",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "livi-compositor"
 version = "0.1.0"
 dependencies = [
@@ -4032,6 +4050,7 @@ dependencies = [
  "libc 1.0.0-alpha.5",
  "livi-aa-stack",
  "livi-aaudio",
+ "livi-carpi",
  "livi-core-proto",
  "livi-cp",
  "livi-dab",

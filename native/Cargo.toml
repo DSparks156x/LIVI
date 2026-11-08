@@ -49,6 +49,7 @@ livi-aa-proto = { path = "crates/livi-aa-proto" }
 livi-aa-stack = { path = "crates/livi-aa-stack" }
 livi-aaudio = { path = "crates/livi-aaudio" }
 livi-audio = { path = "crates/livi-audio" }
+livi-carpi = { path = "crates/livi-carpi" }
 livi-bt-host = { path = "crates/livi-bt-host" }
 livi-btd = { path = "crates/livi-btd" }
 livi-core = { path = "crates/livi-core" }

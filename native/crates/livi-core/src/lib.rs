@@ -181,6 +181,8 @@ pub async fn run(
     tokio::spawn(gnss::run(core.clone(), inside.clone()));
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     tokio::spawn(car_bridge::run(core.clone(), inside.clone()));
+    #[cfg(target_os = "linux")]
+    tokio::spawn(livi_carpi::run(core.hub.watch(), inside.clone()));
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     tokio::spawn(system_volume::follow(core.clone()));
     tokio::spawn(update::run(

@@ -4016,7 +4016,11 @@ name = "livi-carpi"
 version = "0.1.0"
 dependencies = [
  "carpi-proto",
+ "livi-aa-proto",
+ "livi-aa-stack",
+ "livi-carpi-ui",
  "livi-core-proto",
+ "livi-cp",
  "livi-wifi",
  "serde_json",
  "tokio",

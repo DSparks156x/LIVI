@@ -86,6 +86,11 @@ impl Core {
         let _ = self.asks.commands.send(UiCommand::OpenApp(target));
     }
 
+    #[cfg(target_os = "linux")]
+    pub fn carpi_input(&self, action: livi_carpi::InputAction) {
+        let _ = self.asks.commands.send(UiCommand::CarpiInput(action));
+    }
+
     pub async fn refresh_mfi(&self) -> Result<(), String> {
         let view = crate::mfi::read(&self.mfi_dir);
         let files = crate::mfi::digest(&self.mfi_dir);

@@ -165,6 +165,8 @@ pub enum StackCmd {
     Media(u8),
     Telephony(u8),
     Siri,
+    /// carpi fork: Siri as a held button, down then up, for push-to-talk.
+    SiriButton(bool),
     NightMode(bool),
     ClusterNightMode(bool),
     LimitedUi(bool),

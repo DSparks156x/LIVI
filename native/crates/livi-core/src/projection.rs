@@ -51,6 +51,8 @@ use crate::update::UpdateAsk;
 
 mod aa;
 mod audio;
+#[cfg(target_os = "linux")]
+mod carpi;
 mod cluster;
 mod cp;
 mod input;
@@ -419,6 +421,8 @@ pub enum UiCommand {
     ForgetDevice(String),
     CameraFound(bool),
     OpenApp(String),
+    #[cfg(target_os = "linux")]
+    CarpiInput(livi_carpi::InputAction),
 }
 
 fn kept_cluster(cfg: &Config, theme: Theme) -> Cluster {
@@ -662,6 +666,8 @@ impl Projection {
                     UiCommand::ForgetDevice(id) => self.forget_device(&id),
                     UiCommand::CameraFound(found) => self.camera_found(found),
                     UiCommand::OpenApp(target) => self.open_app(&target),
+                    #[cfg(target_os = "linux")]
+                    UiCommand::CarpiInput(action) => self.carpi_input(&action),
                 },
                 Some(input) = asks.input.recv() => self.input(input),
                 Some(done) = asks.goodbye.recv() => self.goodbye(done),

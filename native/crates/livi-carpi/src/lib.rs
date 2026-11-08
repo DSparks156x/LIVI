@@ -9,7 +9,8 @@
 //!   phone and focus, each time it changes,
 //! - subscribes to the car values LIVI uses and hands them to the core as telemetry, which feeds
 //!   Android Auto's sensors and LIVI's own look (`light.night` sets night and dark mode),
-//! - takes carpid's commands: suspending and resuming the hotspot while carpid fetches an update.
+//! - takes carpid's commands: suspending and resuming the hotspot while carpid fetches an update,
+//!   and the car's keys as input actions for the projection session or our pages.
 //!
 //! Without carpid it retries with a backoff and LIVI runs as without it.
 
@@ -17,9 +18,11 @@
 
 mod ap;
 mod bridge;
+pub mod input;
 #[cfg(unix)]
 mod link;
 mod values;
 
+pub use carpi_proto::InputAction;
 #[cfg(unix)]
-pub use link::run;
+pub use link::{Hooks, run};

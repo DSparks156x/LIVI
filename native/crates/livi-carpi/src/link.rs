@@ -7,16 +7,17 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use carpi_proto::{ApAction, Command, PROTOCOL_VERSION, Request, Response};
-use livi_core_proto::state::State;
+use carpi_proto::{ApAction, Command, InputAction, PROTOCOL_VERSION, Request, Response};
+use livi_core_proto::state::{Front, State};
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::ap::{Ap, Service, Systemd};
 use crate::bridge::Sent;
+use crate::input;
 use crate::values::{self, Values};
 
 const CLIENT: &str = "livi";
@@ -35,13 +36,35 @@ fn socket() -> PathBuf {
     PathBuf::from(dir).join("carpid.sock")
 }
 
-/// Runs until the core's state goes away. `telemetry` is the core's own telemetry input;
-/// `ap_ready` is the core's switch that holds paging while the hotspot is down.
-pub async fn run(
-    mut state: watch::Receiver<State>,
-    telemetry: mpsc::UnboundedSender<Value>,
-    ap_ready: watch::Sender<bool>,
-) {
+/// What the bridge takes from the core.
+pub struct Hooks {
+    pub state: watch::Receiver<State>,
+    /// The core's own telemetry input.
+    pub telemetry: mpsc::UnboundedSender<Value>,
+    /// The core's switch that holds paging while the hotspot is down.
+    pub ap_ready: watch::Sender<bool>,
+    /// Shows a UI path, like the core's `open_page`.
+    pub open_page: broadcast::Sender<String>,
+    /// Hands an input action to the projection, which maps it for the active session.
+    pub input: Box<dyn Fn(InputAction) + Send + Sync>,
+}
+
+/// Where carpid's input actions go.
+struct Outlets {
+    open_page: broadcast::Sender<String>,
+    input: Box<dyn Fn(InputAction) + Send + Sync>,
+}
+
+/// Runs until the core's state goes away.
+pub async fn run(hooks: Hooks) {
+    let Hooks {
+        mut state,
+        telemetry,
+        ap_ready,
+        open_page,
+        input,
+    } = hooks;
+    let out = Outlets { open_page, input };
     let path = socket();
     let tank_l = values::tank_l();
     let mut ap = Ap::new(
@@ -63,6 +86,7 @@ pub async fn run(
             tank_l,
             &mut connected,
             &mut ap,
+            &out,
         )
         .await;
         if let Some(patch) = values.forget() {
@@ -108,6 +132,7 @@ enum Ended {
     Closed,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn session(
     path: &Path,
     state: &mut watch::Receiver<State>,
@@ -116,6 +141,7 @@ async fn session(
     tank_l: f64,
     connected: &mut bool,
     ap: &mut Ap<impl Service>,
+    out: &Outlets,
 ) -> io::Result<Ended> {
     let stream = UnixStream::connect(path).await?;
     let (mut reader, mut writer) = stream.into_split();
@@ -166,12 +192,14 @@ async fn session(
         &mut writer,
         &mut incoming,
         ap,
+        out,
     )
     .await;
     reading.abort();
     ended
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn follow(
     state: &mut watch::Receiver<State>,
     telemetry: &mpsc::UnboundedSender<Value>,
@@ -180,6 +208,7 @@ async fn follow(
     writer: &mut OwnedWriteHalf,
     incoming: &mut mpsc::UnboundedReceiver<io::Result<Response>>,
     ap: &mut Ap<impl Service>,
+    out: &Outlets,
 ) -> io::Result<Ended> {
     let mut sent = Sent::default();
     loop {
@@ -214,7 +243,13 @@ async fn follow(
                     }
                 }
                 Some(Ok(Response::Command { id, command })) => {
-                    let error = obey(ap, command).await.err();
+                    let error = match command {
+                        Command::Input { action } => {
+                            let now = state.borrow();
+                            act(out, &now, action).err()
+                        }
+                        other => obey(ap, other).await.err(),
+                    };
                     send(writer, &Request::CommandDone { id, error }).await?;
                 }
                 Some(Ok(Response::Error { message })) => eprintln!("[carpi] carpid: {message}"),
@@ -237,7 +272,34 @@ async fn obey(ap: &mut Ap<impl Service>, command: Command) -> Result<(), String>
         Command::Ap {
             ap: ApAction::Resume,
         } => ap.resume().await,
+        Command::Input { .. } => Ok(()),
     }
+}
+
+/// LIVI's debug switch: the config's debug logging or `DEBUG=1`.
+fn debug(state: &State) -> bool {
+    state.config.debug_logging || std::env::var("DEBUG").is_ok_and(|v| v == "1")
+}
+
+/// One input action: a page of ours, or the projection session's. Without a session it's
+/// dropped, which isn't an error: carpid routes keys by focus, and a session can end any time.
+fn act(out: &Outlets, state: &State, action: InputAction) -> Result<(), String> {
+    if let InputAction::OpenPage { page } = &action {
+        let path = input::page_path(page).ok_or_else(|| format!("no page {page:?}"))?;
+        let _ = out.open_page.send(path);
+        return Ok(());
+    }
+    if state.sessions.active.is_none() {
+        if debug(state) {
+            println!("[carpi] input {action:?} dropped: no projection session");
+        }
+        return Ok(());
+    }
+    if input::shows_projection(&action) && state.front.main != Front::Projection {
+        let _ = out.open_page.send("/projection".into());
+    }
+    (out.input)(action);
+    Ok(())
 }
 
 fn far() -> tokio::time::Instant {
@@ -283,7 +345,57 @@ mod tests {
         let (_state, rx) = watch::channel(State::default());
         let (telemetry, _pushed) = mpsc::unbounded_channel();
         let (ready, _) = watch::channel(true);
-        send(run(rx, telemetry, ready));
+        send(run(Hooks {
+            state: rx,
+            telemetry,
+            ap_ready: ready,
+            open_page: broadcast::channel(1).0,
+            input: Box::new(|_| {}),
+        }));
+    }
+
+    fn outlets() -> (
+        Outlets,
+        broadcast::Receiver<String>,
+        std::sync::mpsc::Receiver<InputAction>,
+    ) {
+        let (open_page, pages) = broadcast::channel(4);
+        let (tx, given) = std::sync::mpsc::channel();
+        let tx = std::sync::Mutex::new(tx);
+        let out = Outlets {
+            open_page,
+            input: Box::new(move |a| {
+                let _ = tx.lock().unwrap().send(a);
+            }),
+        };
+        (out, pages, given)
+    }
+
+    #[test]
+    fn input_goes_to_the_session_or_a_page() {
+        use livi_core_proto::state::{Protocol, Sessions};
+
+        let (out, mut pages, given) = outlets();
+        let mut state = State::default();
+        assert_eq!(act(&out, &state, InputAction::Next), Ok(()));
+        assert!(given.try_recv().is_err());
+
+        state.sessions = Sessions {
+            active: Some(Protocol::Carplay),
+            ..Default::default()
+        };
+        act(&out, &state, InputAction::Next).unwrap();
+        assert_eq!(given.try_recv(), Ok(InputAction::Next));
+        assert!(pages.try_recv().is_err());
+        act(&out, &state, InputAction::OpenNav).unwrap();
+        assert_eq!(pages.try_recv().as_deref(), Ok("/projection"));
+        assert_eq!(given.try_recv(), Ok(InputAction::OpenNav));
+
+        let page = |p: &str| InputAction::OpenPage { page: p.into() };
+        act(&out, &State::default(), page("diagnostics")).unwrap();
+        assert_eq!(pages.try_recv().as_deref(), Ok("/carpi/diagnostics"));
+        assert!(act(&out, &state, page("nope")).is_err());
+        assert!(given.try_recv().is_err());
     }
 
     #[tokio::test]
@@ -304,6 +416,7 @@ mod tests {
                 let mut values = Values::default();
                 let mut connected = false;
                 let mut ap = Ap::new(hotspot, None);
+                let (out, _pages, _given) = outlets();
                 session(
                     &path,
                     &mut state,
@@ -312,6 +425,7 @@ mod tests {
                     55.0,
                     &mut connected,
                     &mut ap,
+                    &out,
                 )
                 .await
             })

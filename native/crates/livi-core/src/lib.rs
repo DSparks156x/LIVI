@@ -182,11 +182,16 @@ pub async fn run(
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     tokio::spawn(car_bridge::run(core.clone(), inside.clone()));
     #[cfg(target_os = "linux")]
-    tokio::spawn(livi_carpi::run(
-        core.hub.watch(),
-        inside.clone(),
-        core.ap_ready().clone(),
-    ));
+    tokio::spawn(livi_carpi::run(livi_carpi::Hooks {
+        state: core.hub.watch(),
+        telemetry: inside.clone(),
+        ap_ready: core.ap_ready().clone(),
+        open_page: core.open_page.clone(),
+        input: Box::new({
+            let core = core.clone();
+            move |action| core.carpi_input(action)
+        }),
+    }));
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     tokio::spawn(system_volume::follow(core.clone()));
     tokio::spawn(update::run(

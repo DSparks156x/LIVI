@@ -85,6 +85,11 @@ pub fn focus(ui_path: &str) -> Option<String> {
     PageId::from_name(name).map(|p| format!("page:{}", p.name()))
 }
 
+/// LIVI's UI path for one of our pages by name, as carpid's `OpenPage` names them.
+pub fn page_path(name: &str) -> Option<String> {
+    PageId::from_name(name).map(|p| p.path().to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -98,5 +103,7 @@ mod tests {
         assert_eq!(focus("/media"), None);
         assert_eq!(focus("/carpi/nope"), None);
         assert_eq!(PageId::from_name("diagnostics"), Some(PageId::Diagnostics));
+        assert_eq!(page_path("car").as_deref(), Some("/carpi/car"));
+        assert_eq!(page_path("nope"), None);
     }
 }

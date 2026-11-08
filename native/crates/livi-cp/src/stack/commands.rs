@@ -245,6 +245,20 @@ impl<M: Media> Conn<M> {
                     .await;
                 }
             }
+            StackCmd::SiriButton(down) => {
+                if self.event.is_none() {
+                    println!("[cpStack] siri button: no active event connection, ignoring");
+                    return;
+                }
+                self.send_event_command(&dict([
+                    ("type", Value::String("requestSiri".into())),
+                    (
+                        "params",
+                        dict([("siriAction", Value::Int(if down { 2 } else { 3 }))]),
+                    ),
+                ]))
+                .await;
+            }
             StackCmd::RequestUi(url) => {
                 if self.event.is_none() {
                     println!("[cpStack] requestUI: no active event connection, ignoring");

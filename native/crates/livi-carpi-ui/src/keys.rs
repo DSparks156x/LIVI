@@ -27,6 +27,8 @@ pub const KEYS: &[KeyName] = &[
     k("vol_up", "Volume up", true),
     k("vol_down", "Volume down", true),
     k("vol_click", "Volume push", true),
+    k("stalk_up", "Stalk rocker up", true),
+    k("stalk_down", "Stalk rocker down", true),
     k("knob_cw", "Knob right", false),
     k("knob_ccw", "Knob left", false),
     k("enter", "Knob push", false),

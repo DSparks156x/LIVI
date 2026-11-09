@@ -165,6 +165,16 @@ pub fn decide(code: &str, ctx: Context, config: &Value) -> Outcome {
     }
 
     if in_nav {
+        // carpi fork: the sidebar is a column. The D-pad's right (RNS-E Next
+        // held) goes into the page like a D-pad would; the knob and up/down
+        // walk the column. Without distinct knob bindings, ArrowRight is the
+        // knob too and keeps walking.
+        let dpad_right = is("right", "ArrowRight") && !knob("knobRight") && !b("knobRight").is_empty();
+        if dpad_right {
+            return Outcome::NavOpen {
+                enter_main: !ctx.projection,
+            };
+        }
         if left || up {
             return Outcome::NavStep(-1);
         }
@@ -318,6 +328,21 @@ mod tests {
         assert_eq!(
             decide("Enter", ctx(Zone::Nav), &config()),
             Outcome::NavOpen { enter_main: true }
+        );
+    }
+
+    #[test]
+    fn dpad_right_leaves_the_sidebar_when_the_knob_is_its_own() {
+        let mut config = config();
+        config["bindings"]["knobLeft"] = json!("PageUp");
+        config["bindings"]["knobRight"] = json!("PageDown");
+        assert_eq!(
+            decide("ArrowRight", ctx(Zone::Nav), &config),
+            Outcome::NavOpen { enter_main: true }
+        );
+        assert_eq!(
+            decide("PageDown", ctx(Zone::Nav), &config),
+            Outcome::NavStep(1)
         );
     }
 

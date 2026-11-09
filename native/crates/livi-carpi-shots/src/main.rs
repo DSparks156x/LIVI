@@ -31,8 +31,8 @@ slint::slint! {
     import { Focus, FocusZone } from "../../livi-ui/ui/focus.slint";
     import { SettingsView, SettingsState, RowData, RowKind, ScreenKind, PickData, KnobData } from "../../livi-ui/ui/settings/view.slint";
     import { ToolData } from "../../livi-ui/ui/settings/row.slint";
-    import { CarpiView, CarpiState, CarpiLayout, CarpiKind, CarpiPill, CarpiRow, CarpiCell, CarpiSpot, CarpiPoint, CarpiTick } from "../../livi-carpi-ui/ui/carpi.slint";
-    export { Theme, Ui, Focus, FocusZone, SettingsState, RowData, RowKind, ScreenKind, PickData, KnobData, ToolData, CarpiState, CarpiLayout, CarpiKind, CarpiPill, CarpiRow, CarpiCell, CarpiSpot, CarpiPoint, CarpiTick }
+    import { CarpiView, CarpiState, CarpiLayout, CarpiKind, CarpiPill, CarpiRow, CarpiCell, CarpiSpot, CarpiPoint, CarpiTick, CarpiKeyboard, CarpiKeyboardView, CarpiKey, CarpiKeyRow } from "../../livi-carpi-ui/ui/carpi.slint";
+    export { Theme, Ui, Focus, FocusZone, SettingsState, RowData, RowKind, ScreenKind, PickData, KnobData, ToolData, CarpiState, CarpiLayout, CarpiKind, CarpiPill, CarpiRow, CarpiCell, CarpiSpot, CarpiPoint, CarpiTick, CarpiKeyboard, CarpiKey, CarpiKeyRow }
 
     export component Shot inherits Window {
         width: 800px;
@@ -52,6 +52,11 @@ slint::slint! {
             height: 480px;
         }
         if root.over: CarpiView {
+            x: 64px;
+            width: 736px;
+            height: 480px;
+        }
+        if CarpiKeyboard.shown: CarpiKeyboardView {
             x: 64px;
             width: 736px;
             height: 480px;
@@ -279,7 +284,10 @@ fn settings(mut s: Settings) -> Settings {
         },
         DisPageSetting {
             name: "Haldex".into(),
-            cells: vec![cell("awd.oil_temp_c", 0, None), cell("awd.plate_temp_c", 0, None)],
+            cells: vec![
+                cell("awd.oil_temp_c", 0, None),
+                cell("awd.plate_temp_c", 0, None),
+            ],
         },
     ];
     s.clock.timezone = "America/Denver".into();
@@ -302,7 +310,9 @@ fn settings(mut s: Settings) -> Settings {
     s.update.version = "carpid 0.1.0, release 2026.11.08 (stable)".into();
     s.power.shutdown = true;
     s.bindings_custom = true;
-    s.dis.accel = ["0-60mph", "50-100kmh", "1/4mi", "speed"].map(String::from).to_vec();
+    s.dis.accel = ["0-60mph", "50-100kmh", "1/4mi", "speed"]
+        .map(String::from)
+        .to_vec();
     s.avsd.path = "/home/pi/avsd/avsd.env".into();
     s.avsd.found = true;
     let r = |key: &str, label: &str, unit: &str, min, max, step, default, zero_off| AvsdRange {
@@ -318,11 +328,40 @@ fn settings(mut s: Settings) -> Settings {
     };
     s.avsd.ranges = vec![
         r("GAIN", "Gain", "dB", -12.0, 12.0, 1.0, 0.0, false),
-        r("LINKCAP", "Link cap", "kB/s", 200.0, 2000.0, 50.0, 900.0, false),
-        r("MAXVID", "Video budget", "kB/s", 100.0, 1800.0, 50.0, 700.0, false),
+        r(
+            "LINKCAP", "Link cap", "kB/s", 200.0, 2000.0, 50.0, 900.0, false,
+        ),
+        r(
+            "MAXVID",
+            "Video budget",
+            "kB/s",
+            100.0,
+            1800.0,
+            50.0,
+            700.0,
+            false,
+        ),
         r("CYC", "Frame cycle", "ms", 20.0, 200.0, 5.0, 40.0, false),
-        r("KEYINT", "Key frame every", "frames", 10.0, 300.0, 10.0, 60.0, true),
-        r("ENCTHREADS", "Encoder threads", "", 1.0, 4.0, 1.0, 2.0, false),
+        r(
+            "KEYINT",
+            "Key frame every",
+            "frames",
+            10.0,
+            300.0,
+            10.0,
+            60.0,
+            true,
+        ),
+        r(
+            "ENCTHREADS",
+            "Encoder threads",
+            "",
+            1.0,
+            4.0,
+            1.0,
+            2.0,
+            false,
+        ),
         r("DITHER", "Dither", "", 0.0, 1.0, 1.0, 1.0, false),
         r("TONEPAL", "Palette snap", "", 0.0, 1.0, 1.0, 1.0, false),
         r("NURELAX", "Relax", "", 0.0, 1.0, 1.0, 1.0, false),
@@ -332,8 +371,8 @@ fn settings(mut s: Settings) -> Settings {
 }
 
 fn client() -> Client {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../livi-carpi-ui/fixtures/car.json");
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../livi-carpi-ui/fixtures/car.json");
     let mut f = Fixture::read(&path).expect("fixture");
     f.settings = f.settings.map(settings);
     let client = f.start();
@@ -353,6 +392,34 @@ fn client() -> Client {
         ("avsd.stalls", Value::Num(0.0)),
     ];
     client.snapshot().datalog = Some(datalog());
+    {
+        use carpi_proto::{WifiNetwork, WifiSeen};
+        let mut snap = client.snapshot();
+        let net = |ssid: &str, secured, last: Option<u64>| WifiNetwork {
+            ssid: ssid.into(),
+            secured,
+            hidden: false,
+            last_used: last,
+        };
+        snap.wifi.networks = Some(vec![
+            net("Stadium Walk-UF104", true, Some(1_762_600_000)),
+            net("Pixel 10 Pro", true, Some(1_762_500_000)),
+            net("Library Guest", false, None),
+        ]);
+        let seen = |ssid: &str, signal, secured, saved| WifiSeen {
+            ssid: ssid.into(),
+            signal,
+            secured,
+            saved,
+        };
+        snap.wifi.seen = Some(vec![
+            seen("Stadium Walk-UF104", 82, true, true),
+            seen("Stadium Walk-UF202", 64, true, false),
+            seen("Social at Stadium Walk", 51, false, false),
+            seen("TurtleTown", 30, true, false),
+        ]);
+        snap.wifi.job.finished = Some((true, "Stadium Walk-UF104 works, with the internet".into()));
+    }
     client.snapshot().values.take(
         extra
             .iter()
@@ -430,6 +497,9 @@ fn main() {
         ("pin", S::Pin),
         ("updates", S::Updates),
         ("update-confirm", S::UpdateConfirm),
+        ("wifi", S::Wifi),
+        ("wifi-net", S::WifiNet(0)),
+        ("wifi-add", S::WifiAdd),
         ("advanced", S::Advanced),
     ];
     for (name, screen) in tree {
@@ -445,6 +515,49 @@ fn main() {
         if v.rows.len() > 7 && last > v.start {
             shots.view(&v, Some(last), true, &format!("{name}-end"));
         }
+    }
+    // The on-screen keyboard over the Wi-Fi screen, both layouts.
+    use livi_carpi_ui::keyboard::{Input, Keyboard, Prefs, Style};
+    let boards = [
+        (
+            "keyboard-knob",
+            Style::Knob,
+            true,
+            "Password for Stadium Walk-UF104",
+        ),
+        (
+            "keyboard-touch",
+            Style::Touch,
+            true,
+            "Password for Stadium Walk-UF104",
+        ),
+        ("keyboard-line", Style::Knob, false, "Accel test line 2"),
+    ];
+    for (name, style, secret, title) in boards {
+        if !only.is_empty() && !only.iter().any(|o| o == name) {
+            continue;
+        }
+        let prefs = Prefs {
+            style,
+            ..Prefs::default()
+        };
+        let initial = if secret { "tt8n" } else { "50-100kmh" };
+        let mut k = Keyboard::open(
+            title,
+            initial,
+            secret,
+            if secret { "Join" } else { "Save" },
+            prefs,
+        );
+        for _ in 0..13 {
+            k.input(Input::Turn(1));
+        }
+        fill_keyboard(&shots.ui.global::<CarpiKeyboard>(), Some(&k));
+        pages.goto(S::Wifi);
+        let v = pages.view(PageId::Car, &client.snapshot(), now);
+        shots.view(&v, None, true, name);
+        shots.view(&v, None, false, &format!("{name}-day"));
+        fill_keyboard(&shots.ui.global::<CarpiKeyboard>(), None);
     }
 }
 

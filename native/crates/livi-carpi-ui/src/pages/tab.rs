@@ -8,10 +8,10 @@
 use std::time::{Duration, Instant};
 
 use carpi_proto::{
-    AvsdPatch, AvsdRange, ClockPatch, DarkModeSource, DisClaim, DisClock, DisLanes,
-    DisMediaLayout, DisNavStyle, DisPage, DisPageSetting, DisPatch, DisUnits, InputPatch,
-    LightAction, LightPatch, LogsPatch, PinChange, PortalPatch, PowerPatch, Settings,
-    SettingsPatch, UpdateAction, UpdateChannel, UpdatePatch, Value,
+    AvsdPatch, AvsdRange, ClockPatch, DarkModeSource, DisClaim, DisClock, DisLanes, DisMediaLayout,
+    DisNavStyle, DisPage, DisPageSetting, DisPatch, DisUnits, InputPatch, LightAction, LightPatch,
+    LogsPatch, PinChange, PortalPatch, PowerPatch, Settings, SettingsPatch, UpdateAction,
+    UpdateChannel, UpdatePatch, Value,
 };
 
 use super::{
@@ -25,7 +25,7 @@ use crate::logging;
 use crate::settings::{self as cfg, DIS_CELLS, DIS_PAGES};
 use crate::slots::{self, Picked, Picker, SlotAct};
 use crate::values::{NONE, show};
-use crate::view::{Act, CarScreen as S, DisAct, Layout, Row, RowKind, View};
+use crate::view::{Act, CarScreen as S, DisAct, Layout, Row, RowKind, TypeFor, View, WifiAct};
 
 /// Longest portal PIN the entry takes.
 pub(super) const PIN_MAX: usize = 8;
@@ -51,7 +51,7 @@ pub(super) fn view(pages: &Pages, snap: &Snapshot, now: Instant) -> View {
         S::Curve => curve(snap),
         S::Point(i) => curve_point(snap, i),
         S::Night => night(snap),
-        S::Controls => controls(snap),
+        S::Controls => controls(snap, pages.keyboard_prefs()),
         S::Wheel => key_list(snap, true),
         S::Faceplate => key_list(snap, false),
         S::Key(k) => key(snap, k),
@@ -69,6 +69,9 @@ pub(super) fn view(pages: &Pages, snap: &Snapshot, now: Instant) -> View {
         S::Pin => pin_entry(snap, &pages.pin),
         S::Updates => updates(snap),
         S::UpdateConfirm => update_confirm(snap),
+        S::Wifi => wifi(snap),
+        S::WifiNet(i) => wifi_net(snap, i, pages.forgetting()),
+        S::WifiAdd => wifi_add(snap),
         S::Advanced => advanced(snap),
     }
 }
@@ -164,7 +167,11 @@ fn root(snap: &Snapshot) -> View {
     };
     let mut v = View::new(Layout::List, "Car Integration", true).note(note);
     let s = snap.settings.as_ref();
-    let status = if snap.connected { "Connected" } else { "Not connected" };
+    let status = if snap.connected {
+        "Connected"
+    } else {
+        "Not connected"
+    };
     v.row(route("Status", status, S::Status).icon("InfoOutlined"));
     let cluster = match s {
         Some(s) if s.dis.enabled => dis_state(snap),
@@ -202,7 +209,11 @@ fn root(snap: &Snapshot) -> View {
         None => String::new(),
     };
     v.row(route("Phone portal", portal, S::Portal).icon("SmartphoneOutlined"));
-    let update = if snap.update.running() { "Updating" } else { "" };
+    let update = if snap.update.running() {
+        "Updating"
+    } else {
+        ""
+    };
     v.row(route("Updates", update, S::Updates).icon("SystemUpdateAltOutlined"));
     let tx = match s {
         Some(s) if !s.tx_enabled => "Log only",
@@ -270,7 +281,11 @@ fn status(snap: &Snapshot) -> View {
     let dis = dis_state(snap);
     v.row(info(
         "Cluster display",
-        if dis.is_empty() { "not seen".into() } else { dis },
+        if dis.is_empty() {
+            "not seen".into()
+        } else {
+            dis
+        },
     ));
     v.row(route(
         "All values",
@@ -366,7 +381,13 @@ fn cluster(snap: &Snapshot) -> View {
                     ..Default::default()
                 }),
             )
-            .tap(|r| r.value = if d.enabled { dis_state(snap) } else { String::new() }),
+            .tap(|r| {
+                r.value = if d.enabled {
+                    dis_state(snap)
+                } else {
+                    String::new()
+                }
+            }),
         );
         if !d.enabled {
             return;
@@ -403,9 +424,27 @@ fn cluster(snap: &Snapshot) -> View {
 
 /// Lines the accel test offers until the on-screen keyboard lets one be typed.
 const ACCEL_PRESETS: &[&str] = &[
-    "0-30mph", "0-60mph", "30-50mph", "40-70mph", "50-70mph", "60-100mph", "0-100kmh",
-    "50-100kmh", "80-120kmh", "100-200kmh", "60ft", "330ft", "1000ft", "1/8mi", "1/4mi",
-    "1/2mi", "1mi", "100m", "200m", "400m", "speed",
+    "0-30mph",
+    "0-60mph",
+    "30-50mph",
+    "40-70mph",
+    "50-70mph",
+    "60-100mph",
+    "0-100kmh",
+    "50-100kmh",
+    "80-120kmh",
+    "100-200kmh",
+    "60ft",
+    "330ft",
+    "1000ft",
+    "1/8mi",
+    "1/4mi",
+    "1/2mi",
+    "1mi",
+    "100m",
+    "200m",
+    "400m",
+    "speed",
 ];
 
 fn accel(snap: &Snapshot) -> View {
@@ -423,7 +462,13 @@ fn accel(snap: &Snapshot) -> View {
             let n = opts.len();
             let with = |pick: &str| {
                 let mut next: Vec<String> = (0..4)
-                    .map(|j| if j == i { pick.to_string() } else { lines.get(j).cloned().unwrap_or_default() })
+                    .map(|j| {
+                        if j == i {
+                            pick.to_string()
+                        } else {
+                            lines.get(j).cloned().unwrap_or_default()
+                        }
+                    })
                     .collect();
                 next.retain(|l| !l.is_empty());
                 dis(DisPatch {
@@ -434,15 +479,17 @@ fn accel(snap: &Snapshot) -> View {
             let shown = if now.is_empty() { "Off" } else { now };
             v.row(
                 Row::new(RowKind::Choice, format!("Line {}", i + 1), shown)
-                    .act(with(opts[(at + 1) % n]))
+                    .act(Act::Type(TypeFor::Accel(i)))
                     .side(with(opts[(at + n - 1) % n]), with(opts[(at + 1) % n])),
             );
         }
-        v.row(info(
-            "A speed range, a distance or the speed",
-            "0-60mph · 1/4mi · 100m · speed",
-        )
-        .dimmed(true));
+        v.row(
+            info(
+                "Push to type one, Prev/Next held for presets",
+                "0-60mph · 1/4mi · 100m · speed",
+            )
+            .dimmed(true),
+        );
     })
 }
 
@@ -454,9 +501,11 @@ fn dis_toggle(v: &mut View, label: &str, on: bool, p: impl Fn(bool) -> DisPatch)
 fn nav(snap: &Snapshot) -> View {
     with_settings(snap, "Navigation", |v, s| {
         let d = &s.dis;
-        dis_toggle(v, "Take over when a route starts", d.claim_nav, |x| DisPatch {
-            claim_nav: Some(x),
-            ..Default::default()
+        dis_toggle(v, "Take over when a route starts", d.claim_nav, |x| {
+            DisPatch {
+                claim_nav: Some(x),
+                ..Default::default()
+            }
         });
         dis_toggle(v, "Give back when it ends", d.release_nav, |x| DisPatch {
             release_nav: Some(x),
@@ -487,9 +536,11 @@ fn nav(snap: &Snapshot) -> View {
                 nav_time_left: Some(x),
                 ..Default::default()
             });
-            dis_toggle(v, "Trip info: distance left", d.nav_dest_distance, |x| DisPatch {
-                nav_dest_distance: Some(x),
-                ..Default::default()
+            dis_toggle(v, "Trip info: distance left", d.nav_dest_distance, |x| {
+                DisPatch {
+                    nav_dest_distance: Some(x),
+                    ..Default::default()
+                }
             });
         }
         const LANES: [(DisLanes, &str); 3] = [
@@ -549,9 +600,11 @@ fn media(snap: &Snapshot) -> View {
             claim_media: Some(x),
             ..Default::default()
         });
-        dis_toggle(v, "Give back when it stops", d.release_media, |x| DisPatch {
-            release_media: Some(x),
-            ..Default::default()
+        dis_toggle(v, "Give back when it stops", d.release_media, |x| {
+            DisPatch {
+                release_media: Some(x),
+                ..Default::default()
+            }
         });
         const LAYOUTS: [(DisMediaLayout, &str); 2] = [
             (DisMediaLayout::Stack, "Text"),
@@ -650,17 +703,26 @@ fn reading_page(snap: &Snapshot, now: Instant, p: usize, removing: bool) -> View
         };
         v.row(
             Row::new(RowKind::Choice, "Name", page.name.clone())
-                .act(dis_act(DisAct::Name(p, 1)))
+                .act(Act::Type(TypeFor::PageName(p)))
                 .side(dis_act(DisAct::Name(p, -1)), dis_act(DisAct::Name(p, 1))),
         );
         for (c, cell) in page.cells.iter().enumerate() {
             // The DIS shows cells 1-4 down the left, 5-8 down the right.
             if c == 0 || c == DIS_CELLS / 2 {
-                let col = if c == 0 { "Left column" } else { "Right column" };
+                let col = if c == 0 {
+                    "Left column"
+                } else {
+                    "Right column"
+                };
                 v.row(info(col, "").dimmed(true));
             }
             v.row(
-                route(slots::label(&cell.key), cell_reading(cell, snap, now), S::Cell(p, c)).side(
+                route(
+                    slots::label(&cell.key),
+                    cell_reading(cell, snap, now),
+                    S::Cell(p, c),
+                )
+                .side(
                     dis_act(DisAct::MoveCell(p, c, -1)),
                     dis_act(DisAct::MoveCell(p, c, 1)),
                 ),
@@ -804,19 +866,17 @@ fn lighting(snap: &Snapshot) -> View {
     let panel = pct.map_or_else(|| NONE.to_string(), |p| format!("{p:.0} %"));
     with_settings(snap, "Screen & lighting", |v, s| {
         let l = &s.light;
-        v.row(
-            toggle(
-                "Auto brightness",
-                l.auto_brightness,
-                light_patch(
-                    LightPatch {
-                        auto_brightness: Some(!l.auto_brightness),
-                        ..Default::default()
-                    },
-                    false,
-                ),
+        v.row(toggle(
+            "Auto brightness",
+            l.auto_brightness,
+            light_patch(
+                LightPatch {
+                    auto_brightness: Some(!l.auto_brightness),
+                    ..Default::default()
+                },
+                false,
             ),
-        );
+        ));
         let nudge = |delta_pct| Act::Light(LightAction::Nudge { delta_pct });
         if snap.connected && l.auto_brightness && pct.is_some() {
             v.row(
@@ -825,7 +885,10 @@ fn lighting(snap: &Snapshot) -> View {
                     .side(nudge(-(STEP_PCT as i8)), nudge(STEP_PCT as i8)),
             );
         } else if !l.auto_brightness {
-            v.row(info("Brightness now", format!("{panel}, the car's dimming")));
+            v.row(info(
+                "Brightness now",
+                format!("{panel}, the car's dimming"),
+            ));
         }
         if !l.auto_brightness {
             v.row(route("Night mode", night_now(snap), S::Night));
@@ -853,8 +916,10 @@ fn lighting(snap: &Snapshot) -> View {
             ),
         );
         use carpi_proto::CurveMode;
-        const MODES: [(CurveMode, &str); 2] =
-            [(CurveMode::Learned, "Learned"), (CurveMode::Manual, "Manual")];
+        const MODES: [(CurveMode, &str); 2] = [
+            (CurveMode::Learned, "Learned"),
+            (CurveMode::Manual, "Manual"),
+        ];
         v.row(choice("Curve", &MODES, l.curve_mode, |m| {
             light_patch(
                 LightPatch {
@@ -1031,9 +1096,13 @@ fn night(snap: &Snapshot) -> View {
                 )
             };
             v.row(
-                Row::new(RowKind::Step, "Night below", ambient_text(l.night_threshold))
-                    .act(th(STEP_AMBIENT))
-                    .side(th(-STEP_AMBIENT), th(STEP_AMBIENT)),
+                Row::new(
+                    RowKind::Step,
+                    "Night below",
+                    ambient_text(l.night_threshold),
+                )
+                .act(th(STEP_AMBIENT))
+                .side(th(-STEP_AMBIENT), th(STEP_AMBIENT)),
             );
         }
         match (l.latitude, l.longitude) {
@@ -1081,7 +1150,7 @@ fn input(p: InputPatch) -> Act {
     })
 }
 
-fn controls(snap: &Snapshot) -> View {
+fn controls(snap: &Snapshot, prefs: crate::keyboard::Prefs) -> View {
     with_settings(snap, "Controls", |v, s| {
         let n = |wheel| count(keys::bound(&s.bindings, wheel).len(), "key", "keys");
         v.row(route("Steering wheel", n(true), S::Wheel));
@@ -1114,6 +1183,7 @@ fn controls(snap: &Snapshot) -> View {
                 })
             },
         ));
+        keyboard_rows(v, prefs);
         if s.bindings_custom {
             v.row(
                 Row::new(RowKind::Button, "Key bindings", "Changed")
@@ -1127,6 +1197,36 @@ fn controls(snap: &Snapshot) -> View {
             v.row(info("Key bindings", "Defaults").dimmed(true));
         }
     })
+}
+
+/// The on-screen keyboard's settings. They live in the pages' own file, not carpid's.
+fn keyboard_rows(v: &mut View, p: crate::keyboard::Prefs) {
+    use crate::keyboard::{Order, Style};
+    const STYLES: [(Style, &str); 3] = [
+        (Style::Knob, "Knob"),
+        (Style::Touch, "Touch"),
+        (Style::Off, "Off"),
+    ];
+    v.row(choice("On-screen keyboard", &STYLES, p.style, |x| {
+        Act::Keyboard(crate::keyboard::Prefs { style: x, ..p })
+    }));
+    if p.style == Style::Knob {
+        const ORDERS: [(Order, &str); 2] = [
+            (Order::Alphabetical, "Alphabetical"),
+            (Order::Qwerty, "QWERTY"),
+        ];
+        v.row(choice("Keyboard letters", &ORDERS, p.order, |x| {
+            Act::Keyboard(crate::keyboard::Prefs { order: x, ..p })
+        }));
+    }
+    v.row(toggle(
+        "Show passwords while typing",
+        p.show_secret,
+        Act::Keyboard(crate::keyboard::Prefs {
+            show_secret: !p.show_secret,
+            ..p
+        }),
+    ));
 }
 
 fn key_list(snap: &Snapshot, wheel: bool) -> View {
@@ -1168,7 +1268,11 @@ fn key(snap: &Snapshot, k: usize) -> View {
             if tables > 1 {
                 label = format!("{label}, {}", keys::table_label(&b.table));
             }
-            v.row(route(label, keys::action_label(&b.action), S::Binding(k, i)));
+            v.row(route(
+                label,
+                keys::action_label(&b.action),
+                S::Binding(k, i),
+            ));
         }
     })
 }
@@ -1444,7 +1548,11 @@ fn avsd_text(r: &AvsdRange, x: f64) -> String {
 /// One avsd.env setting as a row: a switch for 0/1, a stepped number otherwise.
 fn avsd_row(r: &AvsdRange, now: f64) -> Row {
     if r.min == 0.0 && r.max == 1.0 && r.step == 1.0 {
-        return toggle(&r.label, now != 0.0, avsd_patch(&r.key, if now != 0.0 { 0.0 } else { 1.0 }));
+        return toggle(
+            &r.label,
+            now != 0.0,
+            avsd_patch(&r.key, if now != 0.0 { 0.0 } else { 1.0 }),
+        );
     }
     let step = if r.step > 0.0 { r.step } else { 1.0 };
     let snap = |x: f64| ((x - r.min) / step).round() * step + r.min;
@@ -1495,7 +1603,11 @@ fn avsd(snap: &Snapshot, now: Instant) -> View {
         }
         let n = s.avsd.ranges.iter().filter(|r| r.key != GAIN).count();
         if n > 0 {
-            v.row(route("Picture", count(n, "setting", "settings"), S::Picture));
+            v.row(route(
+                "Picture",
+                count(n, "setting", "settings"),
+                S::Picture,
+            ));
         }
         v.row(
             Row::new(RowKind::Button, "Restart the stream", "")
@@ -1605,8 +1717,10 @@ fn updates(snap: &Snapshot) -> View {
             None => s.update.version.clone(),
         };
         v.row(info("This version", version));
-        const CHANNELS: [(UpdateChannel, &str); 2] =
-            [(UpdateChannel::Stable, "Stable"), (UpdateChannel::Beta, "Beta")];
+        const CHANNELS: [(UpdateChannel, &str); 2] = [
+            (UpdateChannel::Stable, "Stable"),
+            (UpdateChannel::Beta, "Beta"),
+        ];
         v.row(choice("Channel", &CHANNELS, s.update.channel, |c| {
             set(SettingsPatch {
                 update: Some(UpdatePatch { channel: Some(c) }),
@@ -1638,7 +1752,142 @@ fn updates(snap: &Snapshot) -> View {
                     .alert(matches!(job.finished, Some((false, _)))),
             );
         }
+        let nets = match &snap.wifi.networks {
+            Some(n) => count(n.len(), "saved", "saved"),
+            None => String::new(),
+        };
+        v.row(route("Wi-Fi networks", nets, S::Wifi).icon("WifiOutlined"));
     })
+}
+
+// ---- Wi-Fi networks (docs/PAGES.md 5b) ----
+
+/// The last scan or test, as a row: running, or how it ended.
+fn wifi_job_row(v: &mut View, snap: &Snapshot, what: &str) {
+    let job = &snap.wifi.job;
+    if job.running() {
+        let msg = if job.message.is_empty() {
+            "Starting".to_string()
+        } else {
+            capital(&job.message)
+        };
+        v.row(info(what, msg));
+    } else if let Some((ok, m)) = &job.finished {
+        v.row(info(what, capital(m)).alert(!ok));
+    }
+}
+
+fn wifi(snap: &Snapshot) -> View {
+    let mut v = View::new(Layout::List, "Wi-Fi networks", true)
+        .note("Updates join one of these while the hotspot is off.");
+    if let Some(n) = &snap.wifi.note {
+        v.row(info("Problem", n.clone()).alert(true));
+    }
+    match &snap.wifi.networks {
+        None => {
+            v.row(info("Asking carpid", "").dimmed(true));
+        }
+        Some(nets) => {
+            for (i, n) in nets.iter().enumerate() {
+                let mut value = if n.secured { "Password" } else { "Open" }.to_string();
+                if snap.wifi.connected.as_deref() == Some(n.ssid.as_str()) {
+                    value = "Connected".into();
+                }
+                v.row(route(n.ssid.clone(), value, S::WifiNet(i)).icon("WifiOutlined"));
+            }
+            if nets.is_empty() {
+                v.row(info("None saved yet", "").dimmed(true));
+            }
+        }
+    }
+    v.row(route("Add a network", "", S::WifiAdd));
+    wifi_job_row(&mut v, snap, "Last test");
+    v.finish()
+}
+
+fn wifi_net(snap: &Snapshot, i: usize, forgetting: bool) -> View {
+    let Some(n) = snap.wifi.networks.as_ref().and_then(|n| n.get(i)) else {
+        let mut v = View::new(Layout::List, "Wi-Fi network", true);
+        v.row(info("This network is gone", "").dimmed(true));
+        return v.finish();
+    };
+    let mut v = View::new(Layout::List, &n.ssid, true);
+    v.row(info(
+        "Security",
+        if n.secured { "Password" } else { "Open" },
+    ));
+    if n.hidden {
+        v.row(info("Hidden", "Yes"));
+    }
+    v.row(
+        Row::new(RowKind::Button, "Test it", "")
+            .button("Test")
+            .act(Act::Wifi(WifiAct::Test(n.ssid.clone()))),
+    );
+    v.row(
+        info(
+            "The hotspot goes off while it tests",
+            "The phone link drops",
+        )
+        .dimmed(true),
+    );
+    wifi_job_row(&mut v, snap, "Test");
+    if n.secured {
+        v.row(
+            Row::new(RowKind::Button, "New password", "")
+                .button("Type")
+                .act(Act::Type(TypeFor::WifiPassword(n.ssid.clone()))),
+        );
+    }
+    let label = if forgetting {
+        "Push again to forget it"
+    } else {
+        "Forget this network"
+    };
+    v.row(
+        Row::new(RowKind::Button, label, "")
+            .button("Forget")
+            .act(Act::Wifi(WifiAct::Forget(n.ssid.clone())))
+            .alert(forgetting),
+    );
+    v.finish()
+}
+
+fn wifi_add(snap: &Snapshot) -> View {
+    let mut v = View::new(Layout::List, "Add a network", true);
+    v.row(
+        Row::new(RowKind::Button, "Look for networks", "")
+            .button("Scan")
+            .act(Act::Wifi(WifiAct::Scan)),
+    );
+    v.row(
+        info(
+            "The hotspot goes off for about 10 s",
+            "The phone link drops",
+        )
+        .dimmed(true),
+    );
+    wifi_job_row(&mut v, snap, "Scan");
+    if let Some(seen) = &snap.wifi.seen {
+        for s in seen {
+            let value = format!("{} %{}", s.signal, if s.saved { " · saved" } else { "" });
+            let act = if s.secured {
+                Act::Type(TypeFor::WifiPassword(s.ssid.clone()))
+            } else {
+                Act::Wifi(WifiAct::AddOpen(s.ssid.clone()))
+            };
+            v.row(
+                Row::new(RowKind::Route, s.ssid.clone(), value)
+                    .act(act)
+                    .icon("WifiOutlined"),
+            );
+        }
+    }
+    v.row(
+        Row::new(RowKind::Route, "Hidden network", "Type its name")
+            .act(Act::Type(TypeFor::WifiName)),
+    );
+    v.finish()
 }
 
 fn update_confirm(snap: &Snapshot) -> View {
@@ -1694,6 +1943,13 @@ impl Pages {
         if !matches!(act, Act::Dis(DisAct::RemovePage(_))) {
             self.removing = false;
         }
+        if !matches!(act, Act::Wifi(WifiAct::Forget(_))) {
+            self.forgetting = false;
+        }
+        // Opening the Wi-Fi screens asks for the saved networks.
+        if matches!(act, Act::Car(S::Wifi)) {
+            client.wifi(carpi_proto::WifiAction::List);
+        }
         Some(match act {
             Act::Dis(a) => self.dis_run(a, client),
             Act::Zone(z) => {
@@ -1709,6 +1965,40 @@ impl Pages {
             Act::Update => {
                 client.update(UpdateAction::Fetch, true);
                 self.up(1)
+            }
+            Act::Type(what) => {
+                self.type_for(what.clone(), client);
+                Moved::Stay
+            }
+            Act::Keyboard(prefs) => {
+                self.set_keyboard_prefs(*prefs);
+                Moved::Stay
+            }
+            Act::Wifi(a) => {
+                use carpi_proto::WifiAction as W;
+                match a {
+                    WifiAct::List => client.wifi(W::List),
+                    WifiAct::Scan => client.wifi(W::Scan),
+                    WifiAct::AddOpen(ssid) => {
+                        client.wifi(W::Add {
+                            ssid: ssid.clone(),
+                            password: None,
+                            hidden: false,
+                        });
+                        return Some(self.up(1));
+                    }
+                    WifiAct::Test(ssid) => client.wifi(W::Test { ssid: ssid.clone() }),
+                    WifiAct::Forget(ssid) => {
+                        if !self.forgetting {
+                            self.forgetting = true;
+                            return Some(Moved::Stay);
+                        }
+                        self.forgetting = false;
+                        client.wifi(W::Forget { ssid: ssid.clone() });
+                        return Some(self.up(1));
+                    }
+                }
+                Moved::Stay
             }
             Act::Back => self.up(1),
             _ => return None,
@@ -1992,7 +2282,10 @@ mod tests {
         assert_eq!(S::CellValue(1, 2).parent(), Some(S::Cell(1, 2)));
         assert_eq!(S::Binding(0, 4).parent(), Some(S::Key(0)));
         assert_eq!(S::Key(0).parent(), Some(S::Wheel));
-        assert_eq!(S::Key(keys::key_at("enter").unwrap()).parent(), Some(S::Faceplate));
+        assert_eq!(
+            S::Key(keys::key_at("enter").unwrap()).parent(),
+            Some(S::Faceplate)
+        );
         assert_eq!(S::LogChannels.depth(), 4);
         assert!(S::Night.light() && !S::Cluster.light());
     }
@@ -2004,13 +2297,19 @@ mod tests {
         let claim = find(&v, "Our screen shows");
         assert_eq!(v.rows[claim].value, "Always");
         assert_eq!(
-            patch_of(v.side_act(Some(&Hit::Row(claim)), 1)).dis.unwrap().claim,
+            patch_of(v.side_act(Some(&Hit::Row(claim)), 1))
+                .dis
+                .unwrap()
+                .claim,
             Some(DisClaim::Tab)
         );
         let v = at(&mut p, S::Nav);
         let take = &v.rows[find(&v, "Take over when a route starts")];
         assert!(take.checked);
-        assert_eq!(patch_of(Some(&take.act)).dis.unwrap().claim_nav, Some(false));
+        assert_eq!(
+            patch_of(Some(&take.act)).dis.unwrap().claim_nav,
+            Some(false)
+        );
         assert!(v.rows.iter().any(|r| r.label == "Trip info: ETA"));
         let lanes = find(&v, "Lanes");
         assert_eq!(v.rows[lanes].value, "Alternate with the road");
@@ -2018,7 +2317,10 @@ mod tests {
         let flash = find(&v, "Cover flash");
         assert_eq!(v.rows[flash].value, "4 s");
         assert_eq!(
-            patch_of(Some(&v.rows[flash].act)).dis.unwrap().cover_flash_s,
+            patch_of(Some(&v.rows[flash].act))
+                .dis
+                .unwrap()
+                .cover_flash_s,
             Some(5.0)
         );
     }

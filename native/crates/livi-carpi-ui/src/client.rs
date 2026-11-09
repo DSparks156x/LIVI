@@ -71,6 +71,22 @@ pub struct Snapshot {
     pub datalog_note: Option<String>,
     /// The last update job this connection started.
     pub update: UpdateJob,
+    /// Saved Wi-Fi networks and the last scan or test.
+    pub wifi: Wifi,
+}
+
+/// Wi-Fi networks for updates, as carpid last told them.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Wifi {
+    /// `None` until carpid answers.
+    pub networks: Option<Vec<carpi_proto::WifiNetwork>>,
+    pub connected: Option<String>,
+    /// Why the last list, add or forget didn't go through.
+    pub note: Option<String>,
+    /// The last scan or test.
+    pub job: UpdateJob,
+    /// What the last scan found.
+    pub seen: Option<Vec<carpi_proto::WifiSeen>>,
 }
 
 /// An update job as it goes.
@@ -153,6 +169,7 @@ impl Default for Snapshot {
             datalog: None,
             datalog_note: None,
             update: UpdateJob::default(),
+            wifi: Wifi::default(),
         }
     }
 }
@@ -167,6 +184,7 @@ enum Ask {
     Diag(DiagAction),
     Datalog(DatalogAction),
     Update(UpdateAction, bool),
+    Wifi(carpi_proto::WifiAction),
     /// The names to watch changed.
     Watch,
 }
@@ -283,6 +301,31 @@ impl Client {
         self.ask(Ask::Datalog(action));
     }
 
+    /// A Wi-Fi network ask: list, add and forget answer in [`Snapshot::wifi`]; scan and test
+    /// are jobs whose events land in its `job`.
+    pub fn wifi(&self, action: carpi_proto::WifiAction) {
+        use carpi_proto::WifiAction as W;
+        {
+            let mut s = self.snapshot();
+            s.wifi.note = None;
+            if matches!(action, W::Scan | W::Test { .. }) {
+                s.wifi.job = UpdateJob {
+                    asked: true,
+                    ..Default::default()
+                };
+                if matches!(action, W::Scan) {
+                    s.wifi.seen = None;
+                }
+                if self.asks.is_none() {
+                    s.wifi.job.refused("not connected".into());
+                }
+            } else if self.asks.is_none() {
+                s.wifi.note = Some("not connected".into());
+            }
+        }
+        self.ask(Ask::Wifi(action));
+    }
+
     /// Starts an update job; its events land in [`Snapshot::update`].
     pub fn update(&self, action: UpdateAction, and_apply: bool) {
         {
@@ -370,6 +413,10 @@ mod link {
         Diag(DiagAction),
         Datalog,
         Update,
+        /// List, add, forget.
+        Wifi,
+        /// Scan, test.
+        WifiJob,
         Catalog,
         Ok,
     }
@@ -622,10 +669,19 @@ mod link {
                         self.send(&Request::Diag { action }, Pending::Diag(action))
                     }
                     Ok(Ev::Ask(Ask::Datalog(action))) => self.datalog(action),
-                    Ok(Ev::Ask(Ask::Update(action, and_apply))) => self.send(
-                        &Request::Update { action, and_apply },
-                        Pending::Update,
-                    ),
+                    Ok(Ev::Ask(Ask::Update(action, and_apply))) => {
+                        self.send(&Request::Update { action, and_apply }, Pending::Update)
+                    }
+                    Ok(Ev::Ask(Ask::Wifi(action))) => {
+                        let job = matches!(
+                            action,
+                            carpi_proto::WifiAction::Scan | carpi_proto::WifiAction::Test { .. }
+                        );
+                        self.send(
+                            &Request::Wifi { action },
+                            if job { Pending::WifiJob } else { Pending::Wifi },
+                        )
+                    }
                     Ok(Ev::Ask(Ask::Watch)) if *shown => self.rewatch(),
                     Ok(Ev::Ask(Ask::Watch)) => Ok(()),
                     Ok(Ev::Got(from, resp)) if from == id => {
@@ -652,7 +708,12 @@ mod link {
                     return Ok(());
                 }
                 Response::Job { job, event } => {
-                    if s.update.job == Some(job) {
+                    if s.wifi.job.job == Some(job) {
+                        if let JobEvent::WifiSeen { networks } = &event {
+                            s.wifi.seen = Some(networks.clone());
+                        }
+                        s.wifi.job.event(event);
+                    } else if s.update.job == Some(job) {
                         s.update.event(event);
                     } else {
                         s.diag.event(job, event);
@@ -712,6 +773,25 @@ mod link {
                     s.update.job = Some(job);
                 }
                 (Some(Pending::Update), Response::Error { message }) => s.update.refused(message),
+                (
+                    _,
+                    Response::Wifi {
+                        networks,
+                        connected,
+                    },
+                ) => {
+                    s.wifi.networks = Some(networks);
+                    s.wifi.connected = connected;
+                    s.wifi.note = None;
+                }
+                (Some(Pending::Wifi), Response::Error { message }) => s.wifi.note = Some(message),
+                (Some(Pending::WifiJob), Response::JobStarted { job }) => {
+                    s.wifi.job.asked = false;
+                    s.wifi.job.job = Some(job);
+                }
+                (Some(Pending::WifiJob), Response::Error { message }) => {
+                    s.wifi.job.refused(message)
+                }
                 (Some(Pending::Diag(action)), Response::JobStarted { job }) => {
                     s.diag.started(job, action)
                 }

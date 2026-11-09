@@ -66,8 +66,40 @@ pub enum Act {
     Zone(String),
     /// Starts an update (check, download, install) and goes back.
     Update,
+    /// Opens the on-screen keyboard for this.
+    Type(TypeFor),
+    /// Wi-Fi networks for updates.
+    Wifi(WifiAct),
+    /// The on-screen keyboard's own settings (kept in carpi-ui.json).
+    Keyboard(crate::keyboard::Prefs),
     /// Back a screen.
     Back,
+}
+
+/// What the on-screen keyboard is typing.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TypeFor {
+    /// A hidden network's name; the password comes next.
+    WifiName,
+    /// The password of this network, then it's saved.
+    WifiPassword(String),
+    /// Accel test line `i`.
+    Accel(usize),
+    /// Readings page `p`'s name.
+    PageName(usize),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum WifiAct {
+    /// Asks carpid for the saved networks.
+    List,
+    /// Drops the hotspot for a moment and lists networks in range.
+    Scan,
+    /// Saves an open network.
+    AddOpen(String),
+    /// Asks, then forgets.
+    Forget(String),
+    Test(String),
 }
 
 /// A readings page change: page `p`, cell `c`.
@@ -135,6 +167,10 @@ pub enum CarScreen {
     Pin,
     Updates,
     UpdateConfirm,
+    /// Saved Wi-Fi networks, one of them, and adding one.
+    Wifi,
+    WifiNet(usize),
+    WifiAdd,
     Advanced,
 }
 
@@ -164,7 +200,8 @@ impl CarScreen {
             S::Zone(_) => S::Zones,
             S::Picture => S::Avsd,
             S::Pin => S::Portal,
-            S::UpdateConfirm => S::Updates,
+            S::UpdateConfirm | S::Wifi => S::Updates,
+            S::WifiNet(_) | S::WifiAdd => S::Wifi,
             _ => S::Root,
         })
     }

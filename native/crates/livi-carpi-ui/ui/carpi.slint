@@ -661,3 +661,127 @@ export component CarpiToastView inherits Rectangle {
         }
     }
 }
+
+// ---- On-screen keyboard (docs/PAGES.md 5b) ----
+
+// kind: 0 a character, 1 a control key, 2 the action (Join, Save).
+export struct CarpiKey {
+    label: string,
+    span: int,
+    kind: int,
+}
+
+export struct CarpiKeyRow {
+    keys: [CarpiKey],
+}
+
+export global CarpiKeyboard {
+    in property <bool> shown;
+    in property <bool> touch;
+    in property <string> title;
+    // The field around the cursor, as shown (dots for a hidden password).
+    in property <string> before;
+    in property <string> after;
+    in property <int> count;
+    in property <[CarpiKeyRow]> rows;
+    // The lit key on the knob keyboard; -1 on the touch one.
+    in property <int> focus-row: -1;
+    in property <int> focus-key: -1;
+    callback tap(int, int);
+}
+
+export component CarpiKeyboardView inherits Rectangle {
+    background: Theme.background;
+    // Swallow taps that miss a key, so nothing under the sheet reacts.
+    TouchArea { }
+
+    VerticalLayout {
+        padding: 14px;
+        spacing: 8px;
+
+        HorizontalLayout {
+            Text {
+                text: CarpiKeyboard.title;
+                color: Theme.text-secondary;
+                font-size: 18px;
+                horizontal-stretch: 1;
+            }
+            Text {
+                text: CarpiKeyboard.count == 1 ? "1 character" : CarpiKeyboard.count + " characters";
+                color: Theme.text-disabled;
+                font-size: 16px;
+            }
+        }
+        Rectangle {
+            height: 54px;
+            background: Theme.paper;
+            border-radius: 10px;
+            border-width: 2px;
+            border-color: Theme.primary;
+            HorizontalLayout {
+                padding-left: 16px;
+                padding-right: 16px;
+                alignment: start;
+                Text {
+                    text: CarpiKeyboard.before;
+                    color: Theme.text;
+                    font-size: 26px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 3px;
+                        height: 30px;
+                        background: Theme.primary;
+                    }
+                }
+                Text {
+                    text: CarpiKeyboard.after;
+                    color: Theme.text;
+                    font-size: 26px;
+                    vertical-alignment: center;
+                }
+            }
+        }
+        Rectangle { vertical-stretch: 1; }
+        for row[r] in CarpiKeyboard.rows: HorizontalLayout {
+            spacing: 6px;
+            height: CarpiKeyboard.touch ? 66px : 58px;
+            for key[k] in row.keys: Rectangle {
+                horizontal-stretch: key.span;
+                property <bool> lit: r == CarpiKeyboard.focus-row && k == CarpiKeyboard.focus-key;
+                border-radius: 8px;
+                background: key.kind == 2 ? Theme.primary
+                    : (key.kind == 1 ? Theme.paper.mix(Theme.text, 0.86) : Theme.paper);
+                border-width: lit ? 3px : 0px;
+                border-color: Theme.highlight;
+                Rectangle {
+                    // The lit key's fill, under the label.
+                    visible: lit;
+                    border-radius: 8px;
+                    background: Theme.primary.with-alpha(0.25);
+                }
+                Text {
+                    text: key.label;
+                    color: key.kind == 2 ? #ffffff : Theme.text;
+                    font-size: key.kind == 0 ? 24px : 18px;
+                    font-weight: lit ? 700 : 400;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                TouchArea {
+                    clicked => { CarpiKeyboard.tap(r, k); }
+                }
+            }
+        }
+        Text {
+            visible: !CarpiKeyboard.touch;
+            text: "Turn to move · Up/Down change row · Push types · Prev/Next held move the cursor · Return deletes, held closes";
+            color: Theme.text-disabled;
+            font-size: 14px;
+            horizontal-alignment: center;
+        }
+    }
+}

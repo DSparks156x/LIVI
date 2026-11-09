@@ -29,7 +29,8 @@ use livi_ui_model::settings::view::Screen;
 use slint::{ComponentHandle, Timer, TimerMode, Weak};
 
 use crate::{
-    AppWindow, CarpiCell, CarpiKind, CarpiLayout, CarpiPill, CarpiPoint, CarpiRow, CarpiSpot,
+    AppWindow, CarpiCell, CarpiKey, CarpiKeyRow, CarpiKeyboard, CarpiKind, CarpiLayout, CarpiPill,
+    CarpiPoint, CarpiRow, CarpiSpot,
     CarpiState, CarpiTick, CarpiToast, Focus, FocusZone, Page, SettingsState,
 };
 
@@ -185,6 +186,16 @@ pub fn wire(ui: &AppWindow) {
         }
     });
 
+    let weak = ui.as_weak();
+    ui.global::<CarpiKeyboard>().on_tap(move |r, k| {
+        if let Some(ui) = weak.upgrade() {
+            keyboard_input(
+                &ui,
+                livi_carpi_ui::keyboard::Input::Tap(r.max(0) as usize, k.max(0) as usize),
+            );
+        }
+    });
+
     let timer = Timer::default();
     let weak = ui.as_weak();
     timer.start(TimerMode::Repeated, TICK, move || {
@@ -196,6 +207,10 @@ pub fn wire(ui: &AppWindow) {
             if id.is_none() {
                 o.shown = None;
             }
+            if id.is_none() && !tab {
+                o.pages.close_keyboard();
+            }
+            fill_keyboard(&ui.global::<CarpiKeyboard>(), o.pages.keyboard());
             live(o, id.is_some() || tab);
             if id.is_some() {
                 render(&ui, o);
@@ -274,6 +289,9 @@ pub fn back(ui: &AppWindow) -> bool {
 /// keys_ui's hook, before LIVI decides: the D-pad on our pages and the tab, and the knob while a
 /// step row holds it. True when the key was ours.
 pub fn key(ui: &AppWindow, config: &serde_json::Value, code: &str) -> bool {
+    if keyboard_key(ui, config, code) {
+        return true;
+    }
     let main = ui.global::<Focus>().get_zone() == FocusZone::Main;
     let page = ui.get_page();
     let tab = page == Page::Settings && OWNS.get() && !OVER.get();
@@ -340,6 +358,76 @@ pub fn key(ui: &AppWindow, config: &serde_json::Value, code: &str) -> bool {
         return true;
     }
     false
+}
+
+/// While the on-screen keyboard is up it takes every key: the knob turns through the keys,
+/// Up/Down change row, push types, the D-pad moves the cursor, Return deletes, Return held
+/// (LIVI's home) closes. A real keyboard's letters, digits and space type. False when it's not
+/// up.
+fn keyboard_key(ui: &AppWindow, config: &serde_json::Value, code: &str) -> bool {
+    use livi_carpi_ui::keyboard::Input as I;
+    let Some((open, prefs)) = with(|o| (o.pages.keyboard().is_some(), o.pages.keyboard_prefs()))
+    else {
+        return false;
+    };
+    if !open {
+        return false;
+    }
+    // With the keyboard set to Off a real keyboard types, and its H is a letter, not LIVI's
+    // home (which is what Return held sends).
+    let real = prefs.style == livi_carpi_ui::keyboard::Style::Off;
+    let bind = |n: &str| config["bindings"][n].as_str().unwrap_or("").to_string();
+    let or = |v: String, fallback: &str| if v.is_empty() { fallback.to_string() } else { v };
+    let (knob_l, knob_r) = (bind("knobLeft"), bind("knobRight"));
+    let (left, right) = (or(bind("left"), "ArrowLeft"), or(bind("right"), "ArrowRight"));
+    let distinct = !knob_l.is_empty() && !knob_r.is_empty() && knob_l != left && knob_r != right;
+    let input = if !knob_l.is_empty() && code == knob_l {
+        I::Turn(-1)
+    } else if !knob_r.is_empty() && code == knob_r {
+        I::Turn(1)
+    } else if code == left {
+        if distinct { I::Left } else { I::Turn(-1) }
+    } else if code == right {
+        if distinct { I::Right } else { I::Turn(1) }
+    } else if code == or(bind("up"), "ArrowUp") {
+        I::Up
+    } else if code == or(bind("down"), "ArrowDown") {
+        I::Down
+    } else if code == "Enter" || code == "NumpadEnter" || code == bind("selectDown") {
+        I::Push
+    } else if code == bind("back") || code == "Backspace" {
+        I::Delete
+    } else if code == "Escape" || (!real && code == bind("home")) {
+        I::Close
+    } else if code == "Space" {
+        I::Char(' ')
+    } else if let Some(c) = code.strip_prefix("Key").filter(|c| c.len() == 1) {
+        I::Char(c.to_ascii_lowercase().chars().next().unwrap_or(' '))
+    } else if let Some(c) = code.strip_prefix("Digit").filter(|c| c.len() == 1) {
+        I::Char(c.chars().next().unwrap_or('0'))
+    } else {
+        // Anything else is swallowed: nothing under the keyboard reacts.
+        return true;
+    };
+    keyboard_input(ui, input);
+    true
+}
+
+/// One input to the keyboard; redraws it, and the tab when it closed (its value changed).
+fn keyboard_input(ui: &AppWindow, input: livi_carpi_ui::keyboard::Input) {
+    let closed = with(|o| {
+        o.pages.keyboard_input(input, &o.client);
+        fill_keyboard(&ui.global::<CarpiKeyboard>(), o.pages.keyboard());
+        o.pages.keyboard().is_none()
+    })
+    .unwrap_or(false);
+    if closed {
+        if ui.get_page() == Page::Settings && OWNS.get() {
+            crate::render_settings(ui);
+        } else {
+            with(|o| render(ui, o));
+        }
+    }
 }
 
 fn set_hold(ui: &AppWindow, on: bool) {
@@ -613,7 +701,9 @@ fn tab_act(ui: &AppWindow, f: impl FnOnce(&mut Ours, &View, i32) -> Moved) {
     let from = ui.global::<Focus>().get_main_index();
     let moved = with(|o| {
         let (view, _) = o.tab.clone()?;
-        Some(f(o, &view, from))
+        let m = f(o, &view, from);
+        fill_keyboard(&ui.global::<CarpiKeyboard>(), o.pages.keyboard());
+        Some(m)
     })
     .flatten();
     let Some(moved) = moved else { return };

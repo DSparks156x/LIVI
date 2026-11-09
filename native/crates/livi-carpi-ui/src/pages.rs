@@ -58,6 +58,10 @@ pub struct Pages {
     reading: Picker,
     /// The Logging screens.
     log: Logging,
+    /// The on-screen keyboard while it's up, and what it's typing.
+    typing: Option<(crate::keyboard::Keyboard, crate::view::TypeFor)>,
+    /// "Forget" waits for a second push.
+    forgetting: bool,
 }
 
 impl Pages {
@@ -83,6 +87,149 @@ impl Pages {
             confirm: None,
             reading: Picker::default(),
             log: Logging::default(),
+            typing: None,
+            forgetting: false,
+        }
+    }
+
+    /// Closes the keyboard without saving (its screen went away).
+    pub fn close_keyboard(&mut self) {
+        self.typing = None;
+    }
+
+    /// The on-screen keyboard, while it's up.
+    pub fn keyboard(&self) -> Option<&crate::keyboard::Keyboard> {
+        self.typing.as_ref().map(|(k, _)| k)
+    }
+
+    pub fn keyboard_prefs(&self) -> crate::keyboard::Prefs {
+        self.saved.keyboard
+    }
+
+    pub(crate) fn set_keyboard_prefs(&mut self, prefs: crate::keyboard::Prefs) {
+        self.saved.keyboard = prefs;
+        self.store();
+    }
+
+    pub(crate) fn forgetting(&self) -> bool {
+        self.forgetting
+    }
+
+    /// Opens the keyboard for `what`.
+    pub(crate) fn type_for(&mut self, what: crate::view::TypeFor, client: &Client) {
+        use crate::view::TypeFor as T;
+        let s = client.snapshot().settings.clone();
+        let (title, initial, secret, action) = match &what {
+            T::WifiName => ("Network name".to_string(), String::new(), false, "Next"),
+            T::WifiPassword(ssid) => (format!("Password for {ssid}"), String::new(), true, "Join"),
+            T::Accel(i) => (
+                format!("Accel test line {}", i + 1),
+                s.as_ref()
+                    .and_then(|s| s.dis.accel.get(*i).cloned())
+                    .unwrap_or_default(),
+                false,
+                "Save",
+            ),
+            T::PageName(p) => (
+                "Readings page name".to_string(),
+                s.as_ref()
+                    .and_then(|s| {
+                        crate::settings::dis_pages(&s.dis)
+                            .get(*p)
+                            .map(|pg| pg.name.clone())
+                    })
+                    .unwrap_or_default(),
+                false,
+                "Save",
+            ),
+        };
+        let mut prefs = self.saved.keyboard;
+        if prefs.style == crate::keyboard::Style::Off {
+            // Off: a real keyboard types, into our keyboard's field.
+            prefs.style = crate::keyboard::Style::Knob;
+        }
+        let mut k = crate::keyboard::Keyboard::open(&title, &initial, secret, action, prefs);
+        if matches!(what, T::PageName(_)) {
+            k.max = 20;
+        }
+        if matches!(what, T::WifiName) {
+            k.max = 32;
+        }
+        self.typing = Some((k, what));
+    }
+
+    /// A key while the keyboard is up. False when it isn't.
+    pub fn keyboard_input(&mut self, input: crate::keyboard::Input, client: &Client) -> bool {
+        use crate::keyboard::Outcome;
+        let Some((k, _)) = self.typing.as_mut() else {
+            return false;
+        };
+        match k.input(input) {
+            Outcome::Open => {}
+            Outcome::Cancelled => self.typing = None,
+            Outcome::Done(text) => {
+                let (_, what) = self.typing.take().expect("open");
+                self.typed(what, text, client);
+            }
+        }
+        true
+    }
+
+    fn typed(&mut self, what: crate::view::TypeFor, text: String, client: &Client) {
+        use crate::view::TypeFor as T;
+        use carpi_proto::WifiAction as W;
+        let text = text.trim().to_string();
+        match what {
+            T::WifiName if text.is_empty() => {}
+            T::WifiName => self.type_for(T::WifiPassword(text), client),
+            T::WifiPassword(ssid) => {
+                client.wifi(W::Add {
+                    ssid,
+                    password: (!text.is_empty()).then_some(text),
+                    hidden: false,
+                });
+                if self.car == CarScreen::WifiAdd {
+                    self.car = CarScreen::Wifi;
+                }
+            }
+            T::Accel(i) => {
+                let Some(s) = client.snapshot().settings.clone() else {
+                    return;
+                };
+                let mut lines = s.dis.accel.clone();
+                if text.is_empty() {
+                    if i < lines.len() {
+                        lines.remove(i);
+                    }
+                } else if i < lines.len() {
+                    lines[i] = text;
+                } else {
+                    lines.push(text);
+                }
+                client.set(SettingsPatch {
+                    dis: Some(carpi_proto::DisPatch {
+                        accel: Some(lines),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                });
+            }
+            T::PageName(p) => {
+                let Some(s) = client.snapshot().settings.clone() else {
+                    return;
+                };
+                let mut pages = crate::settings::dis_pages(&s.dis);
+                if let Some(pg) = pages.get_mut(p).filter(|_| !text.is_empty()) {
+                    pg.name = text;
+                    client.set(SettingsPatch {
+                        dis: Some(carpi_proto::DisPatch {
+                            pages: Some(pages),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    });
+                }
+            }
         }
     }
 
@@ -346,7 +493,13 @@ impl Pages {
                 false
             }
             Act::Advanced => false,
-            Act::Dis(_) | Act::Zone(_) | Act::Update | Act::Back => false,
+            Act::Dis(_)
+            | Act::Zone(_)
+            | Act::Update
+            | Act::Back
+            | Act::Type(_)
+            | Act::Wifi(_)
+            | Act::Keyboard(_) => false,
             Act::PinSave => {
                 let pin = std::mem::take(&mut self.pin);
                 client.set(SettingsPatch {
@@ -993,7 +1146,9 @@ mod tests {
         assert_eq!(v.rows[b].kind, RowKind::Step);
         assert_eq!(
             v.side_act(Some(&Hit::Row(b)), 1),
-            Some(&Act::Light(carpi_proto::LightAction::Nudge { delta_pct: 5 }))
+            Some(&Act::Light(carpi_proto::LightAction::Nudge {
+                delta_pct: 5
+            }))
         );
         p.side(PageId::Car, &v, Some(&Hit::Row(b)), -1, b as i32, &client);
         assert_eq!(

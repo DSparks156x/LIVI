@@ -22,6 +22,8 @@ pub struct Saved {
     pub data: Option<Board>,
     /// Last values picked, newest first.
     pub recent: Vec<String>,
+    /// The on-screen keyboard: knob, touch or off, and its letters.
+    pub keyboard: crate::keyboard::Prefs,
     /// The first version's groups, read once into pages.
     #[serde(skip_serializing)]
     pub group: String,

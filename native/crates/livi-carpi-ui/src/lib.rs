@@ -29,6 +29,7 @@ pub mod client;
 pub mod config;
 pub mod defs;
 pub mod diag;
+pub mod keyboard;
 pub mod keys;
 pub mod light;
 pub mod logging;

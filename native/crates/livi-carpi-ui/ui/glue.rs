@@ -162,3 +162,46 @@ fn sync<T: Clone + PartialEq + 'static>(model: &slint::VecModel<T>, items: Vec<T
         model.remove(model.row_count() - 1);
     }
 }
+
+/// Copies the on-screen keyboard (or its absence) into `CarpiKeyboard`.
+pub fn fill_keyboard(kb: &CarpiKeyboard<'_>, k: Option<&livi_carpi_ui::keyboard::Keyboard>) {
+    use slint::{ModelRc, VecModel};
+    let Some(k) = k else {
+        kb.set_shown(false);
+        return;
+    };
+    let shown = k.shown();
+    let at = shown
+        .char_indices()
+        .nth(k.caret())
+        .map_or(shown.len(), |(i, _)| i);
+    kb.set_shown(true);
+    kb.set_touch(k.touch);
+    kb.set_title(k.title.as_str().into());
+    kb.set_before(shown[..at].into());
+    kb.set_after(shown[at..].into());
+    kb.set_count(k.text().chars().count() as i32);
+    let (fr, fk) = k.focus().map_or((-1, -1), |(r, i)| (r as i32, i as i32));
+    kb.set_focus_row(fr);
+    kb.set_focus_key(fk);
+    let rows: Vec<CarpiKeyRow> = k
+        .rows()
+        .iter()
+        .map(|row| CarpiKeyRow {
+            keys: ModelRc::new(VecModel::from(
+                row.iter()
+                    .map(|key| CarpiKey {
+                        label: key.label.as_str().into(),
+                        span: i32::from(key.span),
+                        kind: match key.id {
+                            livi_carpi_ui::keyboard::KeyId::Done => 2,
+                            _ if key.is_control() => 1,
+                            _ => 0,
+                        },
+                    })
+                    .collect::<Vec<_>>(),
+            )),
+        })
+        .collect();
+    kb.set_rows(ModelRc::new(VecModel::from(rows)));
+}

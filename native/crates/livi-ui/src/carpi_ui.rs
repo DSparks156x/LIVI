@@ -29,7 +29,8 @@ use livi_carpi_ui::view::{Hit, View};
 use livi_carpi_ui::{Client, Moved, PageId, Pages, ToastLevel};
 use livi_core_proto::state::Front;
 use livi_ui_model::carpi::{
-    LinkScreen, Native, PHONE_SETTINGS, SettingsRoute, SetupLink, native, overlay, phone_state,
+    LinkScreen, Native, PHONE_SETTINGS, SettingsRoute, SetupLink, UPDATES_ROUTE, native, overlay,
+    phone_state,
 };
 use livi_ui_model::settings::node::Node;
 use livi_ui_model::settings::view::Screen;
@@ -75,6 +76,7 @@ thread_local! {
     static HOLD: Cell<bool> = const { Cell::new(false) };
     /// The tab's index in Settings' root.
     static TAB: Cell<Option<usize>> = const { Cell::new(None) };
+    static UPDATES_TARGET: RefCell<Option<Vec<usize>>> = const { RefCell::new(None) };
     static PHONE_TARGET: RefCell<Option<Vec<usize>>> = const { RefCell::new(None) };
     static SETUP_LINK: RefCell<Option<SetupLink>> = const { RefCell::new(None) };
     /// Settings shows the tab.
@@ -639,9 +641,13 @@ fn render(ui: &AppWindow, o: &mut Ours) {
 /// Settings' root with the tab last (settings_ui's wire).
 pub fn with_tab(root: Node) -> Node {
     let (root, at) = livi_ui_model::carpi::with_tab(root);
-    let target = livi_ui_model::settings::view::Settings::new(root.clone())
-        .find(&PHONE_SETTINGS.split('/').collect::<Vec<_>>());
-    PHONE_TARGET.with_borrow_mut(|p| *p = target);
+    let settings = livi_ui_model::settings::view::Settings::new(root.clone());
+    PHONE_TARGET.with_borrow_mut(|p| {
+        *p = settings.find(&PHONE_SETTINGS.split('/').collect::<Vec<_>>());
+    });
+    UPDATES_TARGET.with_borrow_mut(|p| {
+        *p = settings.find(&UPDATES_ROUTE.split('/').collect::<Vec<_>>());
+    });
     TAB.set(Some(at));
     root
 }
@@ -655,7 +661,7 @@ pub fn settings_depth() -> usize {
 }
 
 /// The UI path while the tab is up: `/carpi/car`, or `/carpi/car/light` on the light screens
-/// (carpid's focus `page:light`).
+/// (carpid's focus `page:light`), or the native Software Update path for its bundled screens.
 pub fn settings_path() -> Option<&'static str> {
     if !OWNS.get() {
         return None;
@@ -684,10 +690,12 @@ pub fn settings_screen(stack: &[usize], screen: Screen, state: &serde_json::Valu
             }
         }
     });
-    let route = TAB.get().and_then(|t| SettingsRoute::at(stack, t));
+    let route = TAB.get().and_then(|t| {
+        UPDATES_TARGET.with_borrow(|target| SettingsRoute::at(stack, t, target.as_deref()))
+    });
     let Some(route) = route else {
         if OWNS.get() {
-            leave();
+            leave(stack);
         }
         return if stack.is_empty() {
             livi_ui_model::carpi::root_screen(
@@ -707,6 +715,7 @@ pub fn settings_screen(stack: &[usize], screen: Screen, state: &serde_json::Valu
                 match route {
                     SettingsRoute::Setup => o.pages.open_setup(&o.client),
                     SettingsRoute::Car => o.pages.reset(PageId::Car),
+                    SettingsRoute::Updates => o.pages.open_updates(&o.client),
                 }
             }
             live(o, true);
@@ -754,8 +763,8 @@ pub fn settings_screen(stack: &[usize], screen: Screen, state: &serde_json::Valu
     screen
 }
 
-/// The stack left the tab: back on Settings' root, focus on the tab's row.
-fn leave() {
+/// The stack left our route: restore its row in the native parent.
+fn leave(stack: &[usize]) {
     OWNS.set(false);
     TAB_HOLD.set(None);
     OVER.set(false);
@@ -764,7 +773,14 @@ fn leave() {
     ui.global::<CarpiState>().set_over_settings(false);
     if let Some(at) = TAB.get() {
         let done = with(|o| o.pages.setup_done()).unwrap_or(false);
-        focus_later(&ui, ORIGIN.get().root_focus(at, done) as i32, true);
+        let focus = UPDATES_TARGET.with_borrow(|target| {
+            ORIGIN
+                .get()
+                .parent_focus(stack, at, done, target.as_deref())
+        });
+        if let Some(focus) = focus {
+            focus_later(&ui, focus as i32, true);
+        }
     }
 }
 

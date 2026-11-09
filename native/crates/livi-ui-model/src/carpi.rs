@@ -34,14 +34,21 @@ pub const ROUTE: &str = "carpi";
 pub const SETUP_ROUTE: &str = "setup";
 pub const SETUP_NODE: usize = 0;
 
+/// Keep LIVI's native System route and its row in place.
+pub const UPDATES_ROUTE: &str = "system/softwareUpdate";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsRoute {
     Setup,
     Car,
+    Updates,
 }
 
 impl SettingsRoute {
-    pub fn at(stack: &[usize], tab: usize) -> Option<Self> {
+    pub fn at(stack: &[usize], tab: usize, updates: Option<&[usize]>) -> Option<Self> {
+        if updates == Some(stack) {
+            return Some(Self::Updates);
+        }
         match stack {
             [SETUP_NODE] => Some(Self::Setup),
             [at] if *at == tab => Some(Self::Car),
@@ -53,6 +60,7 @@ impl SettingsRoute {
         match self {
             Self::Setup => SETUP_ROUTE,
             Self::Car => ROUTE,
+            Self::Updates => UPDATES_ROUTE,
         }
     }
 
@@ -67,10 +75,22 @@ impl SettingsRoute {
         self == Self::Setup && pages.screen() == livi_carpi_ui::view::CarScreen::Root
     }
 
-    pub fn root_focus(self, tab: usize, setup_done: bool) -> usize {
+    /// Restore the pressed route's row only when returning to its native parent.
+    pub fn parent_focus(
+        self,
+        stack: &[usize],
+        tab: usize,
+        setup_done: bool,
+        updates: Option<&[usize]>,
+    ) -> Option<usize> {
         match self {
-            Self::Setup => 0,
-            Self::Car => tab - usize::from(setup_done),
+            Self::Setup if stack.is_empty() => Some(0),
+            Self::Car if stack.is_empty() => Some(tab - usize::from(setup_done)),
+            Self::Updates => updates.and_then(|target| {
+                let (row, parent) = target.split_last()?;
+                (stack == parent).then_some(*row)
+            }),
+            _ => None,
         }
     }
 }
@@ -118,7 +138,7 @@ impl SetupLink {
     }
 
     pub fn screen(&mut self, stack: &[usize], tab: usize) -> LinkScreen {
-        if self.returning && SettingsRoute::at(stack, tab) == Some(self.origin) {
+        if self.returning && SettingsRoute::at(stack, tab, None) == Some(self.origin) {
             return LinkScreen::Resume(self.focus);
         }
         self.at_target = stack == self.target;
@@ -162,6 +182,20 @@ pub fn phone_state(view: &mut View, state: &serde_json::Value) {
 
 /// Settings' root with Setup first and Car Integration last, and the latter's index.
 pub fn with_tab(mut root: Node) -> (Node, usize) {
+    // Replace only the contents of the native slot. Its custom child would otherwise
+    // trigger LIVI's CheckUpdate watch before our screen is rendered.
+    if let Kind::Route { children, .. } = &mut root.kind
+        && let Some(system) = children
+            .iter_mut()
+            .find(|n| n.route_key() == Some("system"))
+        && let Kind::Route { children, .. } = &mut system.kind
+        && let Some(update) = children
+            .iter_mut()
+            .find(|n| n.route_key() == Some("softwareUpdate"))
+        && let Kind::Route { children, .. } = &mut update.kind
+    {
+        children.clear();
+    }
     let tab = Node::route(ROUTE, Label::plain("Car Integration"), vec![]).icon("carName");
     let mut at = 0;
     if let Kind::Route { children, .. } = &mut root.kind {
@@ -312,6 +346,110 @@ mod tests {
     use super::*;
     use crate::i18n::Strings;
     use crate::settings::{schema, view::Settings};
+
+    #[test]
+    fn updates_replaces_only_native_slot_contents_and_disables_upstream_watches() {
+        use crate::settings::custom::Watch;
+        use livi_core_proto::message::Action;
+
+        let upstream = Settings::new(schema());
+        let keys = UPDATES_ROUTE.split('/').collect::<Vec<_>>();
+        let old_target = upstream.find(&keys).unwrap();
+        assert!(
+            upstream
+                .watches(&old_target)
+                .iter()
+                .any(|w| { matches!(w, Watch::Act(Action::CheckUpdate)) })
+        );
+        let (root, tab) = with_tab(schema());
+        let settings = Settings::new(root);
+        let target = settings.find(&keys).unwrap();
+        assert_eq!(target.len(), 2);
+        assert_eq!(target[1], old_target[1]);
+        let mut expected = upstream.node(&old_target).unwrap().clone();
+        let Kind::Route { children, .. } = &mut expected.kind else {
+            panic!()
+        };
+        children.clear();
+        assert_eq!(settings.node(&target), Some(&expected));
+        assert!(settings.watches(&target).is_empty());
+        assert!(settings.node(&[target.clone(), vec![0]].concat()).is_none());
+        let Screen::List { rows, dialog, .. } = settings
+            .screen(&target, &serde_json::Value::Null, &Strings::default())
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert!(rows.is_empty() && dialog.is_none());
+        // The System page still has the same rows, labels, icons and native node indexes.
+        assert_eq!(
+            settings.screen(&target[..1], &serde_json::Value::Null, &Strings::default()),
+            upstream.screen(
+                &old_target[..1],
+                &serde_json::Value::Null,
+                &Strings::default()
+            )
+        );
+        assert!(settings.opens(&target[..1], target[1]));
+        assert_eq!(
+            SettingsRoute::at(&target, tab, Some(&target)),
+            Some(SettingsRoute::Updates)
+        );
+        for stack in [vec![], target[..1].to_vec(), vec![target[0], target[1] + 1]] {
+            assert_eq!(SettingsRoute::at(&stack, tab, Some(&target)), None);
+        }
+        assert_eq!(SettingsRoute::Updates.path(), UPDATES_ROUTE);
+        assert_eq!(
+            SettingsRoute::Updates.parent_focus(&target[..1], tab, true, Some(&target)),
+            Some(target[1])
+        );
+        assert_eq!(
+            SettingsRoute::Updates.parent_focus(&[], tab, true, Some(&target)),
+            None
+        );
+    }
+
+    #[test]
+    fn updates_native_touch_and_knob_rows_return_focus_and_depth_to_the_slot() {
+        use livi_carpi_ui::view::{CarScreen, Hit};
+        use livi_carpi_ui::{Client, Moved, Pages};
+
+        let (root, tab) = with_tab(schema());
+        let settings = Settings::new(root);
+        let target = settings
+            .find(&UPDATES_ROUTE.split('/').collect::<Vec<_>>())
+            .unwrap();
+        let client = Client::offline("test");
+        let mut pages = Pages::new(Default::default(), None);
+        let mut snap = livi_carpi_ui::client::Snapshot::default();
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../livi-carpi-ui/fixtures/car.json")).unwrap();
+        snap.settings = Some(serde_json::from_value(fixture["settings"].clone()).unwrap());
+        let label = "Wi-Fi networks";
+        pages.open_updates(&client);
+        assert_eq!(target.len() + SettingsRoute::Updates.depth(&pages), 2);
+        let view = pages.view(PageId::Car, &snap, Instant::now());
+        let row = view.rows.iter().position(|r| r.label == label).unwrap();
+        let mapped = native(&view);
+        let touch = mapped.rows.iter().position(|r| *r == Some(row)).unwrap();
+        let slot = mapped.slot_of(&view, view.rows[row].focus_at).unwrap();
+        assert_eq!(mapped.row(touch), mapped.at_slot(slot));
+        let focus = slot as i32 + 1; // Native Back button precedes the rows.
+        assert_eq!(
+            pages.press(PageId::Car, &view, &Hit::Row(row), focus, &client),
+            Moved::Opened
+        );
+        assert_eq!(target.len() + SettingsRoute::Updates.depth(&pages), 3);
+        assert_eq!(pages.path(PageId::Car), livi_carpi_ui::pages::UPDATES_PATH);
+        assert_eq!(pages.back(PageId::Car), Some(Moved::Closed(focus)));
+        assert_eq!(pages.screen(), CarScreen::Updates);
+        assert_eq!(SettingsRoute::Updates.depth(&pages), 0);
+        assert_eq!(pages.back(PageId::Car), None); // LIVI pops to System.
+        assert_eq!(
+            SettingsRoute::Updates.parent_focus(&target[..1], tab, false, Some(&target)),
+            Some(target[1])
+        );
+    }
 
     #[test]
     fn setup_phone_link_uses_native_settings_and_returns_with_current_state() {
@@ -569,7 +707,10 @@ mod tests {
         // Row positions move; native node keys and the Connections target stay stable.
         assert_eq!(hidden[0].node, 1);
         assert_eq!(hidden.last().unwrap().node, tab);
-        assert_eq!(SettingsRoute::Car.root_focus(tab, true), hidden.len() - 1);
+        assert_eq!(
+            SettingsRoute::Car.parent_focus(&[], tab, true, None),
+            Some(hidden.len() - 1)
+        );
         assert!(settings.opens(&[], hidden[0].node));
         let loaded = config::load(&file);
         assert!(loaded.setup_done);
@@ -599,7 +740,10 @@ mod tests {
             ("Setup", "Start here")
         );
         assert_eq!(shown.last().unwrap().node, tab);
-        assert_eq!(SettingsRoute::Car.root_focus(tab, false), shown.len() - 1);
+        assert_eq!(
+            SettingsRoute::Car.parent_focus(&[], tab, false, None),
+            Some(shown.len() - 1)
+        );
         std::fs::remove_file(file).unwrap();
     }
 
@@ -609,11 +753,14 @@ mod tests {
         use livi_carpi_ui::{Client, Moved, Pages};
         let (_, tab) = with_tab(schema());
         assert_eq!(
-            SettingsRoute::at(&[SETUP_NODE], tab),
+            SettingsRoute::at(&[SETUP_NODE], tab, None),
             Some(SettingsRoute::Setup)
         );
-        assert_eq!(SettingsRoute::at(&[tab], tab), Some(SettingsRoute::Car));
-        assert_eq!(SettingsRoute::at(&[], tab), None);
+        assert_eq!(
+            SettingsRoute::at(&[tab], tab, None),
+            Some(SettingsRoute::Car)
+        );
+        assert_eq!(SettingsRoute::at(&[], tab, None), None);
         let client = Client::offline("test");
         let mut pages = Pages::new(Default::default(), None);
         let mut snap = livi_carpi_ui::client::Snapshot::default();

@@ -22,6 +22,9 @@ use crate::view::{Act, CarScreen, Hit, Layout, Row, RowKind, View};
 /// The light model's curve, JSON for the plot: no use as a reading.
 const CURVE: &str = "light.curve";
 
+/// The native Settings slot that owns the bundled update screens.
+pub const UPDATES_PATH: &str = "/settings/system/softwareUpdate";
+
 mod tab;
 
 use tab::PIN_MAX;
@@ -47,6 +50,8 @@ pub struct Pages {
     editor: Option<Editor>,
     module: Option<usize>,
     car: CarScreen,
+    /// The first bundled screen of the current native Settings route.
+    car_root: CarScreen,
     trail: Vec<i32>,
     /// The portal PIN being entered.
     pin: String,
@@ -89,6 +94,7 @@ impl Pages {
             editor: None,
             module: None,
             car: CarScreen::Root,
+            car_root: CarScreen::Root,
             trail: Vec::new(),
             pin: String::new(),
             removing: false,
@@ -181,6 +187,9 @@ impl Pages {
 
     /// Where back goes from the Car tab's screen now.
     fn car_parent(&self) -> Option<CarScreen> {
+        if self.car == self.car_root {
+            return None;
+        }
         if self.via_setup == Some(self.car) {
             return Some(CarScreen::Setup);
         }
@@ -344,7 +353,7 @@ impl Pages {
                     }
                     _ => self.car.depth(),
                 };
-                base + usize::from(picking) + channel
+                base.saturating_sub(self.car_root.depth()) + usize::from(picking) + channel
             }
         }
     }
@@ -383,6 +392,7 @@ impl Pages {
     /// The UI path while `page` is shown. The light screens count as a page of their own.
     pub fn path(&self, page: PageId) -> &'static str {
         match (page, self.car) {
+            (PageId::Car, _) if self.car_root == CarScreen::Updates => UPDATES_PATH,
             (PageId::Car, screen) if screen.light() => crate::LIGHT_PATH,
             _ => page.path(),
         }
@@ -421,6 +431,15 @@ impl Pages {
         client.storage(carpi_proto::StorageAction::Status);
     }
 
+    /// Open the bundled updater in LIVI's native Software Update slot. Status refresh is
+    /// passive: it preserves an ongoing job and never starts a download.
+    pub fn open_updates(&mut self, client: &Client) {
+        self.goto(CarScreen::Updates);
+        self.car_root = CarScreen::Updates;
+        self.trail.clear();
+        client.update_status();
+    }
+
     /// Back to the page's first screen.
     pub fn reset(&mut self, page: PageId) {
         match page {
@@ -431,6 +450,7 @@ impl Pages {
             }
             PageId::Car => {
                 self.car = CarScreen::Root;
+                self.car_root = CarScreen::Root;
                 self.reading = Picker::default();
                 self.log.reset();
                 self.pin.clear();
@@ -1046,6 +1066,157 @@ mod tests {
             .iter()
             .position(|r| r.label == label)
             .unwrap_or_else(|| panic!("no row {label}"))
+    }
+
+    #[test]
+    fn updates_route_keeps_wifi_children_and_confirm_back_inside_its_native_slot() {
+        let client = Client::offline("test");
+        let mut p = Pages::new(Saved::default(), None);
+        let mut s = snap(&[]);
+        s.settings = Some(crate::settings::sample());
+        s.update_recovering = false;
+        s.wifi.networks = Some(vec![carpi_proto::WifiNetwork {
+            ssid: "Garage".into(),
+            secured: true,
+            hidden: false,
+            last_used: None,
+        }]);
+        let now = Instant::now();
+        p.open_updates(&client);
+        assert_eq!(
+            (p.depth(PageId::Car), p.path(PageId::Car)),
+            (0, UPDATES_PATH)
+        );
+        let v = p.view(PageId::Car, &s, now);
+        p.press(
+            PageId::Car,
+            &v,
+            &Hit::Row(find(&v, "Wi-Fi networks")),
+            5,
+            &client,
+        );
+        assert_eq!((p.screen(), p.depth(PageId::Car)), (CarScreen::Wifi, 1));
+        let v = p.view(PageId::Car, &s, now);
+        p.press(PageId::Car, &v, &Hit::Row(find(&v, "Garage")), 2, &client);
+        assert_eq!(
+            (p.screen(), p.depth(PageId::Car)),
+            (CarScreen::WifiNet(0), 2)
+        );
+        let v = p.view(PageId::Car, &s, now);
+        assert_eq!(v.title, "Garage");
+        assert!(v.rows.iter().any(|r| r.label == "New password"));
+        assert_eq!(p.path(PageId::Car), UPDATES_PATH);
+        assert_eq!(p.back(PageId::Car), Some(Moved::Closed(2)));
+        let v = p.view(PageId::Car, &s, now);
+        p.press(
+            PageId::Car,
+            &v,
+            &Hit::Row(find(&v, "Add a network")),
+            3,
+            &client,
+        );
+        assert_eq!((p.screen(), p.depth(PageId::Car)), (CarScreen::WifiAdd, 2));
+        assert_eq!(p.back(PageId::Car), Some(Moved::Closed(3)));
+        assert_eq!(p.back(PageId::Car), Some(Moved::Closed(5)));
+        let v = p.view(PageId::Car, &s, now);
+        p.press(
+            PageId::Car,
+            &v,
+            &Hit::Row(find(&v, "Check and install")),
+            4,
+            &client,
+        );
+        assert_eq!(
+            (p.screen(), p.depth(PageId::Car)),
+            (CarScreen::UpdateConfirm, 1)
+        );
+        let v = p.view(PageId::Car, &s, now);
+        assert_eq!(
+            p.press(PageId::Car, &v, &Hit::Row(find(&v, "Not now")), 1, &client),
+            Moved::Closed(4)
+        );
+        assert_eq!(p.screen(), CarScreen::Updates);
+        assert_eq!(p.back(PageId::Car), None);
+        assert!(!client.snapshot().update.running()); // Cancel never starts the update.
+
+        // A native route switch resets the anchored root and its trail.
+        p.open_setup(&client);
+        assert_eq!((p.screen(), p.depth(PageId::Car)), (CarScreen::Setup, 1));
+        assert_eq!(p.path(PageId::Car), PageId::Car.path());
+        let v = p.view(PageId::Car, &s, now);
+        p.press(
+            PageId::Car,
+            &v,
+            &Hit::Row(find(&v, "Wi-Fi networks")),
+            6,
+            &client,
+        );
+        assert_eq!(p.depth(PageId::Car), 2);
+        assert_eq!(p.back(PageId::Car), Some(Moved::Closed(6)));
+        p.reset(PageId::Car);
+        assert_eq!((p.screen(), p.depth(PageId::Car)), (CarScreen::Root, 0));
+        assert_eq!(p.path(PageId::Car), PageId::Car.path());
+        assert_eq!(p.back(PageId::Car), None);
+        let v = p.view(PageId::Car, &s, now);
+        assert!(
+            !v.rows
+                .iter()
+                .any(|r| r.act == Act::Car(CarScreen::Updates) || r.label == "Updates")
+        );
+    }
+
+    #[test]
+    fn updates_route_refresh_preserves_channel_progress_and_recovery() {
+        use crate::client::UpdateJob;
+        use carpi_proto::UpdateChannel;
+        let client = Client::offline("test");
+        let mut p = Pages::new(Saved::default(), None);
+        let mut s = snap(&[]);
+        s.settings = Some(crate::settings::sample());
+        s.settings.as_mut().unwrap().update.channel = UpdateChannel::Stable;
+        s.update_recovering = false;
+        client.snapshot().update = UpdateJob {
+            job: Some(42),
+            stage: "download".into(),
+            progress: Some((1, Some(4))),
+            ..Default::default()
+        };
+        let ongoing = client.snapshot().update.clone();
+        p.open_updates(&client);
+        assert_eq!(client.snapshot().update, ongoing);
+        s.update = ongoing;
+        let v = p.view(PageId::Car, &s, Instant::now());
+        assert_eq!(v.rows[find(&v, "Updating")].value, "Download 25 %");
+        assert!(
+            !v.rows
+                .iter()
+                .any(|r| r.act == Act::Car(CarScreen::UpdateConfirm))
+        );
+        let channel = find(&v, "Channel");
+        let Some(Act::Patch(patch, false)) = v.side_act(Some(&Hit::Row(channel)), 1) else {
+            panic!()
+        };
+        assert_eq!(
+            patch.update.as_ref().unwrap().channel,
+            Some(UpdateChannel::Beta)
+        );
+        assert!(matches!(v.rows[channel].act, Act::Patch(..)));
+        s.update = UpdateJob::default();
+        s.update_recovering = true;
+        let v = p.view(PageId::Car, &s, Instant::now());
+        assert_eq!(
+            v.rows[find(&v, "Update status")].value,
+            "Checking update status"
+        );
+        assert!(
+            !v.rows
+                .iter()
+                .any(|r| r.act == Act::Car(CarScreen::UpdateConfirm))
+        );
+        // A fresh visit is still passive, even when there is no ongoing job.
+        client.snapshot().update = UpdateJob::default();
+        p.open_updates(&client);
+        assert_eq!(client.snapshot().update, UpdateJob::default());
     }
 
     #[test]

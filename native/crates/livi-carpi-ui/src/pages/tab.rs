@@ -236,12 +236,6 @@ fn root(_pages: &Pages, snap: &Snapshot) -> View {
         _ => "",
     };
     v.row(route("Remote access", vnc, S::Remote).icon("LanOutlined"));
-    let update = if snap.update.running() {
-        "Updating"
-    } else {
-        ""
-    };
-    v.row(route("Updates", update, S::Updates).icon("SystemUpdateAltOutlined"));
     let tx = match s {
         Some(s) if !s.tx_enabled => "Log only",
         _ => "",

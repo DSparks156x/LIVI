@@ -165,7 +165,8 @@ impl Pages {
         self.forgetting
     }
 
-    pub(crate) fn setup_done(&self) -> bool {
+    /// Whether the Setup card in LIVI's main Settings has been hidden.
+    pub fn setup_done(&self) -> bool {
         self.saved.setup_done
     }
 
@@ -411,6 +412,13 @@ impl Pages {
         self.reset(PageId::Car);
         self.car = screen;
         self.trail = vec![0; screen.depth()];
+    }
+
+    /// Open the main Settings checklist and refresh its network and storage state.
+    pub fn open_setup(&mut self, client: &Client) {
+        self.goto(CarScreen::Setup);
+        client.wifi(carpi_proto::WifiAction::List);
+        client.storage(carpi_proto::StorageAction::Status);
     }
 
     /// Back to the page's first screen.

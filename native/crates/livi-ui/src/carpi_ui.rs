@@ -29,7 +29,7 @@ use livi_carpi_ui::view::{Hit, View};
 use livi_carpi_ui::{Client, Moved, PageId, Pages, ToastLevel};
 use livi_core_proto::state::Front;
 use livi_ui_model::carpi::{
-    LinkScreen, Native, PHONE_SETTINGS, SetupLink, native, overlay, phone_state,
+    LinkScreen, Native, PHONE_SETTINGS, SettingsRoute, SetupLink, native, overlay, phone_state,
 };
 use livi_ui_model::settings::node::Node;
 use livi_ui_model::settings::view::Screen;
@@ -79,6 +79,8 @@ thread_local! {
     static SETUP_LINK: RefCell<Option<SetupLink>> = const { RefCell::new(None) };
     /// Settings shows the tab.
     static OWNS: Cell<bool> = const { Cell::new(false) };
+    /// Which main Settings card owns the current Car pages, including temporary native visits.
+    static ORIGIN: Cell<SettingsRoute> = const { Cell::new(SettingsRoute::Car) };
     /// Our page is up over Settings.
     static OVER: Cell<bool> = const { Cell::new(false) };
     /// The UI path last reported for Settings.
@@ -99,6 +101,7 @@ struct Field {
     min: Option<usize>,
     max: Option<usize>,
     url: bool,
+    color: bool,
 }
 
 pub fn page_of(id: PageId) -> Page {
@@ -205,6 +208,12 @@ pub fn wire(ui: &AppWindow) {
     st.on_cell(move |i| {
         if let Some(ui) = weak.upgrade() {
             press(&ui, Hit::Cell(i.max(0) as usize));
+        }
+    });
+    let weak = ui.as_weak();
+    ui.global::<SettingsState>().on_color_hex_edit(move || {
+        if let Some(ui) = weak.upgrade() {
+            start_editing(&ui);
         }
     });
 
@@ -640,7 +649,7 @@ pub fn settings_depth() -> usize {
     if !OWNS.get() {
         return 0;
     }
-    with(|o| o.pages.depth(PageId::Car)).unwrap_or(0)
+    with(|o| ORIGIN.get().depth(&o.pages)).unwrap_or(0)
 }
 
 /// The UI path while the tab is up: `/carpi/car`, or `/carpi/car/light` on the light screens
@@ -673,19 +682,30 @@ pub fn settings_screen(stack: &[usize], screen: Screen, state: &serde_json::Valu
             }
         }
     });
-    let ours = TAB.get().is_some_and(|t| stack == [t]);
-    if !ours {
+    let route = TAB.get().and_then(|t| SettingsRoute::at(stack, t));
+    let Some(route) = route else {
         if OWNS.get() {
             leave();
         }
-        return screen;
-    }
+        return if stack.is_empty() {
+            livi_ui_model::carpi::root_screen(
+                screen,
+                with(|o| o.pages.setup_done()).unwrap_or(false),
+            )
+        } else {
+            screen
+        };
+    };
     let Some(ui) = ui() else { return screen };
-    if !OWNS.get() {
+    if !OWNS.get() || ORIGIN.get() != route {
         OWNS.set(true);
+        ORIGIN.set(route);
         with(|o| {
             if resume.is_none() {
-                o.pages.reset(PageId::Car);
+                match route {
+                    SettingsRoute::Setup => o.pages.open_setup(&o.client),
+                    SettingsRoute::Car => o.pages.reset(PageId::Car),
+                }
             }
             live(o, true);
         });
@@ -720,7 +740,7 @@ pub fn settings_screen(stack: &[usize], screen: Screen, state: &serde_json::Valu
     OVER.set(over);
     ui.global::<CarpiState>().set_over_settings(over);
     if let Some(focus) = resume {
-        focus_later(&ui, focus, false);
+        focus_later(&ui, focus, true);
     }
     if over {
         return Screen::List {
@@ -741,7 +761,8 @@ fn leave() {
     let Some(ui) = ui() else { return };
     ui.global::<CarpiState>().set_over_settings(false);
     if let Some(at) = TAB.get() {
-        focus_later(&ui, at as i32, true);
+        let done = with(|o| o.pages.setup_done()).unwrap_or(false);
+        focus_later(&ui, ORIGIN.get().root_focus(at, done) as i32, true);
     }
 }
 
@@ -781,6 +802,15 @@ fn tab_act(ui: &AppWindow, f: impl FnOnce(&mut Ours, &View, i32) -> Moved) {
     .flatten();
     let Some(moved) = moved else { return };
     set_hold(ui, false);
+    if with(|o| ORIGIN.get().finished(&o.pages)).unwrap_or(false) {
+        // Done leaves the Setup route as well as hiding its card.
+        crate::CLIENT.with_borrow(|c| {
+            if let Some(c) = c {
+                crate::settings_ui::reset_to_root(ui, c);
+            }
+        });
+        return;
+    }
     crate::render_settings(ui);
     let to = with(|o| {
         let (view, n) = o.tab.as_ref()?;
@@ -860,6 +890,13 @@ fn tab_row(weak: &Weak<AppWindow>, i: usize) -> bool {
         return true;
     };
     let row = with(|o| o.tab.as_ref().and_then(|(_, n)| n.row(i))).flatten();
+    // Touch does not necessarily move knob focus. Both inputs must save the pressed row.
+    let slot = with(|o| {
+        let (view, n) = o.tab.as_ref()?;
+        n.slot_of(view, view.rows[row?].focus_at).map(|s| s as i32)
+    })
+    .flatten()
+    .unwrap_or(0);
     let phone = row.is_some_and(|r| {
         with(|o| {
             o.tab
@@ -871,11 +908,9 @@ fn tab_row(weak: &Weak<AppWindow>, i: usize) -> bool {
     if phone {
         let target = PHONE_TARGET.with_borrow(Clone::clone);
         if let Some(target) = target {
+            // Add the current Back/Apply base again after the native visit.
             SETUP_LINK.with_borrow_mut(|link| {
-                *link = Some(SetupLink::new(
-                    target,
-                    ui.global::<Focus>().get_main_index(),
-                ));
+                *link = Some(SetupLink::new(target, ORIGIN.get(), slot));
             });
             crate::CLIENT.with_borrow(|c| {
                 if let Some(c) = c {
@@ -901,9 +936,10 @@ fn tab_row(weak: &Weak<AppWindow>, i: usize) -> bool {
         return true;
     }
     if let Some(row) = row {
-        tab_act(&ui, |o, view, from| {
+        let focus = ui.global::<SettingsState>().get_focus_base() + slot;
+        tab_act(&ui, |o, view, _| {
             o.pages
-                .press(PageId::Car, view, &Hit::Row(row), from, &o.client)
+                .press(PageId::Car, view, &Hit::Row(row), focus, &o.client)
         });
     }
     true
@@ -929,11 +965,15 @@ pub fn settings_pick(weak: &Weak<AppWindow>, pick: usize) -> bool {
 /// settings_ui's back: a screen up inside the tab. False on its first screen, where LIVI goes
 /// back to Settings' root.
 pub fn settings_back(weak: &Weak<AppWindow>) -> bool {
-    if SETUP_LINK.with_borrow_mut(|link| link.as_mut().is_some_and(SetupLink::back)) {
+    let origin = SETUP_LINK.with_borrow_mut(|link| {
+        let link = link.as_mut()?;
+        link.back().then(|| link.origin())
+    });
+    if let Some(origin) = origin {
         if let Some(ui) = weak.upgrade() {
             crate::CLIENT.with_borrow(|c| {
                 if let Some(c) = c {
-                    crate::settings_ui::open_path(&ui, c, livi_ui_model::carpi::ROUTE);
+                    crate::settings_ui::open_path(&ui, c, origin.path());
                 }
             });
         }
@@ -994,31 +1034,35 @@ fn touch_attached(client: &livi_core_client::Client) -> bool {
 /// settings_screen's look at each screen LIVI draws: a text screen just opened opens the
 /// keyboard on its field.
 fn text_screen(stack: &[usize], screen: &Screen) {
-    let Screen::Text {
-        title,
-        value,
-        min_len,
-        max_len,
-        url,
-    } = screen
-    else {
-        FIELD.with_borrow_mut(|f| *f = None);
-        return;
+    let (title, value, min_len, max_len, url, color) = match screen {
+        Screen::Text {
+            title,
+            value,
+            min_len,
+            max_len,
+            url,
+        } => (title, value, *min_len, *max_len, *url, false),
+        Screen::Color { title, value, .. } => (title, value, None, Some(7), false, true),
+        _ => {
+            FIELD.with_borrow_mut(|f| *f = None);
+            return;
+        }
     };
     let field = Field {
         stack: stack.to_vec(),
         title: title.clone(),
         value: value.clone(),
-        min: *min_len,
-        max: *max_len,
-        url: *url,
+        min: min_len,
+        max: max_len,
+        url,
+        color,
     };
     let opened = FIELD.with_borrow_mut(|f| {
         let opened = f.as_ref().is_none_or(|f| f.stack != field.stack);
         *f = Some(field);
         opened
     });
-    if opened {
+    if opened && !color {
         // After the render: LIVI's settings are mid-draw here.
         Timer::single_shot(Duration::ZERO, || {
             if let Some(ui) = ui() {
@@ -1033,14 +1077,22 @@ fn text_screen(stack: &[usize], screen: &Screen) {
 pub fn start_editing(ui: &AppWindow) -> bool {
     if ui.get_page() != Page::Settings
         || OWNS.get()
-        || ui.global::<SettingsState>().get_kind() != ScreenKind::Text
+        || !matches!(
+            ui.global::<SettingsState>().get_kind(),
+            ScreenKind::Text | ScreenKind::Color
+        )
     {
         return false;
     }
     let Some(f) = FIELD.with_borrow(Clone::clone) else {
         return false;
     };
-    open_field(ui, &f, &f.value)
+    let value = if f.color {
+        ui.global::<SettingsState>().get_color_hex().to_string()
+    } else {
+        f.value.clone()
+    };
+    open_field(ui, &f, &value)
 }
 
 fn open_field(ui: &AppWindow, f: &Field, text: &str) -> bool {
@@ -1060,19 +1112,35 @@ fn field_done(ui: &AppWindow, text: String) {
     let Some(f) = FIELD.with_borrow(Clone::clone) else {
         return;
     };
-    ui.global::<SettingsState>()
-        .invoke_text_commit(text.as_str().into());
-    let still = ui.global::<SettingsState>().get_kind() == ScreenKind::Text
+    let state = ui.global::<SettingsState>();
+    if f.color {
+        state.invoke_color_hex_commit(text.as_str().into());
+        if !state.get_color_hex_invalid() {
+            return;
+        }
+    } else {
+        state.invoke_text_commit(text.as_str().into());
+    }
+    let still = state.get_kind()
+        == if f.color {
+            ScreenKind::Color
+        } else {
+            ScreenKind::Text
+        }
         && FIELD.with_borrow(|now| now.as_ref().is_some_and(|n| n.stack == f.stack));
     if !still {
         return;
     }
-    let why = match (f.min, f.max) {
-        _ if f.url => "Not saved: it starts with http:// or https://".to_string(),
-        (Some(a), Some(b)) => format!("Not saved: {a} to {b} characters"),
-        (Some(a), None) => format!("Not saved: at least {a} characters"),
-        (None, Some(b)) => format!("Not saved: {b} characters at most"),
-        (None, None) => "Not saved".to_string(),
+    let why = if f.color {
+        "Not saved: enter a hex color such as #12abef".to_string()
+    } else {
+        match (f.min, f.max) {
+            _ if f.url => "Not saved: it starts with http:// or https://".to_string(),
+            (Some(a), Some(b)) => format!("Not saved: {a} to {b} characters"),
+            (Some(a), None) => format!("Not saved: at least {a} characters"),
+            (None, Some(b)) => format!("Not saved: {b} characters at most"),
+            (None, None) => "Not saved".to_string(),
+        }
     };
     toast(ui, &why, ToastLevel::Warn);
     open_field(ui, &f, &text);

@@ -73,6 +73,7 @@ export global SettingsState {
     callback number-commit(string);
     callback text-commit(string);
     callback color-hex-commit(string);
+    callback color-hex-edit();
     callback color-slide(int, float);
     callback color-slide-done(int, float);
     callback color-reset();
@@ -232,6 +233,7 @@ export component SettingsView inherits Rectangle {
                         saturation-label: SettingsState.saturation-label;
                         lightness-label: SettingsState.lightness-label;
                         hex-commit(s) => { SettingsState.color-hex-commit(s); }
+                        hex-edit => { SettingsState.color-hex-edit(); }
                         slide(i, v) => { SettingsState.color-slide(i, v); }
                         slide-done(i, v) => { SettingsState.color-slide-done(i, v); }
                         reset => { SettingsState.color-reset(); }

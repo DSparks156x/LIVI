@@ -162,16 +162,13 @@ fn dis_state(snap: &Snapshot) -> String {
 
 // ---- Root and status ----
 
-fn root(pages: &Pages, snap: &Snapshot) -> View {
+fn root(_pages: &Pages, snap: &Snapshot) -> View {
     let note = if snap.connected {
         settings_note(snap)
     } else {
         problem(snap)
     };
     let mut v = View::new(Layout::List, "Car Integration", true).note(note);
-    if !pages.setup_done() {
-        v.row(route("Setup", "Start here", S::Setup).icon("FormatListNumberedOutlined"));
-    }
     let s = snap.settings.as_ref();
     if let Some(s) = s {
         v.row(
@@ -317,7 +314,7 @@ fn setup(snap: &Snapshot) -> View {
         Row::new(
             RowKind::Button,
             "Done, hide this",
-            "Advanced brings it back",
+            "Car Integration > Advanced brings it back",
         )
         .button("Hide")
         .act(Act::SetupDone(true)),
@@ -2820,13 +2817,13 @@ mod tests {
     }
 
     #[test]
-    fn setup_shows_until_hidden_and_its_screens_come_back_to_it() {
+    fn setup_is_separate_from_car_integration_and_its_screens_come_back_to_it() {
         let mut p = Pages::new(Saved::default(), None);
         let client = Client::offline("test");
         let s = snap();
         let v = view(&p, &s, Instant::now());
-        assert_eq!(v.rows[0].label, "Setup");
-        p.press(crate::PageId::Car, &v, &Hit::Row(0), 0, &client);
+        assert!(!v.rows.iter().any(|r| r.label == "Setup"));
+        p.open_setup(&client);
         assert_eq!(p.car, S::Setup);
         let v = view(&p, &s, Instant::now());
         let phone = find(&v, "Phone connection");
@@ -2864,7 +2861,7 @@ mod tests {
         p.goto(S::Remote);
         p.back(crate::PageId::Car);
         assert_eq!(p.car, S::Root);
-        // Hide: gone from the first screen, Advanced brings it back.
+        // Hide persists the main Settings preference; Advanced brings it back.
         p.goto(S::Setup);
         let v = view(&p, &s, Instant::now());
         let hide = find(&v, "Done, hide this");

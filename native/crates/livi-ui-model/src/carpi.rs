@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Drew Sparks
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! carpi fork: carpid's pages in the tab bar, and the Car Integration tab in Settings.
+//! carpi fork: carpid's pages in the tab bar, Setup and Car Integration in Settings.
 //!
 //! Data takes the dashboard's place and Diagnostics goes before Settings. The tab is the last
 //! route of Settings' root; its screens come from livi-carpi-ui as views, drawn as LIVI's own
@@ -30,12 +30,70 @@ pub fn tabs(mut tabs: Vec<Tab>) -> Vec<Tab> {
 /// The tab's route key: `/settings/carpi`.
 pub const ROUTE: &str = "carpi";
 
+/// A stable route in the cached schema; only its root card is hidden.
+pub const SETUP_ROUTE: &str = "setup";
+pub const SETUP_NODE: usize = 0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsRoute {
+    Setup,
+    Car,
+}
+
+impl SettingsRoute {
+    pub fn at(stack: &[usize], tab: usize) -> Option<Self> {
+        match stack {
+            [SETUP_NODE] => Some(Self::Setup),
+            [at] if *at == tab => Some(Self::Car),
+            _ => None,
+        }
+    }
+
+    pub fn path(self) -> &'static str {
+        match self {
+            Self::Setup => SETUP_ROUTE,
+            Self::Car => ROUTE,
+        }
+    }
+
+    /// Setup itself is a root Settings route, rather than a child of Car Integration.
+    pub fn depth(self, pages: &livi_carpi_ui::Pages) -> usize {
+        pages
+            .depth(PageId::Car)
+            .saturating_sub(usize::from(self == Self::Setup))
+    }
+
+    pub fn finished(self, pages: &livi_carpi_ui::Pages) -> bool {
+        self == Self::Setup && pages.screen() == livi_carpi_ui::view::CarScreen::Root
+    }
+
+    pub fn root_focus(self, tab: usize, setup_done: bool) -> usize {
+        match self {
+            Self::Setup => 0,
+            Self::Car => tab - usize::from(setup_done),
+        }
+    }
+}
+
+/// Read the current preference on every render, without changing native route indexes.
+pub fn root_screen(mut screen: Screen, setup_done: bool) -> Screen {
+    if let Screen::List { rows, .. } = &mut screen {
+        if setup_done {
+            rows.retain(|r| r.node != SETUP_NODE);
+        } else if let Some(row) = rows.iter_mut().find(|r| r.node == SETUP_NODE) {
+            row.value = "Start here".into();
+        }
+    }
+    screen
+}
+
 /// LIVI owns the controls, persistence, Apply/restart and hardware behavior on this route.
 pub const PHONE_SETTINGS: &str = "general/connections";
 
 /// A temporary visit from Setup to an existing Settings route, including its children.
 pub struct SetupLink {
     target: Vec<usize>,
+    origin: SettingsRoute,
     focus: i32,
     at_target: bool,
     returning: bool,
@@ -49,9 +107,10 @@ pub enum LinkScreen {
 }
 
 impl SetupLink {
-    pub fn new(target: Vec<usize>, focus: i32) -> Self {
+    pub fn new(target: Vec<usize>, origin: SettingsRoute, focus: i32) -> Self {
         Self {
             target,
+            origin,
             focus,
             at_target: false,
             returning: false,
@@ -59,7 +118,7 @@ impl SetupLink {
     }
 
     pub fn screen(&mut self, stack: &[usize], tab: usize) -> LinkScreen {
-        if self.returning && stack == [tab] {
+        if self.returning && SettingsRoute::at(stack, tab) == Some(self.origin) {
             return LinkScreen::Resume(self.focus);
         }
         self.at_target = stack == self.target;
@@ -74,6 +133,10 @@ impl SetupLink {
     pub fn back(&mut self) -> bool {
         self.returning = self.at_target;
         self.returning
+    }
+
+    pub fn origin(&self) -> SettingsRoute {
+        self.origin
     }
 }
 
@@ -97,11 +160,15 @@ pub fn phone_state(view: &mut View, state: &serde_json::Value) {
     }
 }
 
-/// Settings' root with the Car Integration tab last, and the tab's index in it.
+/// Settings' root with Setup first and Car Integration last, and the latter's index.
 pub fn with_tab(mut root: Node) -> (Node, usize) {
     let tab = Node::route(ROUTE, Label::plain("Car Integration"), vec![]).icon("carName");
     let mut at = 0;
     if let Kind::Route { children, .. } = &mut root.kind {
+        children.insert(
+            SETUP_NODE,
+            Node::route(SETUP_ROUTE, Label::plain("Setup"), vec![]).icon("dabStationList"),
+        );
         at = children.len();
         children.push(tab);
     }
@@ -240,6 +307,7 @@ pub fn native(v: &View) -> Native {
 #[cfg(test)]
 mod tests {
     use livi_carpi_ui::view::{Act, Layout, Row as R};
+    use std::time::Instant;
 
     use super::*;
     use crate::i18n::Strings;
@@ -248,7 +316,6 @@ mod tests {
     #[test]
     fn setup_phone_link_uses_native_settings_and_returns_with_current_state() {
         use crate::settings::{restart::pending, view::Change};
-        use livi_carpi_ui::view::{CarScreen, Hit};
         use livi_carpi_ui::{Client, Pages};
         use serde_json::json;
         use std::time::Instant;
@@ -261,13 +328,7 @@ mod tests {
         let client = Client::offline("test");
         let mut pages = Pages::new(Default::default(), None);
         let snap = livi_carpi_ui::client::Snapshot::default();
-        let v = pages.view(PageId::Car, &snap, Instant::now());
-        let setup = v
-            .rows
-            .iter()
-            .position(|r| r.act == Act::Car(CarScreen::Setup))
-            .unwrap();
-        pages.press(PageId::Car, &v, &Hit::Row(setup), 0, &client);
+        pages.open_setup(&client);
         let mut view = pages.view(PageId::Car, &snap, Instant::now());
         let mut state = json!({"config": {"wirelessAaEnabled": false, "wirelessCpEnabled": false}});
         phone_state(&mut view, &state);
@@ -284,7 +345,8 @@ mod tests {
         let slot = native.slot_of(&view, view.rows[phone].focus_at).unwrap();
         assert_eq!(native.at_slot(slot), Some(phone));
 
-        let mut link = SetupLink::new(target.clone(), slot as i32 + 1);
+        let mut link = SetupLink::new(target.clone(), SettingsRoute::Setup, slot as i32);
+        assert_eq!(link.origin().path(), SETUP_ROUTE);
         assert_eq!(link.screen(&target, tab), LinkScreen::Native);
         for (key, other) in [
             ("wirelessAaEnabled", "wirelessCpEnabled"),
@@ -330,20 +392,20 @@ mod tests {
         assert_eq!(link.screen(&target, tab), LinkScreen::Native);
         assert!(link.back());
         assert_eq!(
-            link.screen(&[tab], tab),
-            LinkScreen::Resume(slot as i32 + 1)
+            link.screen(&[SETUP_NODE], tab),
+            LinkScreen::Resume(slot as i32)
         );
         let mut view = pages.view(PageId::Car, &snap, Instant::now());
         phone_state(&mut view, &state);
         assert_eq!(view.title, "Setup");
         assert_eq!(view.rows[phone].value, "Android Auto on · CarPlay on");
-        pages.press(PageId::Car, &view, &Hit::Back, 0, &client);
-        assert_eq!(pages.depth(PageId::Car), 0);
+        // The native Settings stack pops this root route; no Car Integration screen is opened.
+        assert_eq!(SettingsRoute::Setup.depth(&pages), 0);
     }
 
     #[test]
     fn phone_link_cancels_when_an_unrelated_route_opens() {
-        let mut link = SetupLink::new(vec![1, 0], 3);
+        let mut link = SetupLink::new(vec![1, 0], SettingsRoute::Setup, 3);
         assert_eq!(link.screen(&[1, 0], 7), LinkScreen::Native);
         assert_eq!(link.screen(&[], 7), LinkScreen::Left);
         assert!(!link.back());
@@ -418,11 +480,12 @@ mod tests {
     }
 
     #[test]
-    fn the_tab_is_last_in_settings() {
+    fn setup_is_first_and_car_integration_is_last_in_settings() {
         let (root, at) = with_tab(schema());
         let n = root.children().len();
         assert_eq!(at, n - 1);
         let s = Settings::new(root);
+        assert_eq!(s.find(&[SETUP_ROUTE]), Some(vec![SETUP_NODE]));
         assert_eq!(s.find(&[ROUTE]), Some(vec![at]));
         let screen = s
             .screen(&[], &serde_json::Value::Null, &Strings::default())
@@ -430,10 +493,160 @@ mod tests {
         let Screen::List { rows, .. } = screen else {
             panic!()
         };
+        assert_eq!(
+            (rows[0].label.as_str(), rows[0].kind, rows[0].node),
+            ("Setup", RowKind::Route, SETUP_NODE)
+        );
         let last = rows.last().unwrap();
         assert_eq!(
             (last.label.as_str(), last.kind),
             ("Car Integration", RowKind::Route)
+        );
+    }
+
+    #[test]
+    fn hide_and_restore_update_the_cached_root_and_preserve_preferences() {
+        use livi_carpi_ui::view::{CarScreen, Hit};
+        use livi_carpi_ui::{
+            Client, Pages,
+            config::{self, Saved},
+        };
+        let (root, tab) = with_tab(schema());
+        let settings = Settings::new(root);
+        let cached = settings
+            .screen(&[], &serde_json::Value::Null, &Strings::default())
+            .unwrap();
+        let file = std::env::temp_dir().join(format!(
+            "livi-setup-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let saved = Saved {
+            recent: vec!["engine.rpm".into()],
+            data: Some(livi_carpi_ui::slots::Board::data()),
+            ..Saved::default()
+        };
+        config::save(&file, &saved).unwrap();
+        let client = Client::offline("test");
+        let mut pages = Pages::new(config::load(&file), Some(file.clone()));
+        let mut snap = livi_carpi_ui::client::Snapshot::default();
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../livi-carpi-ui/fixtures/car.json")).unwrap();
+        snap.settings = Some(serde_json::from_value(fixture["settings"].clone()).unwrap());
+        let root_rows = |done| {
+            let Screen::List { rows, .. } = root_screen(cached.clone(), done) else {
+                panic!()
+            };
+            rows
+        };
+        assert_eq!(root_rows(pages.setup_done())[0].label, "Setup");
+        pages.open_setup(&client);
+        assert_eq!(SettingsRoute::Setup.depth(&pages), 0);
+        let view = pages.view(PageId::Car, &snap, Instant::now());
+        let hide = view
+            .rows
+            .iter()
+            .position(|r| r.act == Act::SetupDone(true))
+            .unwrap();
+        let mapped = native(&view);
+        // Touch and knob resolve the same hide action.
+        assert_eq!(
+            mapped.row(mapped.rows.iter().position(|r| *r == Some(hide)).unwrap()),
+            Some(hide)
+        );
+        assert_eq!(
+            mapped.at_slot(mapped.slot_of(&view, view.rows[hide].focus_at).unwrap()),
+            Some(hide)
+        );
+        pages.press(PageId::Car, &view, &Hit::Row(hide), 0, &client);
+        assert!(SettingsRoute::Setup.finished(&pages));
+        assert!(pages.setup_done());
+        let hidden = root_rows(pages.setup_done());
+        assert!(hidden.iter().all(|r| r.label != "Setup"));
+        // Row positions move; native node keys and the Connections target stay stable.
+        assert_eq!(hidden[0].node, 1);
+        assert_eq!(hidden.last().unwrap().node, tab);
+        assert_eq!(SettingsRoute::Car.root_focus(tab, true), hidden.len() - 1);
+        assert!(settings.opens(&[], hidden[0].node));
+        let loaded = config::load(&file);
+        assert!(loaded.setup_done);
+        assert_eq!(loaded.recent, saved.recent);
+        assert_eq!(loaded.data, saved.data);
+        assert_eq!(loaded.keyboard, saved.keyboard);
+        pages = Pages::new(loaded, Some(file.clone()));
+        assert!(
+            root_rows(pages.setup_done())
+                .iter()
+                .all(|r| r.node != SETUP_NODE)
+        );
+        pages.goto(CarScreen::Advanced);
+        let view = pages.view(PageId::Car, &snap, Instant::now());
+        let show = view
+            .rows
+            .iter()
+            .position(|r| r.act == Act::SetupDone(false))
+            .unwrap();
+        pages.press(PageId::Car, &view, &Hit::Row(show), 0, &client);
+        assert_eq!(pages.screen(), CarScreen::Advanced);
+        assert!(!pages.setup_done());
+        assert!(!config::load(&file).setup_done);
+        let shown = root_rows(pages.setup_done());
+        assert_eq!(
+            (shown[0].label.as_str(), shown[0].value.as_str()),
+            ("Setup", "Start here")
+        );
+        assert_eq!(shown.last().unwrap().node, tab);
+        assert_eq!(SettingsRoute::Car.root_focus(tab, false), shown.len() - 1);
+        std::fs::remove_file(file).unwrap();
+    }
+
+    #[test]
+    fn setup_routes_and_nested_back_keep_their_origin_and_focus() {
+        use livi_carpi_ui::view::{CarScreen, Hit};
+        use livi_carpi_ui::{Client, Moved, Pages};
+        let (_, tab) = with_tab(schema());
+        assert_eq!(
+            SettingsRoute::at(&[SETUP_NODE], tab),
+            Some(SettingsRoute::Setup)
+        );
+        assert_eq!(SettingsRoute::at(&[tab], tab), Some(SettingsRoute::Car));
+        assert_eq!(SettingsRoute::at(&[], tab), None);
+        let client = Client::offline("test");
+        let mut pages = Pages::new(Default::default(), None);
+        let mut snap = livi_carpi_ui::client::Snapshot::default();
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../livi-carpi-ui/fixtures/car.json")).unwrap();
+        snap.settings = Some(serde_json::from_value(fixture["settings"].clone()).unwrap());
+        for label in [
+            "Time zone",
+            "Wi-Fi networks",
+            "Cluster display",
+            "Remote access",
+        ] {
+            pages.open_setup(&client);
+            let view = pages.view(PageId::Car, &snap, Instant::now());
+            let row = view.rows.iter().position(|r| r.label == label).unwrap();
+            let mapped = native(&view);
+            let slot = mapped.slot_of(&view, view.rows[row].focus_at).unwrap();
+            assert_eq!(mapped.at_slot(slot), Some(row));
+            let focus = slot as i32 + 1;
+            pages.press(PageId::Car, &view, &Hit::Row(row), focus, &client);
+            assert_eq!(SettingsRoute::Setup.depth(&pages), 1);
+            assert_eq!(pages.back(PageId::Car), Some(Moved::Closed(focus)));
+            assert_eq!(pages.screen(), CarScreen::Setup);
+            assert_eq!(SettingsRoute::Setup.depth(&pages), 0);
+        }
+        pages.reset(PageId::Car);
+        assert_eq!(SettingsRoute::Car.depth(&pages), 0);
+        assert!(
+            !pages
+                .view(PageId::Car, &snap, Instant::now())
+                .rows
+                .iter()
+                .any(|r| r.act == Act::Car(CarScreen::Setup))
         );
     }
 

@@ -1,13 +1,13 @@
 [package]
 name = "livi-carpi"
-description = "Bridge between livi-core and carpid, the car daemon of pq35-carpi"
+description = "Bridge between livi-core and carpid, the car daemon of rnse-carpi"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
 base64.workspace = true
-# From the pq35-carpi superproject: this fork is its livi/ submodule.
+# From the rnse-carpi superproject: this fork is its livi/ submodule.
 carpi-proto = { path = "../../../../crates/carpi-proto" }
 livi-aa-stack.workspace = true
 livi-carpi-ui.workspace = true

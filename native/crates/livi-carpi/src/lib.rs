@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Drew Sparks
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Bridge between livi-core and carpid, the car daemon of pq35-carpi.
+//! Bridge between livi-core and carpid, the car daemon of rnse-carpi.
 //!
 //! carpid owns the car's CAN. This crate connects to its socket, `$CARPID_SOCKET` or
 //! `$XDG_RUNTIME_DIR/carpid.sock`, and

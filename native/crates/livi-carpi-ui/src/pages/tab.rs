@@ -1954,6 +1954,7 @@ fn updates(snap: &Snapshot) -> View {
                 ("ok", _) => "Succeeded",
                 ("rolled_back", _) => "Rolled back",
                 ("failed", _) => "Failed",
+                ("pending_boot", _) => "First install prepared",
                 ("applying", Some(true)) => "In progress",
                 ("applying", Some(false)) => "Interrupted",
                 _ => "Unknown",

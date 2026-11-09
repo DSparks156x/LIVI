@@ -604,6 +604,7 @@ pub(crate) fn sample() -> Settings {
         portal: Default::default(),
         update: Default::default(),
         avsd: Default::default(),
+        remote: Default::default(),
     }
 }
 

@@ -310,6 +310,7 @@ fn settings(mut s: Settings) -> Settings {
     s.update.version = "carpid 0.1.0, release 2026.11.08 (stable)".into();
     s.power.shutdown = true;
     s.bindings_custom = true;
+    s.remote = carpi_proto::RemoteSettings { vnc_installed: true, vnc_running: true, vnc_at_boot: false };
     s.dis.accel = ["0-60mph", "50-100kmh", "1/4mi", "speed"]
         .map(String::from)
         .to_vec();
@@ -497,6 +498,7 @@ fn main() {
         ("pin", S::Pin),
         ("updates", S::Updates),
         ("update-confirm", S::UpdateConfirm),
+        ("remote", S::Remote),
         ("wifi", S::Wifi),
         ("wifi-net", S::WifiNet(0)),
         ("wifi-add", S::WifiAdd),

@@ -66,6 +66,7 @@ pub(super) fn view(pages: &Pages, snap: &Snapshot, now: Instant) -> View {
         S::Avsd => avsd(snap, now),
         S::Picture => picture(snap),
         S::Portal => portal(snap),
+        S::Remote => remote(snap),
         S::Pin => pin_entry(snap, &pages.pin),
         S::Updates => updates(snap),
         S::UpdateConfirm => update_confirm(snap),
@@ -209,6 +210,12 @@ fn root(snap: &Snapshot) -> View {
         None => String::new(),
     };
     v.row(route("Phone portal", portal, S::Portal).icon("SmartphoneOutlined"));
+    let vnc = match &snap.settings {
+        Some(s) if s.remote.vnc_running => "VNC on",
+        Some(s) if s.remote.vnc_installed => "VNC off",
+        _ => "",
+    };
+    v.row(route("Remote access", vnc, S::Remote).icon("LanOutlined"));
     let update = if snap.update.running() {
         "Updating"
     } else {
@@ -1631,6 +1638,50 @@ fn picture(snap: &Snapshot) -> View {
     })
 }
 
+// ---- Remote access ----
+
+fn remote_patch(p: carpi_proto::RemotePatch) -> Act {
+    set(SettingsPatch {
+        remote: Some(p),
+        ..Default::default()
+    })
+}
+
+fn remote(snap: &Snapshot) -> View {
+    with_settings(snap, "Remote access", |v, s| {
+        v.row(info(
+            "File portal",
+            s.portal
+                .address
+                .clone()
+                .unwrap_or_else(|| "The portal is off".into()),
+        ));
+        v.row(info("ssh", "Always on"));
+        let r = &s.remote;
+        if !r.vnc_installed {
+            v.row(info("VNC", "Not installed").dimmed(true));
+            return;
+        }
+        v.row(toggle(
+            "VNC now",
+            r.vnc_running,
+            remote_patch(carpi_proto::RemotePatch {
+                vnc_running: Some(!r.vnc_running),
+                ..Default::default()
+            }),
+        ));
+        v.row(toggle(
+            "VNC at startup",
+            r.vnc_at_boot,
+            remote_patch(carpi_proto::RemotePatch {
+                vnc_at_boot: Some(!r.vnc_at_boot),
+                ..Default::default()
+            }),
+        ));
+        v.row(info("Off at startup boots faster", "Turn it on here when you need it").dimmed(true));
+    })
+}
+
 // ---- Phone portal ----
 
 fn portal(snap: &Snapshot) -> View {
@@ -2258,6 +2309,7 @@ mod tests {
             S::Portal,
             S::Pin,
             S::Updates,
+            S::Remote,
             S::UpdateConfirm,
             S::Advanced,
         ] {

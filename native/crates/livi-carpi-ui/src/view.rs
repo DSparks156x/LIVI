@@ -163,6 +163,8 @@ pub enum CarScreen {
     Avsd,
     Picture,
     Portal,
+    /// The portal's address, VNC now and at startup.
+    Remote,
     /// Entering a new portal PIN.
     Pin,
     Updates,

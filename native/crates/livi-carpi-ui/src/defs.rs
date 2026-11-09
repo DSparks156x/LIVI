@@ -88,7 +88,7 @@ pub const CATEGORIES: &[Category] = &[
     Category {
         id: "rnse",
         label: "RNS-E",
-        subs: &["RNS-E"],
+        subs: &["RNS-E", "A/V over SD"],
     },
     Category {
         id: PHONE,
@@ -176,6 +176,7 @@ const RNSE: At = ("rnse", "RNS-E");
 const P_NAV: At = (PHONE, "Nav");
 const P_MEDIA: At = (PHONE, "Media");
 const P_PHONE: At = (PHONE, "Phone");
+const AVSD: At = ("rnse", "A/V over SD");
 
 pub const DEFS: &[Def] = &[
     // Engine.
@@ -371,6 +372,14 @@ pub const DEFS: &[Def] = &[
     flag(RNSE, "rnse.radio_on", "RNS-E on", YES),
     num(RNSE, "rnse.mode", "RNS-E mode", "", 0),
     flag(RNSE, "rnse.on_tv", "RNS-E on TV", YES),
+    // A/V over SD, from carpid's read of the chain.
+    text(AVSD, "avsd.state", "Stream"),
+    flag(AVSD, "avsd.teensy", "Teensy", ("Connected", "Not connected")),
+    num(AVSD, "avsd.fps", "Frame rate", "fps", 1),
+    num(AVSD, "avsd.link_kbs", "Link", "kB/s", 0),
+    num(AVSD, "avsd.cap_kbs", "Link cap", "kB/s", 0),
+    num(AVSD, "avsd.dropped", "Frames dropped", "", 0),
+    num(AVSD, "avsd.stalls", "Reader stalls", "", 0),
     // Phone & nav, from the bridge.
     text(P_NAV, "nav.distance_text", "Next turn"),
     text(P_NAV, "nav.eta", "ETA"),

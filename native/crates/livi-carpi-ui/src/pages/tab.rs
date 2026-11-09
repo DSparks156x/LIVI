@@ -1062,6 +1062,18 @@ fn controls(snap: &Snapshot) -> View {
                 })
             },
         ));
+        if s.bindings_custom {
+            v.row(
+                Row::new(RowKind::Button, "Key bindings", "Changed")
+                    .button("Reset to defaults")
+                    .act(set(SettingsPatch {
+                        bindings_reset: true,
+                        ..Default::default()
+                    })),
+            );
+        } else {
+            v.row(info("Key bindings", "Defaults").dimmed(true));
+        }
     })
 }
 
@@ -1416,13 +1428,12 @@ fn avsd(snap: &Snapshot, now: Instant) -> View {
         if !s.avsd.found {
             v.row(info("Not set up", s.avsd.path.clone()).alert(true));
         }
-        let status: Vec<String> = snap
-            .values
-            .under("avsd.")
-            .map(|(n, _)| n.to_string())
+        let status: Vec<String> = names_under("avsd.", &snap.values)
+            .into_iter()
+            .filter(|n| snap.values.get(n).is_some())
             .collect();
         if status.is_empty() {
-            v.row(info("Status", "not reported yet").dimmed(true));
+            v.row(info("Stream", "Not running").dimmed(true));
         }
         for n in status {
             v.row(value_row(&n, snap, now));

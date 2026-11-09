@@ -571,6 +571,7 @@ pub(crate) fn sample() -> Settings {
             nav_dest_distance: true,
             nav_lanes: carpi_proto::DisLanes::Flip,
         },
+        bindings_custom: false,
         bindings: vec![
             Binding {
                 table: "dis_toggle".into(),

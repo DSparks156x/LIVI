@@ -301,6 +301,7 @@ fn settings(mut s: Settings) -> Settings {
     s.portal.address = Some("http://10.10.0.1:5003".into());
     s.update.version = "carpid 0.1.0, release 2026.11.08 (stable)".into();
     s.power.shutdown = true;
+    s.bindings_custom = true;
     s.avsd.path = "/home/pi/avsd/avsd.env".into();
     s.avsd.found = true;
     let r = |key: &str, label: &str, unit: &str, min, max, step, default, zero_off| AvsdRange {
@@ -342,8 +343,13 @@ fn client() -> Client {
         ("dis.state", Value::Text("ready".into())),
         ("dis.shown", Value::Text("nav".into())),
         ("projection.wireless", Value::Bool(true)),
-        ("avsd.teensy", Value::Text("connected".into())),
-        ("avsd.link", Value::Text("812 kB/s".into())),
+        ("avsd.state", Value::Text("Streaming".into())),
+        ("avsd.teensy", Value::Bool(true)),
+        ("avsd.fps", Value::Num(29.8)),
+        ("avsd.link_kbs", Value::Num(717.0)),
+        ("avsd.cap_kbs", Value::Num(4500.0)),
+        ("avsd.dropped", Value::Num(2.0)),
+        ("avsd.stalls", Value::Num(0.0)),
     ];
     client.snapshot().datalog = Some(datalog());
     client.snapshot().values.take(

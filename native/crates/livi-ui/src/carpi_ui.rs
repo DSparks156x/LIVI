@@ -73,6 +73,9 @@ thread_local! {
     static OVER: Cell<bool> = const { Cell::new(false) };
     /// The UI path last reported for Settings.
     static REPORTED: Cell<&'static str> = const { Cell::new("") };
+    /// The tab's step row being adjusted (our row index): pushed once, the knob turns its value
+    /// both ways until a push or Back.
+    static TAB_HOLD: Cell<Option<usize>> = const { Cell::new(None) };
 }
 
 pub fn page_of(id: PageId) -> Page {
@@ -299,6 +302,24 @@ pub fn key(ui: &AppWindow, config: &serde_json::Value, code: &str) -> bool {
         0
     };
     if tab {
+        if let Some(row) = TAB_HOLD.get() {
+            let turn = if !knob_l.is_empty() && code == knob_l {
+                -1
+            } else if !knob_r.is_empty() && code == knob_r {
+                1
+            } else {
+                d
+            };
+            if turn != 0 {
+                tab_side_row(ui, row, turn);
+                return true;
+            }
+            let enter = code == "Enter" || code == "NumpadEnter" || code == bind("selectDown");
+            let back = code == "Escape" || code == bind("back");
+            tab_hold(ui, None);
+            // Push and Back end the adjusting; anything else ends it and goes on.
+            return enter || back;
+        }
         return distinct && d != 0 && tab_side(ui, d);
     }
     if HOLD.get() {
@@ -521,7 +542,15 @@ pub fn settings_screen(stack: &[usize], screen: Screen) -> Screen {
         if over {
             show(&ui, o, &view);
         }
-        let n = native(&view);
+        let mut n = native(&view);
+        if let (Some(held), Screen::List { rows, .. }) = (TAB_HOLD.get(), &mut n.screen) {
+            match n.rows.iter().position(|r| *r == Some(held)) {
+                Some(k) if k < rows.len() => {
+                    rows[k].value = format!("◀  {}  ▶", rows[k].value);
+                }
+                _ => TAB_HOLD.set(None),
+            }
+        }
         let screen = n.screen.clone();
         let title = view.title.clone();
         o.tab = Some((view, n));
@@ -545,6 +574,7 @@ pub fn settings_screen(stack: &[usize], screen: Screen) -> Screen {
 /// The stack left the tab: back on Settings' root, focus on the tab's row.
 fn leave() {
     OWNS.set(false);
+    TAB_HOLD.set(None);
     OVER.set(false);
     with(|o| o.tab = None);
     let Some(ui) = ui() else { return };
@@ -631,6 +661,26 @@ fn tab_side(ui: &AppWindow, d: i32) -> bool {
     true
 }
 
+/// Starts or ends adjusting a step row of the tab, and redraws so its value shows it.
+fn tab_hold(ui: &AppWindow, row: Option<usize>) {
+    if TAB_HOLD.get() == row {
+        return;
+    }
+    TAB_HOLD.set(row);
+    crate::render_settings(ui);
+}
+
+/// The knob on the step row being adjusted: one step down or up, staying in adjust mode.
+fn tab_side_row(ui: &AppWindow, row: usize, d: i32) {
+    let hit = Hit::Row(row);
+    let has = with(|o| o.tab.as_ref().is_some_and(|(v, _)| v.side_act(Some(&hit), d).is_some()))
+        .unwrap_or(false);
+    if !has {
+        return;
+    }
+    tab_act(ui, |o, view, from| o.pages.side(PageId::Car, view, Some(&hit), d, from, &o.client));
+}
+
 /// A push on LIVI's row (or pick) `i` of the tab. False when the tab isn't up.
 fn tab_row(weak: &Weak<AppWindow>, i: usize) -> bool {
     if !OWNS.get() {
@@ -640,6 +690,20 @@ fn tab_row(weak: &Weak<AppWindow>, i: usize) -> bool {
         return true;
     };
     let row = with(|o| o.tab.as_ref().and_then(|(_, n)| n.row(i))).flatten();
+    let adjustable = row.is_some_and(|r| {
+        with(|o| {
+            o.tab.as_ref().is_some_and(|(v, _)| {
+                let hit = Hit::Row(r);
+                v.steps_only(&hit) && v.side_act(Some(&hit), -1).is_some()
+            })
+        })
+        .unwrap_or(false)
+    });
+    if adjustable {
+        let on = (TAB_HOLD.get() != row).then_some(row).flatten();
+        tab_hold(&ui, on);
+        return true;
+    }
     if let Some(row) = row {
         tab_act(&ui, |o, view, from| {
             o.pages

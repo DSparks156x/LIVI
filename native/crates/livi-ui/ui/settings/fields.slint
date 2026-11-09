@@ -313,7 +313,7 @@ export component ColorBody inherits VerticalLayout {
     in property <string> saturation-label: "Saturation";
     in property <string> lightness-label: "Lightness";
     callback hex-commit(string);
-    callback hex-edit();
+    callback hex-edit() -> bool;
     callback slide(int, float);
     callback slide-done(int, float);
     callback reset();
@@ -323,7 +323,7 @@ export component ColorBody inherits VerticalLayout {
     property <bool> hex-editing: Focus.editing && Focus.main(root.base);
     property <bool> hex-focused: hex-input.has-focus;
     changed hex-focused => {
-        if (root.hex-focused) { root.hex-edit(); }
+        if (root.hex-focused && root.hex-edit()) { hex-input.clear-focus(); }
     }
     changed hex-editing => {
         if (root.hex-editing) {

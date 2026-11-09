@@ -213,7 +213,9 @@ pub fn wire(ui: &AppWindow) {
     let weak = ui.as_weak();
     ui.global::<SettingsState>().on_color_hex_edit(move || {
         if let Some(ui) = weak.upgrade() {
-            start_editing(&ui);
+            start_editing(&ui)
+        } else {
+            false
         }
     });
 

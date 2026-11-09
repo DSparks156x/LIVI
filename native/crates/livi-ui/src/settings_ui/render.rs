@@ -168,7 +168,7 @@ pub(super) fn render_screen(c: &mut Controller, s: &SettingsState, state: &Value
     let Some(screen) = c.model.screen(&c.stack, state, &c.strings) else {
         return;
     };
-    let screen = crate::carpi_ui::settings_screen(&c.stack, screen);
+    let screen = crate::carpi_ui::settings_screen(&c.stack, screen, state);
     let screen = match &c.browser {
         Some(b) => Screen::List {
             title: b.title(&c.strings),

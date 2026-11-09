@@ -593,6 +593,7 @@ impl Pages {
             | Act::Wifi(_)
             | Act::Keyboard(_)
             | Act::SetupDone(_)
+            | Act::PhoneSettings
             | Act::MoveNvme => false,
             Act::PinSave => {
                 let pin = std::mem::take(&mut self.pin);

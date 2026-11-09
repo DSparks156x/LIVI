@@ -28,15 +28,17 @@ use std::time::{Duration, Instant};
 use livi_carpi_ui::view::{Hit, View};
 use livi_carpi_ui::{Client, Moved, PageId, Pages, ToastLevel};
 use livi_core_proto::state::Front;
-use livi_ui_model::carpi::{Native, native, overlay};
+use livi_ui_model::carpi::{
+    LinkScreen, Native, PHONE_SETTINGS, SetupLink, native, overlay, phone_state,
+};
 use livi_ui_model::settings::node::Node;
 use livi_ui_model::settings::view::Screen;
 use slint::{ComponentHandle, Timer, TimerMode, Weak};
 
 use crate::{
     AppWindow, CarpiCell, CarpiKey, CarpiKeyRow, CarpiKeyboard, CarpiKind, CarpiLayout, CarpiPill,
-    CarpiPoint, CarpiRow, CarpiSpot,
-    CarpiState, CarpiTick, CarpiToast, Focus, FocusZone, Page, ScreenKind, SettingsState,
+    CarpiPoint, CarpiRow, CarpiSpot, CarpiState, CarpiTick, CarpiToast, Focus, FocusZone, Page,
+    ScreenKind, SettingsState,
 };
 
 include!("../../livi-carpi-ui/ui/glue.rs");
@@ -73,6 +75,8 @@ thread_local! {
     static HOLD: Cell<bool> = const { Cell::new(false) };
     /// The tab's index in Settings' root.
     static TAB: Cell<Option<usize>> = const { Cell::new(None) };
+    static PHONE_TARGET: RefCell<Option<Vec<usize>>> = const { RefCell::new(None) };
+    static SETUP_LINK: RefCell<Option<SetupLink>> = const { RefCell::new(None) };
     /// Settings shows the tab.
     static OWNS: Cell<bool> = const { Cell::new(false) };
     /// Our page is up over Settings.
@@ -404,9 +408,18 @@ fn keyboard_key(ui: &AppWindow, config: &serde_json::Value, code: &str) -> bool 
     // home (which is what Return held sends).
     let real = prefs.style == livi_carpi_ui::keyboard::Style::Off;
     let bind = |n: &str| config["bindings"][n].as_str().unwrap_or("").to_string();
-    let or = |v: String, fallback: &str| if v.is_empty() { fallback.to_string() } else { v };
+    let or = |v: String, fallback: &str| {
+        if v.is_empty() {
+            fallback.to_string()
+        } else {
+            v
+        }
+    };
     let (knob_l, knob_r) = (bind("knobLeft"), bind("knobRight"));
-    let (left, right) = (or(bind("left"), "ArrowLeft"), or(bind("right"), "ArrowRight"));
+    let (left, right) = (
+        or(bind("left"), "ArrowLeft"),
+        or(bind("right"), "ArrowRight"),
+    );
     let distinct = !knob_l.is_empty() && !knob_r.is_empty() && knob_l != left && knob_r != right;
     let input = if !knob_l.is_empty() && code == knob_l {
         I::Turn(-1)
@@ -612,6 +625,9 @@ fn render(ui: &AppWindow, o: &mut Ours) {
 /// Settings' root with the tab last (settings_ui's wire).
 pub fn with_tab(root: Node) -> Node {
     let (root, at) = livi_ui_model::carpi::with_tab(root);
+    let target = livi_ui_model::settings::view::Settings::new(root.clone())
+        .find(&PHONE_SETTINGS.split('/').collect::<Vec<_>>());
+    PHONE_TARGET.with_borrow_mut(|p| *p = target);
     TAB.set(Some(at));
     root
 }
@@ -638,8 +654,22 @@ fn ui() -> Option<AppWindow> {
 }
 
 /// settings_ui's render: the tab's screen when `stack` is the tab, else `screen` as it is.
-pub fn settings_screen(stack: &[usize], screen: Screen) -> Screen {
+pub fn settings_screen(stack: &[usize], screen: Screen, state: &serde_json::Value) -> Screen {
     text_screen(stack, &screen);
+    let resume = SETUP_LINK.with_borrow_mut(|link| {
+        let status = link.as_mut()?.screen(stack, TAB.get()?);
+        match status {
+            LinkScreen::Native => None,
+            LinkScreen::Resume(focus) => {
+                *link = None;
+                Some(focus)
+            }
+            LinkScreen::Left => {
+                *link = None;
+                None
+            }
+        }
+    });
     let ours = TAB.get().is_some_and(|t| stack == [t]);
     if !ours {
         if OWNS.get() {
@@ -651,12 +681,17 @@ pub fn settings_screen(stack: &[usize], screen: Screen) -> Screen {
     if !OWNS.get() {
         OWNS.set(true);
         with(|o| {
-            o.pages.reset(PageId::Car);
+            if resume.is_none() {
+                o.pages.reset(PageId::Car);
+            }
             live(o, true);
         });
     }
     let built = with(|o| {
-        let view = o.pages.view(PageId::Car, &o.client.snapshot(), Instant::now());
+        let mut view = o
+            .pages
+            .view(PageId::Car, &o.client.snapshot(), Instant::now());
+        phone_state(&mut view, state);
         take_toast(&ui, o);
         let over = overlay(&view);
         if over {
@@ -681,6 +716,9 @@ pub fn settings_screen(stack: &[usize], screen: Screen) -> Screen {
     };
     OVER.set(over);
     ui.global::<CarpiState>().set_over_settings(over);
+    if let Some(focus) = resume {
+        focus_later(&ui, focus, false);
+    }
     if over {
         return Screen::List {
             title,
@@ -795,12 +833,19 @@ fn tab_hold(ui: &AppWindow, row: Option<usize>) {
 /// The knob on the step row being adjusted: one step down or up, staying in adjust mode.
 fn tab_side_row(ui: &AppWindow, row: usize, d: i32) {
     let hit = Hit::Row(row);
-    let has = with(|o| o.tab.as_ref().is_some_and(|(v, _)| v.side_act(Some(&hit), d).is_some()))
-        .unwrap_or(false);
+    let has = with(|o| {
+        o.tab
+            .as_ref()
+            .is_some_and(|(v, _)| v.side_act(Some(&hit), d).is_some())
+    })
+    .unwrap_or(false);
     if !has {
         return;
     }
-    tab_act(ui, |o, view, from| o.pages.side(PageId::Car, view, Some(&hit), d, from, &o.client));
+    tab_act(ui, |o, view, from| {
+        o.pages
+            .side(PageId::Car, view, Some(&hit), d, from, &o.client)
+    });
 }
 
 /// A push on LIVI's row (or pick) `i` of the tab. False when the tab isn't up.
@@ -812,6 +857,32 @@ fn tab_row(weak: &Weak<AppWindow>, i: usize) -> bool {
         return true;
     };
     let row = with(|o| o.tab.as_ref().and_then(|(_, n)| n.row(i))).flatten();
+    let phone = row.is_some_and(|r| {
+        with(|o| {
+            o.tab
+                .as_ref()
+                .is_some_and(|(v, _)| v.rows[r].act == livi_carpi_ui::view::Act::PhoneSettings)
+        })
+        .unwrap_or(false)
+    });
+    if phone {
+        let target = PHONE_TARGET.with_borrow(Clone::clone);
+        if let Some(target) = target {
+            SETUP_LINK.with_borrow_mut(|link| {
+                *link = Some(SetupLink::new(
+                    target,
+                    ui.global::<Focus>().get_main_index(),
+                ));
+            });
+            crate::CLIENT.with_borrow(|c| {
+                if let Some(c) = c {
+                    crate::settings_ui::open_path(&ui, c, PHONE_SETTINGS);
+                }
+            });
+            focus_later(&ui, 0, true);
+        }
+        return true;
+    }
     let adjustable = row.is_some_and(|r| {
         with(|o| {
             o.tab.as_ref().is_some_and(|(v, _)| {
@@ -855,6 +926,16 @@ pub fn settings_pick(weak: &Weak<AppWindow>, pick: usize) -> bool {
 /// settings_ui's back: a screen up inside the tab. False on its first screen, where LIVI goes
 /// back to Settings' root.
 pub fn settings_back(weak: &Weak<AppWindow>) -> bool {
+    if SETUP_LINK.with_borrow_mut(|link| link.as_mut().is_some_and(SetupLink::back)) {
+        if let Some(ui) = weak.upgrade() {
+            crate::CLIENT.with_borrow(|c| {
+                if let Some(c) = c {
+                    crate::settings_ui::open_path(&ui, c, livi_ui_model::carpi::ROUTE);
+                }
+            });
+        }
+        return true;
+    }
     if settings_depth() == 0 {
         return false;
     }

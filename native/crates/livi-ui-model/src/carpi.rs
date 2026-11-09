@@ -30,6 +30,73 @@ pub fn tabs(mut tabs: Vec<Tab>) -> Vec<Tab> {
 /// The tab's route key: `/settings/carpi`.
 pub const ROUTE: &str = "carpi";
 
+/// LIVI owns the controls, persistence, Apply/restart and hardware behavior on this route.
+pub const PHONE_SETTINGS: &str = "general/connections";
+
+/// A temporary visit from Setup to an existing Settings route, including its children.
+pub struct SetupLink {
+    target: Vec<usize>,
+    focus: i32,
+    at_target: bool,
+    returning: bool,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum LinkScreen {
+    Native,
+    Resume(i32),
+    Left,
+}
+
+impl SetupLink {
+    pub fn new(target: Vec<usize>, focus: i32) -> Self {
+        Self {
+            target,
+            focus,
+            at_target: false,
+            returning: false,
+        }
+    }
+
+    pub fn screen(&mut self, stack: &[usize], tab: usize) -> LinkScreen {
+        if self.returning && stack == [tab] {
+            return LinkScreen::Resume(self.focus);
+        }
+        self.at_target = stack == self.target;
+        if stack.starts_with(&self.target) {
+            LinkScreen::Native
+        } else {
+            LinkScreen::Left
+        }
+    }
+
+    /// Nested screens keep their normal Back; only the target returns to Setup.
+    pub fn back(&mut self) -> bool {
+        self.returning = self.at_target;
+        self.returning
+    }
+}
+
+/// Show configured state, without claiming that a phone or authentication hardware is ready.
+pub fn phone_state(view: &mut View, state: &serde_json::Value) {
+    use livi_carpi_ui::view::Act;
+    let Some(row) = view.rows.iter_mut().find(|r| r.act == Act::PhoneSettings) else {
+        return;
+    };
+    let c = &state["config"];
+    if let (Some(aa), Some(cp)) = (
+        c["wirelessAaEnabled"].as_bool(),
+        c["wirelessCpEnabled"].as_bool(),
+    ) {
+        row.value = format!(
+            "{}Android Auto {} · CarPlay {}",
+            if aa || cp { "" } else { "To do · " },
+            if aa { "on" } else { "off" },
+            if cp { "on" } else { "off" },
+        );
+    }
+}
+
 /// Settings' root with the Car Integration tab last, and the tab's index in it.
 pub fn with_tab(mut root: Node) -> (Node, usize) {
     let tab = Node::route(ROUTE, Label::plain("Car Integration"), vec![]).icon("carName");
@@ -179,6 +246,147 @@ mod tests {
     use crate::settings::{schema, view::Settings};
 
     #[test]
+    fn setup_phone_link_uses_native_settings_and_returns_with_current_state() {
+        use crate::settings::{restart::pending, view::Change};
+        use livi_carpi_ui::view::{CarScreen, Hit};
+        use livi_carpi_ui::{Client, Pages};
+        use serde_json::json;
+        use std::time::Instant;
+
+        let (root, tab) = with_tab(schema());
+        let settings = Settings::new(root);
+        let target = settings
+            .find(&PHONE_SETTINGS.split('/').collect::<Vec<_>>())
+            .unwrap();
+        let client = Client::offline("test");
+        let mut pages = Pages::new(Default::default(), None);
+        let snap = livi_carpi_ui::client::Snapshot::default();
+        let v = pages.view(PageId::Car, &snap, Instant::now());
+        let setup = v
+            .rows
+            .iter()
+            .position(|r| r.act == Act::Car(CarScreen::Setup))
+            .unwrap();
+        pages.press(PageId::Car, &v, &Hit::Row(setup), 0, &client);
+        let mut view = pages.view(PageId::Car, &snap, Instant::now());
+        let mut state = json!({"config": {"wirelessAaEnabled": false, "wirelessCpEnabled": false}});
+        phone_state(&mut view, &state);
+        let phone = view
+            .rows
+            .iter()
+            .position(|r| r.act == Act::PhoneSettings)
+            .unwrap();
+        assert!(view.rows[phone].value.starts_with("To do"));
+        let native = native(&view);
+        // Touch's node index and the knob's focus slot reach the same route.
+        let touch = native.rows.iter().position(|r| *r == Some(phone)).unwrap();
+        assert_eq!(native.row(touch), Some(phone));
+        let slot = native.slot_of(&view, view.rows[phone].focus_at).unwrap();
+        assert_eq!(native.at_slot(slot), Some(phone));
+
+        let mut link = SetupLink::new(target.clone(), slot as i32 + 1);
+        assert_eq!(link.screen(&target, tab), LinkScreen::Native);
+        for (key, other) in [
+            ("wirelessAaEnabled", "wirelessCpEnabled"),
+            ("wirelessCpEnabled", "wirelessAaEnabled"),
+        ] {
+            let Screen::List { rows, .. } = settings
+                .screen(&target, &state, &Strings::default())
+                .unwrap()
+            else {
+                panic!()
+            };
+            let node = rows
+                .iter()
+                .find(|r| {
+                    settings
+                        .node(&[target.clone(), vec![r.node]].concat())
+                        .unwrap()
+                        .path
+                        == key
+                })
+                .unwrap()
+                .node;
+            let Change::Config(patch) = settings.toggle(&target, node, &state).unwrap() else {
+                panic!()
+            };
+            assert_eq!(patch, json!({key: true}));
+            assert!(patch.get(other).is_none());
+            let baseline = state["config"].clone();
+            state["config"][key] = patch[key].clone();
+            assert!(pending(&state["config"], &baseline));
+            let Screen::List { rows, .. } = settings
+                .screen(&target, &state, &Strings::default())
+                .unwrap()
+            else {
+                panic!()
+            };
+            assert!(rows.iter().find(|r| r.node == node).unwrap().checked);
+        }
+        let mut child = target.clone();
+        child.push(0);
+        assert_eq!(link.screen(&child, tab), LinkScreen::Native);
+        assert!(!link.back());
+        assert_eq!(link.screen(&target, tab), LinkScreen::Native);
+        assert!(link.back());
+        assert_eq!(
+            link.screen(&[tab], tab),
+            LinkScreen::Resume(slot as i32 + 1)
+        );
+        let mut view = pages.view(PageId::Car, &snap, Instant::now());
+        phone_state(&mut view, &state);
+        assert_eq!(view.title, "Setup");
+        assert_eq!(view.rows[phone].value, "Android Auto on · CarPlay on");
+        pages.press(PageId::Car, &view, &Hit::Back, 0, &client);
+        assert_eq!(pages.depth(PageId::Car), 0);
+    }
+
+    #[test]
+    fn phone_link_cancels_when_an_unrelated_route_opens() {
+        let mut link = SetupLink::new(vec![1, 0], 3);
+        assert_eq!(link.screen(&[1, 0], 7), LinkScreen::Native);
+        assert_eq!(link.screen(&[], 7), LinkScreen::Left);
+        assert!(!link.back());
+    }
+
+    #[test]
+    fn phone_summary_distinguishes_each_setting_and_unknown_state() {
+        use serde_json::json;
+        for (aa, cp, expected) in [
+            (false, false, "To do · Android Auto off · CarPlay off"),
+            (true, false, "Android Auto on · CarPlay off"),
+            (false, true, "Android Auto off · CarPlay on"),
+            (true, true, "Android Auto on · CarPlay on"),
+        ] {
+            let mut v = View::new(Layout::List, "Setup", true);
+            v.row(
+                R::new(
+                    Ours::Route,
+                    "Phone connection",
+                    "Configure wireless Android Auto / CarPlay",
+                )
+                .act(Act::PhoneSettings),
+            );
+            phone_state(
+                &mut v,
+                &json!({"config": {"wirelessAaEnabled": aa, "wirelessCpEnabled": cp}}),
+            );
+            assert_eq!(v.rows[0].value, expected);
+        }
+        let mut v = View::new(Layout::List, "Setup", true);
+        v.row(
+            R::new(
+                Ours::Route,
+                "Phone connection",
+                "Configure wireless Android Auto / CarPlay",
+            )
+            .act(Act::PhoneSettings),
+        );
+        phone_state(&mut v, &json!({}));
+        assert_eq!(v.rows[0].value, "Configure wireless Android Auto / CarPlay");
+    }
+
+    #[test]
     fn data_replaces_the_dashboard_and_car_moved_to_settings() {
         let all = vec![
             Tab::Projection,
@@ -274,7 +482,11 @@ mod tests {
         assert!(rows[1].checked && rows[1].value == "Showing nav");
         assert_eq!(rows[4].label, "Coolant · diag");
         assert_eq!(rows[5].button, "Capture");
-        assert!(rows.iter().enumerate().all(|(i, r)| r.node == i && r.enabled));
+        assert!(
+            rows.iter()
+                .enumerate()
+                .all(|(i, r)| r.node == i && r.enabled)
+        );
         assert_eq!(n.row(0), None);
         assert_eq!(n.row(3), Some(3));
         assert_eq!(n.slots, [Some(0), None, None, Some(1), Some(2), Some(3)]);

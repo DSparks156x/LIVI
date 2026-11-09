@@ -260,6 +260,20 @@ fn setup(snap: &Snapshot) -> View {
         None => String::new(),
     };
     v.row(route("Wi-Fi networks", nets, S::Wifi).icon("WifiOutlined"));
+    v.row(
+        Row::new(
+            RowKind::Route,
+            "Phone connection",
+            "Set up wireless Android Auto / CarPlay",
+        )
+        .icon("wirelessAa")
+        .act(Act::PhoneSettings),
+    );
+    v.row(Row::new(
+        RowKind::Info,
+        "Wireless CarPlay requires supported authentication hardware.",
+        "",
+    ));
     let cluster = match s {
         Some(s) if s.dis.enabled => "On",
         Some(_) => "Off",
@@ -2670,6 +2684,10 @@ mod tests {
         p.press(crate::PageId::Car, &v, &Hit::Row(0), 0, &client);
         assert_eq!(p.car, S::Setup);
         let v = view(&p, &s, Instant::now());
+        let phone = find(&v, "Phone connection");
+        assert_eq!(v.rows[phone].act, Act::PhoneSettings);
+        assert_eq!(v.hit(v.rows[phone].focus_at), Some(Hit::Row(phone)));
+        assert!(v.rows.iter().any(|r| r.label.contains("supported authentication hardware")));
         // No NVMe reported: no move row.
         assert!(!v.rows.iter().any(|r| r.label == "Move to NVMe"));
         let remote = find(&v, "Remote access");

@@ -74,6 +74,8 @@ pub enum Act {
     Keyboard(crate::keyboard::Prefs),
     /// Hides the Setup screen (`true`, and goes back) or shows it again (kept in carpi-ui.json).
     SetupDone(bool),
+    /// Opens LIVI's existing wireless phone settings; the shell returns to Setup on Back.
+    PhoneSettings,
     /// Asks, then starts Move to NVMe.
     MoveNvme,
     /// Back a screen.

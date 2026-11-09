@@ -106,6 +106,8 @@ pub enum CarScreen {
     Nav,
     Calls,
     Media,
+    /// The accel test's four lines.
+    Accel,
     Lighting,
     /// The plot and the manual curve's points, and one point.
     Curve,
@@ -143,7 +145,7 @@ impl CarScreen {
         Some(match self {
             S::Root => return None,
             S::AllValues | S::Buses => S::Status,
-            S::ReadingPages | S::Nav | S::Calls | S::Media => S::Cluster,
+            S::ReadingPages | S::Nav | S::Calls | S::Media | S::Accel => S::Cluster,
             S::ReadingPage(_) => S::ReadingPages,
             S::Cell(p, _) | S::CellAdd(p) => S::ReadingPage(p),
             S::CellValue(p, c) | S::CellIcon(p, c) => S::Cell(p, c),

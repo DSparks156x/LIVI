@@ -570,6 +570,7 @@ pub(crate) fn sample() -> Settings {
             nav_time_left: true,
             nav_dest_distance: true,
             nav_lanes: carpi_proto::DisLanes::Flip,
+            accel: vec!["0-60mph".into(), "1/4mi".into(), "speed".into()],
         },
         bindings_custom: false,
         bindings: vec![

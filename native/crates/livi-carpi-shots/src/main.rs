@@ -302,6 +302,7 @@ fn settings(mut s: Settings) -> Settings {
     s.update.version = "carpid 0.1.0, release 2026.11.08 (stable)".into();
     s.power.shutdown = true;
     s.bindings_custom = true;
+    s.dis.accel = ["0-60mph", "50-100kmh", "1/4mi", "speed"].map(String::from).to_vec();
     s.avsd.path = "/home/pi/avsd/avsd.env".into();
     s.avsd.found = true;
     let r = |key: &str, label: &str, unit: &str, min, max, step, default, zero_off| AvsdRange {
@@ -408,6 +409,7 @@ fn main() {
         ("nav", S::Nav),
         ("calls", S::Calls),
         ("media", S::Media),
+        ("accel", S::Accel),
         ("lighting", S::Lighting),
         ("curve", S::Curve),
         ("point", S::Point(1)),

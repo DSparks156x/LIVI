@@ -46,6 +46,7 @@ pub(super) fn view(pages: &Pages, snap: &Snapshot, now: Instant) -> View {
         S::Nav => nav(snap),
         S::Calls => calls(snap),
         S::Media => media(snap),
+        S::Accel => accel(snap),
         S::Lighting => lighting(snap),
         S::Curve => curve(snap),
         S::Point(i) => curve_point(snap, i),
@@ -392,10 +393,56 @@ fn cluster(snap: &Snapshot) -> View {
             DisNavStyle::Fancy => "Ours",
             DisNavStyle::Stock => "Stock",
         };
+        v.row(route("Accel test", d.accel.join("  "), S::Accel));
         v.row(route("Navigation", look, S::Nav));
         let takes = |on: bool| if on { "Takes over" } else { "Stays put" };
         v.row(route("Calls", takes(d.claim_phone), S::Calls));
         v.row(route("Media", takes(d.claim_media), S::Media));
+    })
+}
+
+/// Lines the accel test offers until the on-screen keyboard lets one be typed.
+const ACCEL_PRESETS: &[&str] = &[
+    "0-30mph", "0-60mph", "30-50mph", "40-70mph", "50-70mph", "60-100mph", "0-100kmh",
+    "50-100kmh", "80-120kmh", "100-200kmh", "60ft", "330ft", "1000ft", "1/8mi", "1/4mi",
+    "1/2mi", "1mi", "100m", "200m", "400m", "speed",
+];
+
+fn accel(snap: &Snapshot) -> View {
+    with_settings(snap, "Accel test", |v, s| {
+        let lines = &s.dis.accel;
+        for i in 0..4 {
+            let now = lines.get(i).map(String::as_str).unwrap_or("");
+            // Off, the presets, and what's set now when it isn't one of them.
+            let mut opts: Vec<&str> = vec![""];
+            if !now.is_empty() && !ACCEL_PRESETS.contains(&now) {
+                opts.push(now);
+            }
+            opts.extend_from_slice(ACCEL_PRESETS);
+            let at = opts.iter().position(|o| *o == now).unwrap_or(0);
+            let n = opts.len();
+            let with = |pick: &str| {
+                let mut next: Vec<String> = (0..4)
+                    .map(|j| if j == i { pick.to_string() } else { lines.get(j).cloned().unwrap_or_default() })
+                    .collect();
+                next.retain(|l| !l.is_empty());
+                dis(DisPatch {
+                    accel: Some(next),
+                    ..Default::default()
+                })
+            };
+            let shown = if now.is_empty() { "Off" } else { now };
+            v.row(
+                Row::new(RowKind::Choice, format!("Line {}", i + 1), shown)
+                    .act(with(opts[(at + 1) % n]))
+                    .side(with(opts[(at + n - 1) % n]), with(opts[(at + 1) % n])),
+            );
+        }
+        v.row(info(
+            "A speed range, a distance or the speed",
+            "0-60mph · 1/4mi · 100m · speed",
+        )
+        .dimmed(true));
     })
 }
 
@@ -607,6 +654,11 @@ fn reading_page(snap: &Snapshot, now: Instant, p: usize, removing: bool) -> View
                 .side(dis_act(DisAct::Name(p, -1)), dis_act(DisAct::Name(p, 1))),
         );
         for (c, cell) in page.cells.iter().enumerate() {
+            // The DIS shows cells 1-4 down the left, 5-8 down the right.
+            if c == 0 || c == DIS_CELLS / 2 {
+                let col = if c == 0 { "Left column" } else { "Right column" };
+                v.row(info(col, "").dimmed(true));
+            }
             v.row(
                 route(slots::label(&cell.key), cell_reading(cell, snap, now), S::Cell(p, c)).side(
                     dis_act(DisAct::MoveCell(p, c, -1)),
@@ -1897,6 +1949,7 @@ mod tests {
             S::Nav,
             S::Calls,
             S::Media,
+            S::Accel,
             S::Lighting,
             S::Curve,
             S::Point(0),

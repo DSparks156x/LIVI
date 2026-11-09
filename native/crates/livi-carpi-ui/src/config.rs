@@ -24,6 +24,8 @@ pub struct Saved {
     pub recent: Vec<String>,
     /// The on-screen keyboard: knob, touch or off, and its letters.
     pub keyboard: crate::keyboard::Prefs,
+    /// The Setup screen was hidden ("Done, hide this").
+    pub setup_done: bool,
     /// The first version's groups, read once into pages.
     #[serde(skip_serializing)]
     pub group: String,

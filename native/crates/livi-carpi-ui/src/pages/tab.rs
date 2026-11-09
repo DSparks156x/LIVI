@@ -32,7 +32,9 @@ pub(super) const PIN_MAX: usize = 8;
 
 pub(super) fn view(pages: &Pages, snap: &Snapshot, now: Instant) -> View {
     match pages.car {
-        S::Root => root(snap),
+        S::Root => root(pages, snap),
+        S::Setup => setup(snap),
+        S::Nvme => nvme(snap, pages.moving()),
         S::Status => status(snap),
         S::AllValues => all_values(snap, now),
         S::Buses => buses(snap),
@@ -73,7 +75,7 @@ pub(super) fn view(pages: &Pages, snap: &Snapshot, now: Instant) -> View {
         S::Wifi => wifi(snap),
         S::WifiNet(i) => wifi_net(snap, i, pages.forgetting()),
         S::WifiAdd => wifi_add(snap),
-        S::Advanced => advanced(snap),
+        S::Advanced => advanced(pages, snap),
     }
 }
 
@@ -160,13 +162,16 @@ fn dis_state(snap: &Snapshot) -> String {
 
 // ---- Root and status ----
 
-fn root(snap: &Snapshot) -> View {
+fn root(pages: &Pages, snap: &Snapshot) -> View {
     let note = if snap.connected {
         settings_note(snap)
     } else {
         problem(snap)
     };
     let mut v = View::new(Layout::List, "Car Integration", true).note(note);
+    if !pages.setup_done() {
+        v.row(route("Setup", "Start here", S::Setup).icon("FormatListNumberedOutlined"));
+    }
     let s = snap.settings.as_ref();
     let status = if snap.connected {
         "Connected"
@@ -227,6 +232,142 @@ fn root(snap: &Snapshot) -> View {
         _ => "",
     };
     v.row(route("Advanced", tx, S::Advanced).icon("TuneOutlined"));
+    v.finish()
+}
+
+// ---- Setup (docs/IMAGE-TOOL.md, NVMe and post-setup) ----
+
+/// Rows that open the screens to visit after the first start. Back from each comes here.
+fn setup(snap: &Snapshot) -> View {
+    let mut v = View::new(Layout::List, "Setup", true)
+        .note("After the first start: check each of these once.");
+    let s = snap.settings.as_ref();
+    let (zone, to) = match s {
+        Some(s) if s.clock.timezone.is_empty() => ("Not set".to_string(), S::Power),
+        Some(s) => (
+            s.clock.timezone.replace('_', " "),
+            if s.clock.timezones.is_empty() {
+                S::Power
+            } else {
+                S::Zones
+            },
+        ),
+        None => (String::new(), S::Power),
+    };
+    v.row(route("Time zone", zone, to).icon("ScheduleOutlined"));
+    let nets = match &snap.wifi.networks {
+        Some(n) => count(n.len(), "saved", "saved"),
+        None => String::new(),
+    };
+    v.row(route("Wi-Fi networks", nets, S::Wifi).icon("WifiOutlined"));
+    let cluster = match s {
+        Some(s) if s.dis.enabled => "On",
+        Some(_) => "Off",
+        None => "",
+    };
+    v.row(route("Cluster display", cluster, S::Cluster).icon("SpeedOutlined"));
+    let vnc = match s {
+        Some(s) if !s.remote.vnc_installed => "VNC not installed",
+        Some(s) if s.remote.vnc_at_boot => "VNC on at startup",
+        Some(_) => "VNC off at startup",
+        None => "",
+    };
+    v.row(route("Remote access", vnc, S::Remote).icon("LanOutlined"));
+    if snap.storage.can_move() {
+        let value = if snap.storage.job.running() {
+            "Moving"
+        } else {
+            "Running from the SD"
+        };
+        v.row(route("Move to NVMe", value, S::Nvme).icon("MemoryOutlined"));
+    }
+    v.row(
+        Row::new(
+            RowKind::Button,
+            "Done, hide this",
+            "Advanced brings it back",
+        )
+        .button("Hide")
+        .act(Act::SetupDone(true)),
+    );
+    v.finish()
+}
+
+/// Bytes as drive makers count them.
+fn gb(bytes: u64) -> String {
+    let g = bytes as f64 / 1e9;
+    if g >= 100.0 {
+        format!("{g:.0} GB")
+    } else {
+        format!("{g:.1} GB")
+    }
+}
+
+fn nvme(snap: &Snapshot, asking: bool) -> View {
+    let mut v = View::new(Layout::List, "Move to NVMe", true)
+        .note("Copies this system onto the NVMe and starts from it. The SD card stays as a spare.");
+    let st = &snap.storage;
+    if let Some(n) = &st.note {
+        v.row(info("Problem", n.clone()).alert(true));
+    }
+    let Some(s) = &st.status else {
+        v.row(info("Asking carpid", "").dimmed(true));
+        return v.finish();
+    };
+    let drive = match &s.nvme {
+        Some(n) if n.model.is_empty() => gb(n.size),
+        Some(n) => format!("{}, {}", n.model, gb(n.size)),
+        None => "Not found".into(),
+    };
+    v.row(info("NVMe", drive));
+    let from = match s.root_disk {
+        carpi_proto::RootDisk::Sd => "SD card",
+        carpi_proto::RootDisk::Nvme => "NVMe",
+        carpi_proto::RootDisk::Usb => "USB drive",
+        carpi_proto::RootDisk::Other => "",
+    };
+    v.row(info("Running from", from));
+    if s.used > 0 {
+        v.row(info("To copy", gb(s.used)));
+    }
+    let job = &st.job;
+    if job.running() {
+        let pct = match job.progress {
+            Some((done, Some(total))) if total > 0 => format!(" {} %", done * 100 / total),
+            _ => String::new(),
+        };
+        let msg = if job.message.is_empty() {
+            "Starting".to_string()
+        } else {
+            capital(&job.message)
+        };
+        v.row(info("Moving", format!("{msg}{pct}")));
+        v.row(info("Don't turn the car off", "The Pi restarts when it's done").alert(true));
+        v.row(info("The phone can't be used meanwhile", "").dimmed(true));
+        return v.finish();
+    }
+    if let Some((ok, m)) = &job.finished {
+        let label = if *ok { "Done" } else { "Didn't finish" };
+        v.row(info(label, capital(m)).alert(!ok));
+    }
+    if let Some(why) = &s.blocked {
+        v.row(info("Can't start", why.clone()).alert(true));
+        return v.finish();
+    }
+    v.row(info("Erases the NVMe", "Everything on it is lost").alert(true));
+    v.row(info("Takes a few minutes", "Don't turn the car off meanwhile").dimmed(true));
+    let label = if asking {
+        "Push again to erase and start"
+    } else {
+        "Start the move"
+    };
+    let at = v.row(
+        Row::new(RowKind::Button, label, "")
+            .button("Start")
+            .act(Act::MoveNvme)
+            .alert(asking),
+    );
+    v.start = at;
     v.finish()
 }
 
@@ -1962,8 +2103,18 @@ fn update_confirm(snap: &Snapshot) -> View {
     v.finish()
 }
 
-fn advanced(snap: &Snapshot) -> View {
+fn advanced(pages: &Pages, snap: &Snapshot) -> View {
     with_settings(snap, "Advanced", |v, s| {
+        if snap.storage.can_move() {
+            v.row(route("Move to NVMe", "Running from the SD", S::Nvme).icon("MemoryOutlined"));
+        }
+        if pages.setup_done() {
+            v.row(
+                Row::new(RowKind::Button, "Show Setup again", "")
+                    .button("Show")
+                    .act(Act::SetupDone(false)),
+            );
+        }
         v.row(
             toggle(
                 "Send to the car",
@@ -2001,9 +2152,20 @@ impl Pages {
         if !matches!(act, Act::Wifi(WifiAct::Forget(_))) {
             self.forgetting = false;
         }
-        // Opening the Wi-Fi screens asks for the saved networks.
-        if matches!(act, Act::Car(S::Wifi)) {
+        if *act != Act::MoveNvme {
+            self.moving = false;
+        }
+        // A screen Setup opens comes back to Setup.
+        if let (S::Setup, Act::Car(to)) = (self.car, act) {
+            self.via_setup = Some(*to);
+        }
+        // Opening the Wi-Fi screens asks for the saved networks; Setup, Advanced and Move to
+        // NVMe ask where the system runs from.
+        if matches!(act, Act::Car(S::Wifi | S::Setup)) {
             client.wifi(carpi_proto::WifiAction::List);
+        }
+        if matches!(act, Act::Car(S::Setup | S::Advanced | S::Nvme)) {
+            client.storage(carpi_proto::StorageAction::Status);
         }
         Some(match act {
             Act::Dis(a) => self.dis_run(a, client),
@@ -2027,6 +2189,19 @@ impl Pages {
             }
             Act::Keyboard(prefs) => {
                 self.set_keyboard_prefs(*prefs);
+                Moved::Stay
+            }
+            Act::SetupDone(done) => {
+                self.set_setup_done(*done);
+                if *done { self.up(1) } else { Moved::Stay }
+            }
+            Act::MoveNvme => {
+                if !self.moving {
+                    self.moving = true;
+                    return Some(Moved::Stay);
+                }
+                self.moving = false;
+                client.storage(carpi_proto::StorageAction::MoveToNvme);
                 Moved::Stay
             }
             Act::Wifi(a) => {
@@ -2316,6 +2491,8 @@ mod tests {
             S::Remote,
             S::UpdateConfirm,
             S::Advanced,
+            S::Setup,
+            S::Nvme,
         ] {
             let v = at(&mut p, screen);
             assert!(!v.title.is_empty(), "{screen:?}");
@@ -2465,5 +2642,137 @@ mod tests {
             ..r
         };
         assert_eq!(avsd_row(&on, 1.0).kind, RowKind::Toggle);
+    }
+
+    fn nvme_snap(root: carpi_proto::RootDisk) -> Snapshot {
+        let mut s = snap();
+        s.storage.status = Some(carpi_proto::StorageStatus {
+            root: "/dev/mmcblk0p2".into(),
+            root_disk: root,
+            nvme: Some(carpi_proto::NvmeDisk {
+                path: "/dev/nvme0n1".into(),
+                model: "WD Blue SN580".into(),
+                size: 500_107_862_016,
+            }),
+            used: 6_100_000_000,
+            blocked: None,
+        });
+        s
+    }
+
+    #[test]
+    fn setup_shows_until_hidden_and_its_screens_come_back_to_it() {
+        let mut p = Pages::new(Saved::default(), None);
+        let client = Client::offline("test");
+        let s = snap();
+        let v = view(&p, &s, Instant::now());
+        assert_eq!(v.rows[0].label, "Setup");
+        p.press(crate::PageId::Car, &v, &Hit::Row(0), 0, &client);
+        assert_eq!(p.car, S::Setup);
+        let v = view(&p, &s, Instant::now());
+        // No NVMe reported: no move row.
+        assert!(!v.rows.iter().any(|r| r.label == "Move to NVMe"));
+        let remote = find(&v, "Remote access");
+        assert_eq!(v.rows[remote].value, "VNC not installed");
+        p.press(crate::PageId::Car, &v, &Hit::Row(remote), 4, &client);
+        assert_eq!(p.car, S::Remote);
+        assert_eq!(p.depth(crate::PageId::Car), 2);
+        assert_eq!(p.back(crate::PageId::Car), Some(Moved::Closed(4)));
+        assert_eq!(p.car, S::Setup);
+        // The time zone: picking one goes back two, to Setup.
+        let v = view(&p, &s, Instant::now());
+        let zone = find(&v, "Time zone");
+        p.press(crate::PageId::Car, &v, &Hit::Row(zone), 1, &client);
+        assert_eq!(p.car, S::Zones);
+        p.run(crate::PageId::Car, Act::Car(S::Zone(0)), 0, &client);
+        assert_eq!(p.depth(crate::PageId::Car), 3);
+        p.run(
+            crate::PageId::Car,
+            Act::Zone("Europe/Berlin".into()),
+            0,
+            &client,
+        );
+        assert_eq!(p.car, S::Setup);
+        // Back from Setup's own screens' parents is untouched elsewhere.
+        p.goto(S::Remote);
+        p.back(crate::PageId::Car);
+        assert_eq!(p.car, S::Root);
+        // Hide: gone from the first screen, Advanced brings it back.
+        p.goto(S::Setup);
+        let v = view(&p, &s, Instant::now());
+        let hide = find(&v, "Done, hide this");
+        p.press(crate::PageId::Car, &v, &Hit::Row(hide), 0, &client);
+        assert_eq!(p.car, S::Root);
+        assert!(p.setup_done());
+        let v = view(&p, &s, Instant::now());
+        assert!(!v.rows.iter().any(|r| r.label == "Setup"));
+        p.goto(S::Advanced);
+        let v = view(&p, &s, Instant::now());
+        let show = find(&v, "Show Setup again");
+        p.press(crate::PageId::Car, &v, &Hit::Row(show), 0, &client);
+        assert!(!p.setup_done());
+    }
+
+    #[test]
+    fn move_to_nvme_shows_only_from_the_sd_and_needs_two_pushes() {
+        let mut p = Pages::new(Saved::default(), None);
+        let client = Client::offline("test");
+        let on_nvme = nvme_snap(carpi_proto::RootDisk::Nvme);
+        p.car = S::Setup;
+        assert!(
+            !view(&p, &on_nvme, Instant::now())
+                .rows
+                .iter()
+                .any(|r| r.label == "Move to NVMe")
+        );
+        let s = nvme_snap(carpi_proto::RootDisk::Sd);
+        let v = view(&p, &s, Instant::now());
+        let mv = find(&v, "Move to NVMe");
+        p.press(crate::PageId::Car, &v, &Hit::Row(mv), 0, &client);
+        assert_eq!(p.car, S::Nvme);
+        p.goto(S::Advanced);
+        assert!(
+            view(&p, &s, Instant::now())
+                .rows
+                .iter()
+                .any(|r| r.label == "Move to NVMe")
+        );
+        p.goto(S::Nvme);
+        let v = view(&p, &s, Instant::now());
+        assert_eq!(v.rows[0].value, "WD Blue SN580, 500 GB");
+        let start = find(&v, "Start the move");
+        assert_eq!(v.start, v.rows[start].focus_at);
+        p.press(crate::PageId::Car, &v, &Hit::Row(start), 0, &client);
+        assert!(p.moving());
+        assert!(
+            client.snapshot().storage.job.finished.is_none(),
+            "not on the first push"
+        );
+        let v = view(&p, &s, Instant::now());
+        let again = find(&v, "Push again to erase and start");
+        p.press(crate::PageId::Car, &v, &Hit::Row(again), 0, &client);
+        assert!(!p.moving());
+        // Offline, so the ask comes straight back refused.
+        assert_eq!(
+            client.snapshot().storage.job.finished,
+            Some((false, "not connected".into()))
+        );
+        // Blocked: says why, no start.
+        let mut b = s.clone();
+        b.storage.status.as_mut().unwrap().blocked = Some("The NVMe is smaller".into());
+        let v = view(&p, &b, Instant::now());
+        assert!(!v.rows.iter().any(|r| r.act == Act::MoveNvme));
+        assert_eq!(v.rows[find(&v, "Can't start")].value, "The NVMe is smaller");
+        // Running: progress, no start.
+        let mut r = s.clone();
+        r.storage.job = crate::client::UpdateJob {
+            job: Some(3),
+            message: "copying the system".into(),
+            progress: Some((37, Some(100))),
+            ..Default::default()
+        };
+        let v = view(&p, &r, Instant::now());
+        assert_eq!(v.rows[find(&v, "Moving")].value, "Copying the system 37 %");
+        assert!(!v.rows.iter().any(|r| r.act == Act::MoveNvme));
     }
 }

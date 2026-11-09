@@ -420,6 +420,17 @@ fn client() -> Client {
             seen("TurtleTown", 30, true, false),
         ]);
         snap.wifi.job.finished = Some((true, "Stadium Walk-UF104 works, with the internet".into()));
+        snap.storage.status = Some(carpi_proto::StorageStatus {
+            root: "/dev/mmcblk0p2".into(),
+            root_disk: carpi_proto::RootDisk::Sd,
+            nvme: Some(carpi_proto::NvmeDisk {
+                path: "/dev/nvme0n1".into(),
+                model: "WD Blue SN580 500GB".into(),
+                size: 500_107_862_016,
+            }),
+            used: 6_100_000_000,
+            blocked: None,
+        });
     }
     client.snapshot().values.take(
         extra
@@ -465,6 +476,8 @@ fn main() {
 
     let tree: &[(&str, S)] = &[
         ("root", S::Root),
+        ("setup", S::Setup),
+        ("nvme", S::Nvme),
         ("status", S::Status),
         ("all-values", S::AllValues),
         ("buses", S::Buses),
@@ -517,6 +530,14 @@ fn main() {
         if v.rows.len() > 7 && last > v.start {
             shots.view(&v, Some(last), true, &format!("{name}-end"));
         }
+    }
+    // Move to NVMe while it copies (the fixture plays the job).
+    if only.is_empty() || only.iter().any(|o| o == "nvme-moving") {
+        client.storage(carpi_proto::StorageAction::MoveToNvme);
+        std::thread::sleep(Duration::from_millis(100));
+        pages.goto(S::Nvme);
+        let v = pages.view(PageId::Car, &client.snapshot(), now);
+        shots.view(&v, None, true, "nvme-moving");
     }
     // The on-screen keyboard over the Wi-Fi screen, both layouts.
     use livi_carpi_ui::keyboard::{Input, Keyboard, Prefs, Style};

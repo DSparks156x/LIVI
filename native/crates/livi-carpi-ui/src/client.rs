@@ -73,6 +73,28 @@ pub struct Snapshot {
     pub update: UpdateJob,
     /// Saved Wi-Fi networks and the last scan or test.
     pub wifi: Wifi,
+    /// Where the system runs from, and Move to NVMe.
+    pub storage: Storage,
+}
+
+/// The disks, as carpid last told them.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Storage {
+    /// `None` until carpid answers.
+    pub status: Option<carpi_proto::StorageStatus>,
+    /// Why the last ask didn't go through.
+    pub note: Option<String>,
+    /// The move, while it runs and how it ended.
+    pub job: UpdateJob,
+}
+
+impl Storage {
+    /// An NVMe is fitted and the system isn't on it: Move to NVMe is worth showing.
+    pub fn can_move(&self) -> bool {
+        self.status
+            .as_ref()
+            .is_some_and(|s| s.nvme.is_some() && s.root_disk != carpi_proto::RootDisk::Nvme)
+    }
 }
 
 /// Wi-Fi networks for updates, as carpid last told them.
@@ -170,6 +192,7 @@ impl Default for Snapshot {
             datalog_note: None,
             update: UpdateJob::default(),
             wifi: Wifi::default(),
+            storage: Storage::default(),
         }
     }
 }
@@ -185,6 +208,7 @@ enum Ask {
     Datalog(DatalogAction),
     Update(UpdateAction, bool),
     Wifi(carpi_proto::WifiAction),
+    Storage(carpi_proto::StorageAction),
     /// The names to watch changed.
     Watch,
 }
@@ -326,6 +350,27 @@ impl Client {
         self.ask(Ask::Wifi(action));
     }
 
+    /// Asks where the system runs from, or starts Move to NVMe; answers and the move's events
+    /// land in [`Snapshot::storage`].
+    pub fn storage(&self, action: carpi_proto::StorageAction) {
+        {
+            let mut s = self.snapshot();
+            s.storage.note = None;
+            if action == carpi_proto::StorageAction::MoveToNvme {
+                s.storage.job = UpdateJob {
+                    asked: true,
+                    ..Default::default()
+                };
+                if self.asks.is_none() {
+                    s.storage.job.refused("not connected".into());
+                }
+            } else if self.asks.is_none() {
+                s.storage.note = Some("not connected".into());
+            }
+        }
+        self.ask(Ask::Storage(action));
+    }
+
     /// Starts an update job; its events land in [`Snapshot::update`].
     pub fn update(&self, action: UpdateAction, and_apply: bool) {
         {
@@ -417,6 +462,9 @@ mod link {
         Wifi,
         /// Scan, test.
         WifiJob,
+        Storage,
+        /// Move to NVMe.
+        StorageJob,
         Catalog,
         Ok,
     }
@@ -475,6 +523,9 @@ mod link {
                     }
                     Ok(Ev::Ask(Ask::Update(..))) => {
                         lock(&shared).update.refused("not connected".into())
+                    }
+                    Ok(Ev::Ask(Ask::Storage(carpi_proto::StorageAction::MoveToNvme))) => {
+                        lock(&shared).storage.job.refused("not connected".into())
                     }
                     Ok(_) => {}
                     Err(RecvTimeoutError::Timeout) => break,
@@ -682,6 +733,13 @@ mod link {
                             if job { Pending::WifiJob } else { Pending::Wifi },
                         )
                     }
+                    Ok(Ev::Ask(Ask::Storage(action))) => {
+                        let pending = match action {
+                            carpi_proto::StorageAction::Status => Pending::Storage,
+                            carpi_proto::StorageAction::MoveToNvme => Pending::StorageJob,
+                        };
+                        self.send(&Request::Storage { action }, pending)
+                    }
                     Ok(Ev::Ask(Ask::Watch)) if *shown => self.rewatch(),
                     Ok(Ev::Ask(Ask::Watch)) => Ok(()),
                     Ok(Ev::Got(from, resp)) if from == id => {
@@ -715,6 +773,8 @@ mod link {
                         s.wifi.job.event(event);
                     } else if s.update.job == Some(job) {
                         s.update.event(event);
+                    } else if s.storage.job.job == Some(job) {
+                        s.storage.job.event(event);
                     } else {
                         s.diag.event(job, event);
                     }
@@ -792,6 +852,20 @@ mod link {
                 (Some(Pending::WifiJob), Response::Error { message }) => {
                     s.wifi.job.refused(message)
                 }
+                (_, Response::Storage { storage }) => {
+                    s.storage.status = Some(storage);
+                    s.storage.note = None;
+                }
+                (Some(Pending::Storage), Response::Error { message }) => {
+                    s.storage.note = Some(message)
+                }
+                (Some(Pending::StorageJob), Response::JobStarted { job }) => {
+                    s.storage.job.asked = false;
+                    s.storage.job.job = Some(job);
+                }
+                (Some(Pending::StorageJob), Response::Error { message }) => {
+                    s.storage.job.refused(message)
+                }
                 (Some(Pending::Diag(action)), Response::JobStarted { job }) => {
                     s.diag.started(job, action)
                 }
@@ -823,6 +897,7 @@ pub struct Fixture {
     pub buses: Option<Vec<BusInfo>>,
     pub settings: Option<Settings>,
     pub datalog: Option<DatalogStatus>,
+    pub storage: Option<carpi_proto::StorageStatus>,
 }
 
 impl Fixture {
@@ -839,6 +914,7 @@ impl Fixture {
             self.fill(&mut s);
             s.settings = self.settings.clone();
             s.datalog = self.datalog.clone();
+            s.storage.status = self.storage.clone();
         }
         let (tx, rx) = mpsc::channel();
         let inner = shared.clone();
@@ -889,6 +965,19 @@ impl Fixture {
                         stage: "download".into(),
                         done: 12 << 20,
                         total: Some(40 << 20),
+                    });
+                }
+                Ok(Ev::Ask(Ask::Storage(carpi_proto::StorageAction::MoveToNvme))) => {
+                    s.storage.job.asked = false;
+                    s.storage.job.job = Some(2);
+                    s.storage.job.event(JobEvent::Stage {
+                        stage: "copy".into(),
+                        message: "Copying the system".into(),
+                    });
+                    s.storage.job.event(JobEvent::Progress {
+                        stage: "copy".into(),
+                        done: 37,
+                        total: Some(100),
                     });
                 }
                 Ok(_) | Err(RecvTimeoutError::Timeout) => {}

@@ -72,6 +72,10 @@ pub enum Act {
     Wifi(WifiAct),
     /// The on-screen keyboard's own settings (kept in carpi-ui.json).
     Keyboard(crate::keyboard::Prefs),
+    /// Hides the Setup screen (`true`, and goes back) or shows it again (kept in carpi-ui.json).
+    SetupDone(bool),
+    /// Asks, then starts Move to NVMe.
+    MoveNvme,
     /// Back a screen.
     Back,
 }
@@ -127,6 +131,11 @@ pub enum DisAct {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CarScreen {
     Root,
+    /// The steps after first boot, at the top until hidden. Its rows open other screens, and
+    /// back from those comes here.
+    Setup,
+    /// Copying the system onto the NVMe.
+    Nvme,
     Status,
     AllValues,
     Buses,
@@ -208,6 +217,7 @@ impl CarScreen {
             S::Pin => S::Portal,
             S::UpdateConfirm | S::Wifi => S::Updates,
             S::WifiNet(_) | S::WifiAdd => S::Wifi,
+            S::Nvme => S::Advanced,
             _ => S::Root,
         })
     }

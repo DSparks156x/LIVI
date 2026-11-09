@@ -66,6 +66,10 @@ pub struct Pages {
     touch: bool,
     /// What the keyboard typed into one of LIVI's fields, until it's taken.
     field: Option<String>,
+    /// The screen Setup opened: back from it goes to Setup, not its parent.
+    via_setup: Option<CarScreen>,
+    /// Starting Move to NVMe waits for a second push.
+    moving: bool,
 }
 
 impl Pages {
@@ -95,6 +99,8 @@ impl Pages {
             forgetting: false,
             touch: false,
             field: None,
+            via_setup: None,
+            moving: false,
         }
     }
 
@@ -157,6 +163,27 @@ impl Pages {
 
     pub(crate) fn forgetting(&self) -> bool {
         self.forgetting
+    }
+
+    pub(crate) fn setup_done(&self) -> bool {
+        self.saved.setup_done
+    }
+
+    pub(crate) fn set_setup_done(&mut self, done: bool) {
+        self.saved.setup_done = done;
+        self.store();
+    }
+
+    pub(crate) fn moving(&self) -> bool {
+        self.moving
+    }
+
+    /// Where back goes from the Car tab's screen now.
+    fn car_parent(&self) -> Option<CarScreen> {
+        if self.via_setup == Some(self.car) {
+            return Some(CarScreen::Setup);
+        }
+        self.car.parent()
     }
 
     /// Opens the keyboard for `what`.
@@ -305,7 +332,18 @@ impl Pages {
                     (Some(p), CarScreen::LogChannels) => 1 + usize::from(p.cat.is_some()),
                     _ => 0,
                 };
-                self.car.depth() + usize::from(picking) + channel
+                // Under a screen Setup opened, Setup and the first screen are above it.
+                let base = match self.via_setup {
+                    Some(v) if self.car == v => 2,
+                    Some(v)
+                        if std::iter::successors(self.car.parent(), |s| s.parent())
+                            .any(|s| s == v) =>
+                    {
+                        self.car.depth() - v.depth() + 2
+                    }
+                    _ => self.car.depth(),
+                };
+                base + usize::from(picking) + channel
             }
         }
     }
@@ -389,6 +427,8 @@ impl Pages {
                 self.log.reset();
                 self.pin.clear();
                 self.removing = false;
+                self.via_setup = None;
+                self.moving = false;
             }
         }
         self.trail.clear();
@@ -418,7 +458,12 @@ impl Pages {
                 if self.car == CarScreen::LogChannels && self.log.editor.back() {
                     return Some(Moved::Opened);
                 }
-                self.car = self.car.parent()?;
+                let up = self.car_parent()?;
+                if self.via_setup == Some(self.car) {
+                    self.via_setup = None;
+                }
+                self.car = up;
+                self.moving = false;
                 self.log.removing = false;
                 self.removing = false;
                 if self.car == CarScreen::Logging {
@@ -546,7 +591,9 @@ impl Pages {
             | Act::Back
             | Act::Type(_)
             | Act::Wifi(_)
-            | Act::Keyboard(_) => false,
+            | Act::Keyboard(_)
+            | Act::SetupDone(_)
+            | Act::MoveNvme => false,
             Act::PinSave => {
                 let pin = std::mem::take(&mut self.pin);
                 client.set(SettingsPatch {

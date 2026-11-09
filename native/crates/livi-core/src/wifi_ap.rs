@@ -119,7 +119,8 @@ async fn reconcile(p: &Privileged, cfg: &Config) -> bool {
         return false;
     }
     let Some(u) = render(p) else { return false };
-    if needs_install(p, &u).await {
+    let installs = needs_install(p, &u).await; // carpi: see `start` below
+    if installs {
         if !p
             .helper_installs("install-wifi-ap", &[("unit", &u.unit), ("rule", &u.rule)])
             .await
@@ -138,8 +139,16 @@ async fn reconcile(p: &Privileged, cfg: &Config) -> bool {
     } else {
         "disable"
     };
-    sudo(&[&sc, enable, SERVICE]).await;
-    let start = if runs_older_helper().await {
+    // carpi: enable/disable reloads systemd (~0.9 s at boot); skip it when the state already matches.
+    if quietly("systemctl", &["is-enabled", "--quiet", SERVICE]).await
+        != cfg.wifi_dedicated_interface
+    {
+        sudo(&[&sc, enable, SERVICE]).await;
+    }
+    // carpi: runs_older_helper compares the helper's mtime with the wall-clock boot time, which is
+    // wrong at boot in a car (no network time yet), so it said "older" every boot: a 1.3 s AP restart.
+    // A newer helper is one this run just installed.
+    let start = if installs && runs_older_helper().await {
         "restart"
     } else {
         "start"

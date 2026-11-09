@@ -133,6 +133,12 @@ impl I2cCoprocessor {
     }
 
     fn probe(bus_path: &str) -> Result<u16, MfiError> {
+        // carpi: no such bus, no chip; don't spin the whole PROBE_TIMEOUT (2 s at every boot).
+        if !std::path::Path::new(bus_path).exists() {
+            return Err(MfiError::NoChip {
+                probed: DEV_ADDR_CANDIDATES.to_vec(),
+            });
+        }
         let deadline = Instant::now() + PROBE_TIMEOUT;
         while Instant::now() < deadline {
             for cand in DEV_ADDR_CANDIDATES {

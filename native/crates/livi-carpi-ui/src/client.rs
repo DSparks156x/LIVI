@@ -74,6 +74,13 @@ pub struct Snapshot {
     pub datalog_note: Option<String>,
     /// The last update job this connection started.
     pub update: UpdateJob,
+    /// Persisted release state from the updater, including after carpid restarts.
+    pub update_status: Option<carpi_proto::Installed>,
+    pub(crate) update_recovering: bool,
+    /// Status replies started before a new update must not finish that update.
+    pub(crate) update_generation: u64,
+    /// Evidence this attempt reached apply; persisted terminal outcomes alone are history.
+    pub(crate) update_apply_observed: bool,
     /// Saved Wi-Fi networks and the last scan or test.
     pub wifi: Wifi,
     /// Where the system runs from, and Move to NVMe.
@@ -153,6 +160,95 @@ impl UpdateJob {
 }
 
 impl Snapshot {
+    #[cfg_attr(not(unix), allow(dead_code))]
+    fn update_disconnected(&mut self) {
+        if self.update.running() {
+            self.update_apply_observed |= matches!(
+                self.update.stage.as_str(),
+                "switch" | "restart" | "health" | "rollback" | "cleanup"
+            );
+            self.update_recovering = true;
+            self.update.asked = true;
+            self.update.stage = "status".into();
+            self.update.message = "Reconnecting to check the update result".into();
+            self.update.progress = None;
+        }
+        // Job numbers belong to a connection's daemon; a restarted daemon can reuse them.
+        self.update.job = None;
+    }
+
+    #[cfg_attr(not(unix), allow(dead_code))]
+    fn recover_update(&mut self, generation: u64, installed: carpi_proto::Installed) {
+        if generation != self.update_generation || !self.update_recovering {
+            return;
+        }
+        self.update_apply_observed |= installed.update_running == Some(true)
+            && installed.last_apply.as_deref() == Some("applying");
+        let current = installed.current.as_deref().unwrap_or("unknown release");
+        let finished = match installed.update_running {
+            Some(true) => None,
+            Some(false) if !self.update_apply_observed && self.update.running() => Some((
+                false,
+                format!("Update outcome unknown; check the update result; running {current}"),
+            )),
+            // A fresh UI cannot correlate an idle updater's last apply with a current attempt.
+            Some(false) if !self.update_apply_observed => self.update.finished.clone(),
+            Some(false) => match installed.last_apply.as_deref() {
+                Some("ok") => Some((true, format!("{current} installed"))),
+                Some("rolled_back") => {
+                    Some((false, format!("Update rolled back; running {current}")))
+                }
+                Some("failed") => Some((false, format!("Update failed; running {current}"))),
+                Some("applying") => {
+                    Some((false, format!("Update was interrupted; running {current}")))
+                }
+                None if !self.update.running() => None,
+                _ => Some((false, format!("Update outcome unknown; running {current}"))),
+            },
+            // Older daemons cannot establish that the previous outcome is this apply's result.
+            None if self.update.running() => Some((
+                false,
+                "Update outcome unknown; updater status is unavailable".into(),
+            )),
+            None => self.update.finished.clone(),
+        };
+        let running = installed.update_running == Some(true);
+        self.update_status = Some(installed);
+        self.update = UpdateJob {
+            asked: running,
+            stage: if running {
+                "status".into()
+            } else {
+                String::new()
+            },
+            message: if running {
+                "Waiting for the updater to finish".into()
+            } else {
+                String::new()
+            },
+            finished,
+            ..Default::default()
+        };
+        self.update_recovering = running;
+        if !running {
+            self.update_apply_observed = false;
+        }
+    }
+
+    #[cfg_attr(not(unix), allow(dead_code))]
+    fn update_status_failed(&mut self, generation: u64, message: String) {
+        if self.update_recovering && generation == self.update_generation {
+            // A restarted UI can first encounter carpid busy with a network/fetch job. Record
+            // that unresolved attempt, without claiming its old last_apply belongs to this job.
+            self.update = UpdateJob {
+                asked: true,
+                stage: "status".into(),
+                message: format!("Could not check update result: {message}"),
+                ..Default::default()
+            };
+        }
+    }
+
     /// Notify on activation (including startup), and on deactivation.
     fn take_settings(&mut self, settings: Settings) {
         self.take_flashing_mode(settings.flashing_mode);
@@ -223,6 +319,10 @@ impl Default for Snapshot {
             datalog: None,
             datalog_note: None,
             update: UpdateJob::default(),
+            update_status: None,
+            update_recovering: true,
+            update_generation: 0,
+            update_apply_observed: false,
             wifi: Wifi::default(),
             storage: Storage::default(),
         }
@@ -239,6 +339,7 @@ enum Ask {
     Diag(DiagAction),
     Datalog(DatalogAction),
     Update(UpdateAction, bool),
+    UpdateStatus,
     Wifi(carpi_proto::WifiAction),
     Storage(carpi_proto::StorageAction),
     /// The names to watch changed.
@@ -405,8 +506,15 @@ impl Client {
 
     /// Starts an update job; its events land in [`Snapshot::update`].
     pub fn update(&self, action: UpdateAction, and_apply: bool) {
+        if action == UpdateAction::Status {
+            self.update_status();
+            return;
+        }
         {
             let mut s = self.snapshot();
+            s.update_generation += 1;
+            s.update_recovering = false;
+            s.update_apply_observed = false;
             s.update = UpdateJob {
                 asked: true,
                 ..Default::default()
@@ -416,6 +524,11 @@ impl Client {
             }
         }
         self.ask(Ask::Update(action, and_apply));
+    }
+
+    /// Refresh the persisted result without replacing a live update job.
+    pub fn update_status(&self) {
+        self.ask(Ask::UpdateStatus);
     }
 
     /// Diag catalog names to keep subscribed while a page is shown; carpid polls them for as
@@ -490,6 +603,7 @@ mod link {
         Diag(DiagAction),
         Datalog,
         Update,
+        UpdateStatus(u64),
         /// List, add, forget.
         Wifi,
         /// Scan, test.
@@ -528,6 +642,7 @@ mod link {
                 let mut s = lock(&shared);
                 s.connected = false;
                 s.problem = Some(why);
+                s.update_disconnected();
                 if s.capture == Capture::Saving {
                     s.captured(Err("carpid went away".into()));
                 }
@@ -620,6 +735,7 @@ mod link {
             pending: VecDeque::new(),
             watch: watch.clone(),
             watching: false,
+            update_status: None,
         };
         let why = link.drive(id, shared, rx, shown);
         let _ = link.stream.shutdown(std::net::Shutdown::Both);
@@ -632,9 +748,45 @@ mod link {
         watch: Arc<Mutex<Vec<String>>>,
         /// The watch subscription is on.
         watching: bool,
+        update_status: Option<StatusJob>,
+    }
+
+    struct StatusJob {
+        job: u32,
+        generation: u64,
+        installed: Option<carpi_proto::Installed>,
     }
 
     impl Link {
+        fn poll_update_status(
+            &mut self,
+            shared: &Mutex<Snapshot>,
+            refresh: bool,
+        ) -> io::Result<()> {
+            let mut s = lock(shared);
+            if refresh && !s.update.running() {
+                s.update_recovering = true;
+            }
+            if !s.update_recovering
+                || self.update_status.is_some()
+                || self
+                    .pending
+                    .iter()
+                    .any(|p| matches!(p, Pending::UpdateStatus(_)))
+            {
+                return Ok(());
+            }
+            let generation = s.update_generation;
+            drop(s);
+            self.send(
+                &Request::Update {
+                    action: UpdateAction::Status,
+                    and_apply: false,
+                },
+                Pending::UpdateStatus(generation),
+            )
+        }
+
         fn send(&mut self, req: &Request, pending: Pending) -> io::Result<()> {
             self.stream.write_all(&carpi_proto::encode(req))?;
             self.pending.push_back(pending);
@@ -738,11 +890,14 @@ mod link {
                 let sent = match rx.recv_timeout(wait) {
                     Err(RecvTimeoutError::Timeout) => {
                         next = Instant::now() + POLL;
-                        if *shown {
-                            self.poll()
-                        } else {
-                            self.poll_flashing_mode()
-                        }
+                        let status = self.poll_update_status(shared, false);
+                        status.and_then(|()| {
+                            if *shown {
+                                self.poll()
+                            } else {
+                                self.poll_flashing_mode()
+                            }
+                        })
                     }
                     Err(RecvTimeoutError::Disconnected) => return "closed".into(),
                     Ok(Ev::Ask(Ask::Shown(on))) => {
@@ -771,6 +926,7 @@ mod link {
                     Ok(Ev::Ask(Ask::Update(action, and_apply))) => {
                         self.send(&Request::Update { action, and_apply }, Pending::Update)
                     }
+                    Ok(Ev::Ask(Ask::UpdateStatus)) => self.poll_update_status(shared, true),
                     Ok(Ev::Ask(Ask::Wifi(action))) => {
                         let job = matches!(
                             action,
@@ -814,7 +970,26 @@ mod link {
                     return Ok(());
                 }
                 Response::Job { job, event } => {
-                    if s.wifi.job.job == Some(job) {
+                    if self
+                        .update_status
+                        .as_ref()
+                        .is_some_and(|status| status.job == job)
+                    {
+                        match event {
+                            JobEvent::Installed(installed) => {
+                                self.update_status.as_mut().unwrap().installed = Some(installed);
+                            }
+                            JobEvent::Finished { ok, message } => {
+                                let status = self.update_status.take().unwrap();
+                                if ok && let Some(installed) = status.installed {
+                                    s.recover_update(status.generation, installed);
+                                } else {
+                                    s.update_status_failed(status.generation, message);
+                                }
+                            }
+                            _ => {}
+                        }
+                    } else if s.wifi.job.job == Some(job) {
                         if let JobEvent::WifiSeen { networks } = &event {
                             s.wifi.seen = Some(networks.clone());
                         }
@@ -847,6 +1022,8 @@ mod link {
                     drop(s);
                     // Once a connection: the pickers' catalog.
                     self.send(&Request::Catalog, Pending::Catalog)
+                        .map_err(|e| format!("carpid: {e}"))?;
+                    self.poll_update_status(shared, true)
                         .map_err(|e| format!("carpid: {e}"))?;
                     return Ok(());
                 }
@@ -881,6 +1058,16 @@ mod link {
                     s.update.job = Some(job);
                 }
                 (Some(Pending::Update), Response::Error { message }) => s.update.refused(message),
+                (Some(Pending::UpdateStatus(generation)), Response::JobStarted { job }) => {
+                    self.update_status = Some(StatusJob {
+                        job,
+                        generation,
+                        installed: None,
+                    });
+                }
+                (Some(Pending::UpdateStatus(generation)), Response::Error { message }) => {
+                    s.update_status_failed(generation, message);
+                }
                 (
                     _,
                     Response::Wifi {
@@ -1043,6 +1230,318 @@ impl Fixture {
 mod tests {
     use super::*;
 
+    fn installed(running: Option<bool>, outcome: Option<&str>) -> carpi_proto::Installed {
+        carpi_proto::Installed {
+            current: Some("8f2a408".into()),
+            previous: Some("6e988a2".into()),
+            downloaded: Some("6e988a2".into()),
+            last_apply: outcome.map(str::to_string),
+            update_running: running,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn restart_recovers_persisted_success_without_reusing_the_old_job() {
+        let mut s = Snapshot::default();
+        s.update = UpdateJob {
+            job: Some(7),
+            stage: "restart".into(),
+            message: "restarting services".into(),
+            ..Default::default()
+        };
+        s.update_disconnected();
+        assert!(s.update.running());
+        assert_eq!(s.update.job, None);
+        assert_ne!(s.update.message, "restarting services");
+        s.recover_update(0, installed(Some(false), Some("ok")));
+        assert!(!s.update.running());
+        assert_eq!(s.update.finished, Some((true, "8f2a408 installed".into())));
+        assert_eq!(s.update_status.unwrap().current.as_deref(), Some("8f2a408"));
+    }
+
+    #[test]
+    fn fresh_client_observes_apply_before_recovering_its_result() {
+        for (outcome, ok, message) in [
+            ("ok", true, "8f2a408 installed"),
+            ("rolled_back", false, "Update rolled back; running 8f2a408"),
+            ("failed", false, "Update failed; running 8f2a408"),
+            ("applying", false, "Update was interrupted; running 8f2a408"),
+        ] {
+            let mut s = Snapshot::default();
+            s.recover_update(0, installed(Some(true), Some("applying")));
+            assert!(s.update.running());
+            s.recover_update(0, installed(Some(false), Some(outcome)));
+            assert!(!s.update.running());
+            assert_eq!(s.update.finished, Some((ok, message.into())));
+        }
+    }
+
+    #[test]
+    fn fresh_client_treats_idle_last_apply_as_history() {
+        for outcome in ["ok", "rolled_back", "failed", "applying"] {
+            let mut s = Snapshot::default();
+            s.recover_update(0, installed(Some(false), Some(outcome)));
+            assert!(!s.update.running());
+            assert!(s.update.finished.is_none());
+            assert_eq!(
+                s.update_status.unwrap().last_apply.as_deref(),
+                Some(outcome)
+            );
+        }
+    }
+
+    #[test]
+    fn fresh_client_busy_then_fetch_failure_cannot_reuse_previous_apply_success() {
+        let mut s = Snapshot::default();
+        s.update_status_failed(0, "an update or Wi-Fi job is running".into());
+        assert!(s.update.running());
+        assert!(s.update.finished.is_none());
+        // Fetch failed without reaching switch(), so the persisted apply result is unchanged.
+        s.recover_update(0, installed(Some(false), Some("ok")));
+        assert!(!s.update.running());
+        let (ok, message) = s.update.finished.unwrap();
+        assert!(!ok);
+        assert!(message.contains("outcome unknown"));
+        assert_eq!(s.update_status.unwrap().last_apply.as_deref(), Some("ok"));
+    }
+
+    #[test]
+    fn active_apply_never_uses_previous_success_and_keeps_waiting_for_real_result() {
+        let mut s = Snapshot::default();
+        s.recover_update(0, installed(Some(true), Some("ok")));
+        assert!(s.update.running());
+        assert!(s.update.finished.is_none());
+        assert!(s.update_recovering);
+        s.recover_update(0, installed(Some(true), Some("applying")));
+        assert!(s.update.running());
+        s.recover_update(0, installed(Some(false), Some("rolled_back")));
+        assert!(!s.update.running());
+        assert!(!s.update.finished.as_ref().unwrap().0);
+    }
+
+    #[test]
+    fn legacy_status_cannot_prove_an_interrupted_apply_succeeded() {
+        let mut s = Snapshot::default();
+        s.update.asked = true;
+        s.update_disconnected();
+        s.recover_update(0, installed(None, Some("ok")));
+        assert!(!s.update.running());
+        let (ok, message) = s.update.finished.unwrap();
+        assert!(!ok);
+        assert!(message.contains("outcome unknown"));
+    }
+
+    #[test]
+    fn status_from_before_a_new_update_cannot_finish_it() {
+        let (tx, rx) = mpsc::channel();
+        let client = Client {
+            shared: Arc::new(Mutex::new(Snapshot::default())),
+            asks: Some(tx),
+            watch: Arc::default(),
+        };
+        client.update(UpdateAction::Fetch, true);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Ev::Ask(Ask::Update(UpdateAction::Fetch, true)))
+        ));
+        let mut s = client.snapshot();
+        let before = s.update.clone();
+        s.recover_update(0, installed(Some(false), Some("ok")));
+        s.recover_update(1, installed(Some(false), Some("rolled_back")));
+        s.update_status_failed(0, "old status error".into());
+        assert_eq!(s.update, before);
+        assert!(s.update_status.is_none());
+    }
+
+    #[test]
+    fn disconnect_before_apply_does_not_report_the_previous_apply_as_success() {
+        let mut s = Snapshot::default();
+        s.update_recovering = false;
+        s.update = UpdateJob {
+            job: Some(7),
+            stage: "download".into(),
+            ..Default::default()
+        };
+        s.update_disconnected();
+        s.recover_update(0, installed(Some(true), Some("ok")));
+        assert!(s.update.running());
+        s.recover_update(0, installed(Some(false), Some("ok")));
+        let (ok, message) = s.update.finished.unwrap();
+        assert!(!ok);
+        assert!(message.contains("outcome unknown"));
+    }
+
+    #[test]
+    fn active_fetch_followed_by_idle_previous_success_has_unknown_outcome() {
+        let mut s = Snapshot::default();
+        s.recover_update(0, installed(Some(true), Some("ok")));
+        assert!(s.update.running());
+        s.recover_update(0, installed(Some(false), Some("ok")));
+        let (ok, message) = s.update.finished.unwrap();
+        assert!(!ok);
+        assert!(message.contains("outcome unknown"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reconnect_polls_until_detached_apply_finishes_and_keeps_status_jobs_separate() {
+        use carpi_proto::{Request, Response};
+        use std::io::{Read, Write};
+        use std::os::unix::net::{UnixListener, UnixStream};
+
+        fn request(s: &mut UnixStream) -> Request {
+            let mut prefix = [0; 4];
+            s.read_exact(&mut prefix).unwrap();
+            let mut body = vec![0; carpi_proto::body_len(prefix).unwrap()];
+            s.read_exact(&mut body).unwrap();
+            carpi_proto::decode(&body).unwrap()
+        }
+        fn reply(s: &mut UnixStream, response: Response) {
+            s.write_all(&carpi_proto::encode(&response)).unwrap();
+        }
+        fn hello(s: &mut UnixStream) {
+            s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            assert!(matches!(request(s), Request::Hello { .. }));
+            reply(
+                s,
+                Response::Hello {
+                    version: carpi_proto::PROTOCOL_VERSION,
+                    daemon: "restarted carpid".into(),
+                },
+            );
+            assert_eq!(request(s), Request::Catalog);
+            reply(
+                s,
+                Response::Catalog {
+                    categories: vec![],
+                    values: vec![],
+                },
+            );
+        }
+        fn accept(listener: &UnixListener) -> UnixStream {
+            listener.set_nonblocking(true).unwrap();
+            let until = Instant::now() + Duration::from_secs(5);
+            loop {
+                match listener.accept() {
+                    Ok((stream, _)) => return stream,
+                    Err(e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < until =>
+                    {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(e) => panic!("carpid reconnect: {e}"),
+                }
+            }
+        }
+        fn next_update(s: &mut UnixStream) -> Request {
+            loop {
+                match request(s) {
+                    Request::Values { .. } => reply(s, Response::Values { items: vec![] }),
+                    request @ Request::Update { .. } => return request,
+                    other => panic!("unexpected request {other:?}"),
+                }
+            }
+        }
+        fn status(s: &mut UnixStream, job: u32, installed: carpi_proto::Installed) {
+            assert_eq!(
+                next_update(s),
+                Request::Update {
+                    action: UpdateAction::Status,
+                    and_apply: false,
+                }
+            );
+            reply(s, Response::JobStarted { job });
+            reply(
+                s,
+                Response::Job {
+                    job,
+                    event: JobEvent::Installed(installed),
+                },
+            );
+            // This success means status was read, even when the apply rolled back.
+            reply(
+                s,
+                Response::Job {
+                    job,
+                    event: JobEvent::Finished {
+                        ok: true,
+                        message: "status".into(),
+                    },
+                },
+            );
+        }
+
+        for (outcome, ok) in [("ok", true), ("rolled_back", false)] {
+            let unique = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "carpi-reconnect-{}-{unique}.sock",
+                std::process::id()
+            ));
+            let listener = UnixListener::bind(&path).unwrap();
+            let client = Client::connect(path.clone());
+            let mut stream = accept(&listener);
+            hello(&mut stream);
+            status(
+                &mut stream,
+                1,
+                carpi_proto::Installed {
+                    update_running: Some(false),
+                    ..Default::default()
+                },
+            );
+            assert!(wait(&client, |s| s.update_status.is_some()));
+            client.update(UpdateAction::Apply, false);
+            assert_eq!(
+                next_update(&mut stream),
+                Request::Update {
+                    action: UpdateAction::Apply,
+                    and_apply: false,
+                }
+            );
+            reply(&mut stream, Response::JobStarted { job: 2 });
+            reply(
+                &mut stream,
+                Response::Job {
+                    job: 2,
+                    event: JobEvent::Stage {
+                        stage: "restart".into(),
+                        message: "restarting services".into(),
+                    },
+                },
+            );
+            assert!(wait(&client, |s| s.update.stage == "restart"));
+            drop(stream);
+            assert!(wait(&client, |s| !s.connected));
+            assert!(client.snapshot().update.finished.is_none());
+
+            let mut stream = accept(&listener);
+            hello(&mut stream);
+            // Reuse the interrupted job number, as a newly started daemon can.
+            status(&mut stream, 2, installed(Some(true), Some("ok")));
+            assert!(wait(&client, |s| s.update.message
+                == "Waiting for the updater to finish"));
+            assert!(client.snapshot().update.finished.is_none());
+            status(&mut stream, 3, installed(Some(false), Some(outcome)));
+            assert!(wait(&client, |s| s
+                .update
+                .finished
+                .as_ref()
+                .is_some_and(|f| f.0 == ok)));
+            assert!(!client.snapshot().update.running());
+            assert_ne!(
+                client.snapshot().update.finished.as_ref().unwrap().1,
+                "status"
+            );
+            drop(listener);
+            drop(stream);
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
     #[test]
     fn flashing_mode_announces_startup_and_changes_without_repeating() {
         let mut snap = Snapshot::default();
@@ -1168,6 +1667,34 @@ mod tests {
             &Response::Catalog {
                 categories: vec!["Engine".into()],
                 values: vec![],
+            },
+        );
+        assert_eq!(
+            request(&mut s),
+            Request::Update {
+                action: UpdateAction::Status,
+                and_apply: false
+            }
+        );
+        reply(&mut s, &Response::JobStarted { job: 1 });
+        reply(
+            &mut s,
+            &Response::Job {
+                job: 1,
+                event: JobEvent::Installed(carpi_proto::Installed {
+                    update_running: Some(false),
+                    ..Default::default()
+                }),
+            },
+        );
+        reply(
+            &mut s,
+            &Response::Job {
+                job: 1,
+                event: JobEvent::Finished {
+                    ok: true,
+                    message: "status".into(),
+                },
             },
         );
 

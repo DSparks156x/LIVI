@@ -1855,7 +1855,13 @@ fn remote(snap: &Snapshot) -> View {
                 ..Default::default()
             }),
         ));
-        v.row(info("Off at startup boots faster", "Turn it on here when you need it").dimmed(true));
+        v.row(
+            info(
+                "Off at startup boots faster",
+                "Turn it on here when you need it",
+            )
+            .dimmed(true),
+        );
     })
 }
 
@@ -1944,7 +1950,25 @@ fn updates(snap: &Snapshot) -> View {
             None if s.update.version.is_empty() => snap.daemon.clone().unwrap_or_default(),
             None => s.update.version.clone(),
         };
+        let version = snap
+            .update_status
+            .as_ref()
+            .and_then(|s| s.current.clone())
+            .unwrap_or(version);
         v.row(info("This version", version));
+        if let Some(status) = &snap.update_status
+            && let Some(last) = status.last_apply.as_deref()
+        {
+            let history = match (last, status.update_running) {
+                ("ok", _) => "Succeeded",
+                ("rolled_back", _) => "Rolled back",
+                ("failed", _) => "Failed",
+                ("applying", Some(true)) => "In progress",
+                ("applying", Some(false)) => "Interrupted",
+                _ => "Unknown",
+            };
+            v.row(info("Last apply", history));
+        }
         const CHANNELS: [(UpdateChannel, &str); 2] = [
             (UpdateChannel::Stable, "Stable"),
             (UpdateChannel::Beta, "Beta"),
@@ -2201,6 +2225,9 @@ impl Pages {
         }
         if matches!(act, Act::Car(S::Setup | S::Advanced | S::Nvme)) {
             client.storage(carpi_proto::StorageAction::Status);
+        }
+        if matches!(act, Act::Car(S::Updates)) {
+            client.update_status();
         }
         Some(match act {
             Act::Dis(a) => self.dis_run(a, client),
@@ -2489,6 +2516,22 @@ mod tests {
     }
 
     #[test]
+    fn updates_shows_apply_history_separately_from_a_current_job_result() {
+        let mut s = snap();
+        s.update_status = Some(carpi_proto::Installed {
+            current: Some("8f2a408".into()),
+            last_apply: Some("ok".into()),
+            update_running: Some(false),
+            ..Default::default()
+        });
+        let v = updates(&s);
+        assert_eq!(v.rows[find(&v, "This version")].value, "8f2a408");
+        assert_eq!(v.rows[find(&v, "Last apply")].value, "Succeeded");
+        assert!(v.rows[find(&v, "Check and install")].value.is_empty());
+        assert!(s.update.finished.is_none());
+    }
+
+    #[test]
     fn flashing_mode_is_on_the_root_and_preserves_the_send_preference() {
         let p = Pages::new(Saved::default(), None);
         let mut snap = snap();
@@ -2726,7 +2769,11 @@ mod tests {
         let phone = find(&v, "Phone connection");
         assert_eq!(v.rows[phone].act, Act::PhoneSettings);
         assert_eq!(v.hit(v.rows[phone].focus_at), Some(Hit::Row(phone)));
-        assert!(v.rows.iter().any(|r| r.label.contains("supported authentication hardware")));
+        assert!(
+            v.rows
+                .iter()
+                .any(|r| r.label.contains("supported authentication hardware"))
+        );
         // No NVMe reported: no move row.
         assert!(!v.rows.iter().any(|r| r.label == "Move to NVMe"));
         let remote = find(&v, "Remote access");

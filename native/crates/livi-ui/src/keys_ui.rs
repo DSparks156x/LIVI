@@ -392,6 +392,7 @@ fn apply(ui: &AppWindow, client: &Client, code: &str, outcome: Outcome) -> bool 
                 activate(ui, t);
             }
         }
+        Outcome::StartEditing if crate::carpi_ui::start_editing(ui) => {}
         Outcome::StartEditing => f.set_editing(true),
         Outcome::StopEditing => {
             let enter = code == "Enter" || code == "NumpadEnter";

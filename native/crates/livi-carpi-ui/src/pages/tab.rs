@@ -1209,7 +1209,8 @@ fn controls(snap: &Snapshot, prefs: crate::keyboard::Prefs) -> View {
 /// The on-screen keyboard's settings. They live in the pages' own file, not carpid's.
 fn keyboard_rows(v: &mut View, p: crate::keyboard::Prefs) {
     use crate::keyboard::{Order, Style};
-    const STYLES: [(Style, &str); 3] = [
+    const STYLES: [(Style, &str); 4] = [
+        (Style::Auto, "Auto"),
         (Style::Knob, "Knob"),
         (Style::Touch, "Touch"),
         (Style::Off, "Off"),
@@ -1217,7 +1218,10 @@ fn keyboard_rows(v: &mut View, p: crate::keyboard::Prefs) {
     v.row(choice("On-screen keyboard", &STYLES, p.style, |x| {
         Act::Keyboard(crate::keyboard::Prefs { style: x, ..p })
     }));
-    if p.style == Style::Knob {
+    if p.style == Style::Auto {
+        v.row(info("Auto: Touch if a touch screen is attached, else Knob", "").dimmed(true));
+    }
+    if matches!(p.style, Style::Auto | Style::Knob) {
         const ORDERS: [(Order, &str); 2] = [
             (Order::Alphabetical, "Alphabetical"),
             (Order::Qwerty, "QWERTY"),

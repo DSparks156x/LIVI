@@ -87,6 +87,10 @@ pub enum TypeFor {
     Accel(usize),
     /// Readings page `p`'s name.
     PageName(usize),
+    /// One of LIVI's own text fields: Done hands the text back through [`Pages::field_typed`].
+    ///
+    /// [`Pages::field_typed`]: crate::Pages::field_typed
+    Field,
 }
 
 #[derive(Debug, Clone, PartialEq)]

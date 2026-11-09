@@ -16,7 +16,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Style {
+    /// Touch while a touch screen is attached, else Knob.
     #[default]
+    Auto,
     Knob,
     Touch,
     /// None: a USB or Bluetooth keyboard types.
@@ -44,10 +46,22 @@ pub struct Prefs {
 impl Default for Prefs {
     fn default() -> Self {
         Prefs {
-            style: Style::Knob,
+            style: Style::Auto,
             order: Order::Alphabetical,
             show_secret: true,
         }
+    }
+}
+
+impl Prefs {
+    /// The layout that opens now: Auto turns into Touch or Knob as a touch screen is attached.
+    pub fn layout(self, touch_attached: bool) -> Prefs {
+        let style = match self.style {
+            Style::Auto if touch_attached => Style::Touch,
+            Style::Auto => Style::Knob,
+            s => s,
+        };
+        Prefs { style, ..self }
     }
 }
 
@@ -155,6 +169,7 @@ const TOUCH: [&str; 3] = ["qwertyuiop", "asdfghjkl", "zxcvbnm"];
 const TOUCH_SYMBOLS: [&str; 3] = ["1234567890", "-/:;()$&@\"", ".,?!'#%+="];
 
 impl Keyboard {
+    /// `prefs` as [`Prefs::layout`] gives them: Auto opens the knob layout.
     pub fn open(title: &str, initial: &str, secret: bool, action: &str, prefs: Prefs) -> Keyboard {
         let text: Vec<char> = initial.chars().collect();
         Keyboard {
@@ -472,6 +487,40 @@ mod tests {
         // Push does nothing without a lit key.
         assert_eq!(k.input(Input::Push), Outcome::Open);
         assert_eq!(k.text(), "");
+    }
+
+    #[test]
+    fn auto_is_touch_only_with_a_touch_screen() {
+        let auto = Prefs::default();
+        assert_eq!(auto.style, Style::Auto);
+        assert_eq!(auto.layout(true).style, Style::Touch);
+        assert_eq!(auto.layout(false).style, Style::Knob);
+        // A style the user picked stays, screen or not.
+        for s in [Style::Knob, Style::Touch, Style::Off] {
+            let p = Prefs { style: s, ..auto };
+            assert_eq!(p.layout(true).style, s);
+            assert_eq!(p.layout(false).style, s);
+        }
+        let k = Keyboard::open("x", "", false, "Save", auto.layout(true));
+        assert!(k.touch);
+        let k = Keyboard::open("x", "", false, "Save", auto.layout(false));
+        assert!(!k.touch);
+    }
+
+    #[test]
+    fn saved_prefs_still_load_and_auto_is_the_default() {
+        let p: Prefs = serde_json::from_str(r#"{"style":"knob","order":"qwerty"}"#).unwrap();
+        assert_eq!(p.style, Style::Knob);
+        assert_eq!(p.order, Order::Qwerty);
+        assert!(p.show_secret);
+        let p: Prefs = serde_json::from_str(r#"{"style":"off"}"#).unwrap();
+        assert_eq!(p.style, Style::Off);
+        let p: Prefs = serde_json::from_str("{}").unwrap();
+        assert_eq!(p.style, Style::Auto);
+        let p = Prefs::default();
+        let back: Prefs = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(back, p);
+        assert_eq!(serde_json::to_value(p).unwrap()["style"], "auto");
     }
 
     #[test]

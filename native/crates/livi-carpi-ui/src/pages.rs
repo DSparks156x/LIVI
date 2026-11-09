@@ -62,6 +62,10 @@ pub struct Pages {
     typing: Option<(crate::keyboard::Keyboard, crate::view::TypeFor)>,
     /// "Forget" waits for a second push.
     forgetting: bool,
+    /// A touch screen is attached: the keyboard's Auto opens the touch layout.
+    touch: bool,
+    /// What the keyboard typed into one of LIVI's fields, until it's taken.
+    field: Option<String>,
 }
 
 impl Pages {
@@ -89,6 +93,8 @@ impl Pages {
             log: Logging::default(),
             typing: None,
             forgetting: false,
+            touch: false,
+            field: None,
         }
     }
 
@@ -109,6 +115,44 @@ impl Pages {
     pub(crate) fn set_keyboard_prefs(&mut self, prefs: crate::keyboard::Prefs) {
         self.saved.keyboard = prefs;
         self.store();
+    }
+
+    /// A touch screen is (or isn't) attached now.
+    pub fn set_touch(&mut self, attached: bool) {
+        self.touch = attached;
+    }
+
+    /// The keyboard's prefs with Auto settled, and Off as Knob: on our own fields a real
+    /// keyboard types into our keyboard's field.
+    fn layout(&self) -> crate::keyboard::Prefs {
+        let mut prefs = self.saved.keyboard.layout(self.touch);
+        if prefs.style == crate::keyboard::Style::Off {
+            prefs.style = crate::keyboard::Style::Knob;
+        }
+        prefs
+    }
+
+    /// Opens the keyboard for one of LIVI's own text fields, holding `max` characters at most.
+    /// False with the keyboard Off: LIVI's field takes a real keyboard as upstream.
+    pub fn type_field(&mut self, title: &str, initial: &str, secret: bool, max: usize) -> bool {
+        if self.saved.keyboard.style == crate::keyboard::Style::Off {
+            return false;
+        }
+        let mut k = crate::keyboard::Keyboard::open(title, initial, secret, "Save", self.layout());
+        k.max = max;
+        self.field = None;
+        self.typing = Some((k, crate::view::TypeFor::Field));
+        true
+    }
+
+    /// The keyboard is typing one of LIVI's fields.
+    pub fn typing_field(&self) -> bool {
+        matches!(self.typing, Some((_, crate::view::TypeFor::Field)))
+    }
+
+    /// What Done typed into LIVI's field, once.
+    pub fn field_typed(&mut self) -> Option<String> {
+        self.field.take()
     }
 
     pub(crate) fn forgetting(&self) -> bool {
@@ -142,13 +186,10 @@ impl Pages {
                 false,
                 "Save",
             ),
+            T::Field => return,
         };
-        let mut prefs = self.saved.keyboard;
-        if prefs.style == crate::keyboard::Style::Off {
-            // Off: a real keyboard types, into our keyboard's field.
-            prefs.style = crate::keyboard::Style::Knob;
-        }
-        let mut k = crate::keyboard::Keyboard::open(&title, &initial, secret, action, prefs);
+        let mut k =
+            crate::keyboard::Keyboard::open(&title, &initial, secret, action, self.layout());
         if matches!(what, T::PageName(_)) {
             k.max = 20;
         }
@@ -178,8 +219,14 @@ impl Pages {
     fn typed(&mut self, what: crate::view::TypeFor, text: String, client: &Client) {
         use crate::view::TypeFor as T;
         use carpi_proto::WifiAction as W;
+        if what == T::Field {
+            // As typed: LIVI's own field checks it.
+            self.field = Some(text);
+            return;
+        }
         let text = text.trim().to_string();
         match what {
+            T::Field => {}
             T::WifiName if text.is_empty() => {}
             T::WifiName => self.type_for(T::WifiPassword(text), client),
             T::WifiPassword(ssid) => {
@@ -943,6 +990,44 @@ mod tests {
             .iter()
             .position(|r| r.label == label)
             .unwrap_or_else(|| panic!("no row {label}"))
+    }
+
+    #[test]
+    fn livi_fields_type_untrimmed_and_follow_auto() {
+        use crate::keyboard::{Input, Prefs, Style};
+        let client = Client::offline("test");
+        let mut p = Pages::new(Saved::default(), None);
+        assert!(p.type_field("Wi-Fi Password", "abc ", true, 63));
+        assert!(p.typing_field());
+        assert!(!p.keyboard().unwrap().touch);
+        p.keyboard_input(Input::Char('d'), &client);
+        assert_eq!(p.field_typed(), None);
+        let done = p.keyboard().unwrap().rows()[3].len() - 1;
+        p.keyboard_input(Input::Tap(3, done), &client);
+        assert!(p.keyboard().is_none());
+        assert_eq!(p.field_typed().as_deref(), Some("abc d"));
+        assert_eq!(p.field_typed(), None);
+        // Close types nothing.
+        p.set_touch(true);
+        assert!(p.type_field("Car Name", "x", false, 20));
+        assert!(p.keyboard().unwrap().touch);
+        p.keyboard_input(Input::Close, &client);
+        assert!(!p.typing_field());
+        assert_eq!(p.field_typed(), None);
+        // A chosen layout beats the touch screen; Off leaves the field to LIVI.
+        p.set_keyboard_prefs(Prefs {
+            style: Style::Knob,
+            ..Prefs::default()
+        });
+        assert!(p.type_field("Car Name", "x", false, 20));
+        assert!(!p.keyboard().unwrap().touch);
+        p.close_keyboard();
+        p.set_keyboard_prefs(Prefs {
+            style: Style::Off,
+            ..Prefs::default()
+        });
+        assert!(!p.type_field("Car Name", "x", false, 20));
+        assert!(p.keyboard().is_none());
     }
 
     #[test]

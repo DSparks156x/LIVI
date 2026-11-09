@@ -89,6 +89,11 @@ pub fn depth() -> usize {
         + crate::carpi_ui::settings_depth()
 }
 
+// carpi fork: the open screen's config path, for carpi_ui's keyboard.
+pub fn path() -> Option<&'static str> {
+    with(|c| c.model.node(&c.stack).map(|n| n.path)).flatten()
+}
+
 pub fn tr(key: &str, text: &str) -> String {
     with(|c| c.strings.t(key, text)).unwrap_or_else(|| text.to_string())
 }

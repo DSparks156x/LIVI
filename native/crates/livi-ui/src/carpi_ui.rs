@@ -16,6 +16,11 @@
 //! [`settings_screen`] for the screen, and its presses come here first. Screens are LIVI rows
 //! ([`livi_ui_model::carpi::native`]); the plot and the picker show our own page over Settings
 //! (`CarpiState.over-settings`), which takes the keys like one of our pages.
+//!
+//! LIVI's own text fields (its Settings' text screens: car name, Wi-Fi password) type on our
+//! keyboard too: it opens when such a screen opens and when its field is pushed (keys_ui's
+//! StartEditing), and Done commits through LIVI's own `text-commit`, so LIVI still checks the
+//! value. With the keyboard Off they work as upstream.
 
 use std::cell::{Cell, RefCell};
 use std::time::{Duration, Instant};
@@ -31,7 +36,7 @@ use slint::{ComponentHandle, Timer, TimerMode, Weak};
 use crate::{
     AppWindow, CarpiCell, CarpiKey, CarpiKeyRow, CarpiKeyboard, CarpiKind, CarpiLayout, CarpiPill,
     CarpiPoint, CarpiRow, CarpiSpot,
-    CarpiState, CarpiTick, CarpiToast, Focus, FocusZone, Page, SettingsState,
+    CarpiState, CarpiTick, CarpiToast, Focus, FocusZone, Page, ScreenKind, SettingsState,
 };
 
 include!("../../livi-carpi-ui/ui/glue.rs");
@@ -77,6 +82,19 @@ thread_local! {
     /// The tab's step row being adjusted (our row index): pushed once, the knob turns its value
     /// both ways until a push or Back.
     static TAB_HOLD: Cell<Option<usize>> = const { Cell::new(None) };
+    /// LIVI's text screen as last drawn.
+    static FIELD: RefCell<Option<Field>> = const { RefCell::new(None) };
+}
+
+/// One of LIVI's text screens: its field, and what LIVI accepts in it.
+#[derive(Clone, PartialEq)]
+struct Field {
+    stack: Vec<usize>,
+    title: String,
+    value: String,
+    min: Option<usize>,
+    max: Option<usize>,
+    url: bool,
 }
 
 pub fn page_of(id: PageId) -> Page {
@@ -203,11 +221,20 @@ pub fn wire(ui: &AppWindow) {
         let page = ui.get_page();
         let id = id_of(page);
         let tab = page == Page::Settings && OWNS.get();
+        let field =
+            page == Page::Settings && ui.global::<SettingsState>().get_kind() == ScreenKind::Text;
+        let touch = crate::CLIENT.with_borrow(|c| c.as_ref().is_some_and(touch_attached));
         with(|o| {
+            o.pages.set_touch(touch);
             if id.is_none() {
                 o.shown = None;
             }
-            if id.is_none() && !tab {
+            let keep = if o.pages.typing_field() {
+                field
+            } else {
+                id.is_some() || tab
+            };
+            if !keep {
                 o.pages.close_keyboard();
             }
             fill_keyboard(&ui.global::<CarpiKeyboard>(), o.pages.keyboard());
@@ -415,12 +442,16 @@ fn keyboard_key(ui: &AppWindow, config: &serde_json::Value, code: &str) -> bool 
 
 /// One input to the keyboard; redraws it, and the tab when it closed (its value changed).
 fn keyboard_input(ui: &AppWindow, input: livi_carpi_ui::keyboard::Input) {
-    let closed = with(|o| {
+    let (closed, typed) = with(|o| {
         o.pages.keyboard_input(input, &o.client);
         fill_keyboard(&ui.global::<CarpiKeyboard>(), o.pages.keyboard());
-        o.pages.keyboard().is_none()
+        (o.pages.keyboard().is_none(), o.pages.field_typed())
     })
-    .unwrap_or(false);
+    .unwrap_or((false, None));
+    if let Some(text) = typed {
+        field_done(ui, text);
+        return;
+    }
     if closed {
         if ui.get_page() == Page::Settings && OWNS.get() {
             crate::render_settings(ui);
@@ -608,6 +639,7 @@ fn ui() -> Option<AppWindow> {
 
 /// settings_ui's render: the tab's screen when `stack` is the tab, else `screen` as it is.
 pub fn settings_screen(stack: &[usize], screen: Screen) -> Screen {
+    text_screen(stack, &screen);
     let ours = TAB.get().is_some_and(|t| stack == [t]);
     if !ours {
         if OWNS.get() {
@@ -866,4 +898,98 @@ pub fn open_tab(ui: &AppWindow, path: &str) -> bool {
         focus_later(ui, at, base);
     }
     true
+}
+
+// ---- LIVI's own text fields ----
+
+/// A touch screen is attached to the main display (LIVI lists them as they come and go).
+fn touch_attached(client: &livi_core_client::Client) -> bool {
+    livi_ui_model::settings::custom::touch::on_main(&client.mirror().json, 0).is_some()
+}
+
+/// settings_screen's look at each screen LIVI draws: a text screen just opened opens the
+/// keyboard on its field.
+fn text_screen(stack: &[usize], screen: &Screen) {
+    let Screen::Text {
+        title,
+        value,
+        min_len,
+        max_len,
+        url,
+    } = screen
+    else {
+        FIELD.with_borrow_mut(|f| *f = None);
+        return;
+    };
+    let field = Field {
+        stack: stack.to_vec(),
+        title: title.clone(),
+        value: value.clone(),
+        min: *min_len,
+        max: *max_len,
+        url: *url,
+    };
+    let opened = FIELD.with_borrow_mut(|f| {
+        let opened = f.as_ref().is_none_or(|f| f.stack != field.stack);
+        *f = Some(field);
+        opened
+    });
+    if opened {
+        // After the render: LIVI's settings are mid-draw here.
+        Timer::single_shot(Duration::ZERO, || {
+            if let Some(ui) = ui() {
+                start_editing(&ui);
+            }
+        });
+    }
+}
+
+/// keys_ui's StartEditing: the keyboard on LIVI's text field. False when it isn't one, or the
+/// keyboard is Off and LIVI's own field takes a real keyboard.
+pub fn start_editing(ui: &AppWindow) -> bool {
+    if ui.get_page() != Page::Settings
+        || OWNS.get()
+        || ui.global::<SettingsState>().get_kind() != ScreenKind::Text
+    {
+        return false;
+    }
+    let Some(f) = FIELD.with_borrow(Clone::clone) else {
+        return false;
+    };
+    open_field(ui, &f, &f.value)
+}
+
+fn open_field(ui: &AppWindow, f: &Field, text: &str) -> bool {
+    let secret = crate::settings_ui::path().is_some_and(|p| p.to_lowercase().contains("password"));
+    let max = f.max.unwrap_or(255);
+    with(|o| {
+        let open = o.pages.type_field(&f.title, text, secret, max);
+        fill_keyboard(&ui.global::<CarpiKeyboard>(), o.pages.keyboard());
+        open
+    })
+    .unwrap_or(false)
+}
+
+/// Done on LIVI's field: committed as LIVI's own field commits. When LIVI turns it down (the
+/// screen stays), the keyboard comes back with the text and says why.
+fn field_done(ui: &AppWindow, text: String) {
+    let Some(f) = FIELD.with_borrow(Clone::clone) else {
+        return;
+    };
+    ui.global::<SettingsState>()
+        .invoke_text_commit(text.as_str().into());
+    let still = ui.global::<SettingsState>().get_kind() == ScreenKind::Text
+        && FIELD.with_borrow(|now| now.as_ref().is_some_and(|n| n.stack == f.stack));
+    if !still {
+        return;
+    }
+    let why = match (f.min, f.max) {
+        _ if f.url => "Not saved: it starts with http:// or https://".to_string(),
+        (Some(a), Some(b)) => format!("Not saved: {a} to {b} characters"),
+        (Some(a), None) => format!("Not saved: at least {a} characters"),
+        (None, Some(b)) => format!("Not saved: {b} characters at most"),
+        (None, None) => "Not saved".to_string(),
+    };
+    toast(ui, &why, ToastLevel::Warn);
+    open_field(ui, &f, &text);
 }

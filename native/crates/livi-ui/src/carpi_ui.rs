@@ -238,8 +238,7 @@ pub fn wire(ui: &AppWindow) {
         let page = ui.get_page();
         let id = id_of(page);
         let tab = page == Page::Settings && OWNS.get();
-        let field =
-            page == Page::Settings && ui.global::<SettingsState>().get_kind() == ScreenKind::Text;
+        let field = page == Page::Settings && FIELD.with_borrow(|field| field.is_some());
         let touch = crate::CLIENT.with_borrow(|c| c.as_ref().is_some_and(touch_attached));
         with(|o| {
             ui.global::<CarpiState>()

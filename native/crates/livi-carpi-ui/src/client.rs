@@ -4,8 +4,9 @@
 //! The pages' own connection to carpid, on a thread of its own.
 //!
 //! Same socket and protocol as livi-carpi (`$CARPID_SOCKET` or `$XDG_RUNTIME_DIR/carpid.sock`,
-//! length-prefixed JSON). It stays connected, but only asks for anything while one of our pages is
-//! on screen: a subscription to every value, plus `Values` and `Bus` once a second so ages stay
+//! length-prefixed JSON). It checks flashing status even with the pages hidden, so the mode stays
+//! visible over projection. While a page is on screen: a subscription to every value, plus
+//! `Values` and `Bus` once a second so ages stay
 //! true, and carpid's settings each time a page comes up. The diagnostics page adds a second
 //! subscription, to the diag catalog's names it shows, and runs diag jobs on this connection.
 //! Data logging's status comes once a second too, with the values.
@@ -47,6 +48,8 @@ pub struct Toast {
 /// What the pages know about carpid.
 #[derive(Debug, Clone)]
 pub struct Snapshot {
+    /// Kept current even while our pages are hidden; retained during a disconnection.
+    pub flashing_mode: bool,
     pub connected: bool,
     /// carpid's name and version from its hello.
     pub daemon: Option<String>,
@@ -150,6 +153,34 @@ impl UpdateJob {
 }
 
 impl Snapshot {
+    /// Notify on activation (including startup), and on deactivation.
+    fn take_settings(&mut self, settings: Settings) {
+        self.take_flashing_mode(settings.flashing_mode);
+        self.settings = Some(settings);
+    }
+
+    fn take_flashing_mode(&mut self, on: bool) {
+        if on && !self.flashing_mode {
+            self.toast("Flashing mode ON: CAN sends blocked", ToastLevel::Warn);
+        } else if !on && self.flashing_mode {
+            self.toast("Flashing mode OFF", ToastLevel::Info);
+        }
+        self.flashing_mode = on;
+        if let Some(settings) = self.settings.as_mut() {
+            settings.flashing_mode = on;
+        }
+    }
+
+    fn take_values(&mut self, items: Vec<Reading>, now: Instant) {
+        if let Some(on) = items.iter().find_map(|r| match (&*r.name, &r.value) {
+            ("system.flashing_mode", Some(carpi_proto::Value::Bool(on))) => Some(*on),
+            _ => None,
+        }) {
+            self.take_flashing_mode(on);
+        }
+        self.values.take(items, now);
+    }
+
     pub fn toast(&mut self, text: impl Into<String>, level: ToastLevel) {
         let seq = self.toast.as_ref().map_or(1, |t| t.seq + 1);
         self.toast = Some(Toast {
@@ -177,6 +208,7 @@ impl Snapshot {
 impl Default for Snapshot {
     fn default() -> Self {
         Self {
+            flashing_mode: false,
             connected: false,
             daemon: None,
             problem: Some("connecting to carpid".into()),
@@ -671,6 +703,18 @@ mod link {
             self.send(&Request::Settings { action }, Pending::Settings)
         }
 
+        fn poll_flashing_mode(&mut self) -> io::Result<()> {
+            if self.pending.len() > IN_FLIGHT {
+                return Ok(());
+            }
+            self.send(
+                &Request::Values {
+                    prefix: "system.flashing_mode".into(),
+                },
+                Pending::Values,
+            )
+        }
+
         fn drive(
             &mut self,
             id: u64,
@@ -694,7 +738,11 @@ mod link {
                 let sent = match rx.recv_timeout(wait) {
                     Err(RecvTimeoutError::Timeout) => {
                         next = Instant::now() + POLL;
-                        if *shown { self.poll() } else { Ok(()) }
+                        if *shown {
+                            self.poll()
+                        } else {
+                            self.poll_flashing_mode()
+                        }
                     }
                     Err(RecvTimeoutError::Disconnected) => return "closed".into(),
                     Ok(Ev::Ask(Ask::Shown(on))) => {
@@ -762,7 +810,7 @@ mod link {
             let mut s = lock(shared);
             match resp {
                 Response::Update { items, .. } => {
-                    s.values.take(items, now);
+                    s.take_values(items, now);
                     return Ok(());
                 }
                 Response::Job { job, event } => {
@@ -810,7 +858,7 @@ mod link {
                 (Some(Pending::Hello), Response::Error { message }) => {
                     return Err(format!("carpid refused: {message}"));
                 }
-                (_, Response::Values { items }) => s.values.take(items, now),
+                (_, Response::Values { items }) => s.take_values(items, now),
                 (_, Response::Bus { buses }) => s.buses = Some(buses),
                 (_, Response::Captured { label, summary, .. }) => s.captured(Ok((label, summary))),
                 (Some(Pending::Capture), Response::Error { message }) => s.captured(Err(message)),
@@ -821,7 +869,7 @@ mod link {
                         restart_needed,
                     },
                 ) => {
-                    s.settings = Some(settings);
+                    s.take_settings(settings);
                     s.restart_needed = restart_needed;
                     s.settings_note = None;
                 }
@@ -912,7 +960,9 @@ impl Fixture {
         {
             let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
             self.fill(&mut s);
-            s.settings = self.settings.clone();
+            if let Some(settings) = self.settings.clone() {
+                s.take_settings(settings);
+            }
             s.datalog = self.datalog.clone();
             s.storage.status = self.storage.clone();
         }
@@ -932,7 +982,7 @@ impl Fixture {
         s.connected = true;
         s.problem = None;
         s.daemon = Some(self.daemon.clone().unwrap_or_else(|| "fixture".into()));
-        s.values.take(self.values.clone(), Instant::now());
+        s.take_values(self.values.clone(), Instant::now());
         s.buses = self.buses.clone();
     }
 
@@ -945,8 +995,9 @@ impl Fixture {
                     s.captured(Ok(("2026-11-08 #01".into(), "fixture".into())))
                 }
                 Ok(Ev::Ask(Ask::Settings(Some(patch)))) => {
-                    if let Some(settings) = &mut s.settings {
-                        crate::settings::apply(settings, &patch);
+                    if let Some(mut settings) = s.settings.clone() {
+                        crate::settings::apply(&mut settings, &patch);
+                        s.take_settings(settings);
                     }
                 }
                 Ok(Ev::Ask(Ask::Datalog(action))) => {
@@ -991,6 +1042,54 @@ impl Fixture {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn flashing_mode_announces_startup_and_changes_without_repeating() {
+        let mut snap = Snapshot::default();
+        let mut settings = crate::settings::sample();
+        snap.take_settings(settings.clone());
+        assert!(snap.toast.is_none());
+        settings.flashing_mode = true;
+        snap.take_settings(settings.clone());
+        let toast = snap.toast.clone().unwrap();
+        assert_eq!(toast.level, ToastLevel::Warn);
+        assert!(toast.text.contains("CAN sends blocked"));
+        snap.take_settings(settings.clone());
+        assert_eq!(snap.toast, Some(toast));
+
+        let mut startup = Snapshot::default();
+        startup.take_settings(settings.clone());
+        assert!(startup.toast.unwrap().text.contains("Flashing mode ON"));
+        settings.flashing_mode = false;
+        snap.take_settings(settings);
+        assert_eq!(snap.toast.unwrap().text, "Flashing mode OFF");
+    }
+
+    #[test]
+    fn lightweight_flashing_status_updates_cached_settings_and_keeps_warning_when_unknown() {
+        let mut snap = Snapshot::default();
+        snap.take_settings(crate::settings::sample());
+        snap.take_values(
+            vec![Reading {
+                name: "system.flashing_mode".into(),
+                value: Some(carpi_proto::Value::Bool(true)),
+                age_ms: 0,
+            }],
+            Instant::now(),
+        );
+        assert!(snap.flashing_mode && snap.settings.as_ref().unwrap().flashing_mode);
+        let toast = snap.toast.clone();
+        snap.take_values(
+            vec![Reading {
+                name: "system.flashing_mode".into(),
+                value: None,
+                age_ms: 4000,
+            }],
+            Instant::now(),
+        );
+        assert!(snap.flashing_mode);
+        assert_eq!(snap.toast, toast);
+    }
 
     fn wait(client: &Client, what: impl Fn(&Snapshot) -> bool) -> bool {
         let until = Instant::now() + Duration::from_secs(5);
@@ -1071,6 +1170,29 @@ mod tests {
                 values: vec![],
             },
         );
+
+        // With every page hidden, persistent flashing mode must still reach the shell.
+        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        assert_eq!(
+            request(&mut s),
+            Request::Values {
+                prefix: "system.flashing_mode".into()
+            }
+        );
+        reply(
+            &mut s,
+            &Response::Values {
+                items: vec![Reading {
+                    name: "system.flashing_mode".into(),
+                    value: Some(Value::Bool(true)),
+                    age_ms: 0,
+                }],
+            },
+        );
+        assert!(wait(&client, |s| s
+            .toast
+            .as_ref()
+            .is_some_and(|t| t.text.contains("Flashing mode ON"))));
 
         client.shown(true);
         assert!(matches!(request(&mut s), Request::Subscribe { sub: 1, .. }));

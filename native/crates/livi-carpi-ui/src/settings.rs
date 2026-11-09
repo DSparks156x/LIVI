@@ -311,6 +311,9 @@ pub fn reading_set(list: &[ReadingSetting], at: usize, name: Option<&str>) -> Ve
 
 /// `patch` applied to `s`, as carpid does it (without the validation).
 pub fn apply(s: &mut Settings, patch: &SettingsPatch) {
+    if let Some(v) = patch.flashing_mode {
+        s.flashing_mode = v;
+    }
     if let Some(v) = patch.tx_enabled {
         s.tx_enabled = v;
     }
@@ -507,6 +510,7 @@ pub(crate) fn sample() -> Settings {
     };
     Settings {
         tx_enabled: false,
+        flashing_mode: false,
         power_shutdown: true,
         light: LightSettings {
             auto_brightness: true,

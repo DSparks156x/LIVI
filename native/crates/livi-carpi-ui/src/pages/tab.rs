@@ -173,6 +173,24 @@ fn root(pages: &Pages, snap: &Snapshot) -> View {
         v.row(route("Setup", "Start here", S::Setup).icon("FormatListNumberedOutlined"));
     }
     let s = snap.settings.as_ref();
+    if let Some(s) = s {
+        v.row(
+            toggle(
+                "Flashing mode",
+                s.flashing_mode,
+                set(SettingsPatch {
+                    flashing_mode: Some(!s.flashing_mode),
+                    ..Default::default()
+                }),
+            )
+            .alert(s.flashing_mode)
+            .tag(if s.flashing_mode {
+                "CAN sends blocked"
+            } else {
+                "Persists until turned off"
+            }),
+        );
+    }
     let status = if snap.connected {
         "Connected"
     } else {
@@ -2119,6 +2137,9 @@ fn update_confirm(snap: &Snapshot) -> View {
 
 fn advanced(pages: &Pages, snap: &Snapshot) -> View {
     with_settings(snap, "Advanced", |v, s| {
+        if s.flashing_mode {
+            v.row(info("Flashing mode is on", "CAN sends blocked").alert(true));
+        }
         if snap.storage.can_move() {
             v.row(route("Move to NVMe", "Running from the SD", S::Nvme).icon("MemoryOutlined"));
         }
@@ -2465,6 +2486,24 @@ mod tests {
             Some(Act::Patch(p, _)) => (**p).clone(),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn flashing_mode_is_on_the_root_and_preserves_the_send_preference() {
+        let p = Pages::new(Saved::default(), None);
+        let mut snap = snap();
+        let v = view(&p, &snap, Instant::now());
+        let row = &v.rows[find(&v, "Flashing mode")];
+        let patch = patch_of(Some(&row.act));
+        assert_eq!(patch.flashing_mode, Some(true));
+        assert_eq!(patch.tx_enabled, None);
+        cfg::apply(snap.settings.as_mut().unwrap(), &patch);
+        let v = view(&p, &snap, Instant::now());
+        let row = &v.rows[find(&v, "Flashing mode")];
+        assert!(row.checked && row.alert);
+        assert_eq!(row.tag, "CAN sends blocked");
+        assert_eq!(patch_of(Some(&row.act)).flashing_mode, Some(false));
+        assert!(!snap.settings.as_ref().unwrap().tx_enabled);
     }
 
     #[test]

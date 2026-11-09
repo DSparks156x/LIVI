@@ -229,6 +229,9 @@ pub fn wire(ui: &AppWindow) {
             page == Page::Settings && ui.global::<SettingsState>().get_kind() == ScreenKind::Text;
         let touch = crate::CLIENT.with_borrow(|c| c.as_ref().is_some_and(touch_attached));
         with(|o| {
+            ui.global::<CarpiState>()
+                .set_flashing_mode(o.client.snapshot().flashing_mode);
+            take_toast(&ui, o);
             o.pages.set_touch(touch);
             if id.is_none() {
                 o.shown = None;

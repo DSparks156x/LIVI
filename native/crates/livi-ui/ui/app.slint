@@ -231,6 +231,22 @@ export component AppWindow inherits Window {
         width: root.content-width;
         height: root.content-height;
     }
+    if CarpiState.flashing-mode: Rectangle {
+        x: root.content-left + (root.content-width - self.width) / 2;
+        y: root.content-top + 6px;
+        width: min(410px, root.content-width - 24px);
+        height: 32px;
+        border-radius: 8px;
+        background: #ffb74d;
+        Text {
+            text: "Flashing mode ON · CAN sends blocked";
+            color: #17130b;
+            font-size: 18px;
+            font-weight: 600;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
     CarpiToastView {
         window-width: root.content-width;
         x: root.content-left + (root.content-width - self.width) / 2;

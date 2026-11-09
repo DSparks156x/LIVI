@@ -81,6 +81,10 @@ pub struct Snapshot {
     pub(crate) update_generation: u64,
     /// Evidence this attempt reached apply; persisted terminal outcomes alone are history.
     pub(crate) update_apply_observed: bool,
+    /// Only a request made by this UI creates an attempt; startup polling is passive.
+    pub(crate) update_attempt: Option<UpdateAttempt>,
+    /// An unresolved local attempt is information, not a confirmed failure.
+    pub(crate) update_note: Option<String>,
     /// Saved Wi-Fi networks and the last scan or test.
     pub wifi: Wifi,
     /// Where the system runs from, and Move to NVMe.
@@ -135,6 +139,13 @@ pub struct UpdateJob {
     pub finished: Option<(bool, String)>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct UpdateAttempt {
+    baseline: Option<carpi_proto::Installed>,
+    target: Option<String>,
+    applies: bool,
+}
+
 impl UpdateJob {
     pub fn running(&self) -> bool {
         (self.asked || self.job.is_some()) && self.finished.is_none()
@@ -160,6 +171,39 @@ impl UpdateJob {
 }
 
 impl Snapshot {
+    fn start_update(&mut self, action: UpdateAction, and_apply: bool) {
+        self.update_generation += 1;
+        self.update_recovering = false;
+        self.update_apply_observed = false;
+        self.update_note = None;
+        self.update_attempt = Some(UpdateAttempt {
+            baseline: self.update_status.clone(),
+            target: if action == UpdateAction::Apply {
+                self.update_status
+                    .as_ref()
+                    .and_then(|s| s.downloaded.clone())
+            } else {
+                None
+            },
+            applies: action == UpdateAction::Apply || (action == UpdateAction::Fetch && and_apply),
+        });
+        self.update = UpdateJob {
+            asked: true,
+            ..Default::default()
+        };
+    }
+
+    #[cfg_attr(not(unix), allow(dead_code))]
+    fn update_event(&mut self, event: JobEvent) {
+        if let JobEvent::Stage { stage, .. } = &event {
+            self.update_apply_observed |= matches!(
+                stage.as_str(),
+                "switch" | "restart" | "health" | "rollback" | "cleanup"
+            );
+        }
+        self.update.event(event);
+    }
+
     #[cfg_attr(not(unix), allow(dead_code))]
     fn update_disconnected(&mut self) {
         if self.update.running() {
@@ -182,17 +226,44 @@ impl Snapshot {
         if generation != self.update_generation || !self.update_recovering {
             return;
         }
-        self.update_apply_observed |= installed.update_running == Some(true)
-            && installed.last_apply.as_deref() == Some("applying");
+        let running = installed.update_running == Some(true);
+        // A live lock (or a busy status request) does not identify a job started by this UI.
+        // Even an updater without the `applying` marker can report authoritative history.
+        if !self.update.running() || self.update_attempt.is_none() {
+            self.update_status = Some(installed);
+            self.update_recovering = running;
+            return;
+        }
+        self.update_apply_observed |=
+            running && installed.last_apply.as_deref() == Some("applying");
+        let correlated = self.update_apply_observed
+            || self.update_attempt.as_ref().is_some_and(|attempt| {
+                attempt.applies
+                    && attempt.baseline.as_ref().is_some_and(|baseline| {
+                        // A changed current release must match the known target or retain our
+                        // baseline as previous. An unchanged old `ok` proves nothing about fetch.
+                        (installed.current.is_some()
+                            && installed.current != baseline.current
+                            && ((attempt.target.is_some() && installed.current == attempt.target)
+                                || (baseline.current.is_some()
+                                    && installed.previous == baseline.current)))
+                            || (installed.last_apply != baseline.last_apply
+                                && matches!(
+                                    installed.last_apply.as_deref(),
+                                    Some("failed" | "rolled_back")
+                                ))
+                    })
+            });
         let current = installed.current.as_deref().unwrap_or("unknown release");
+        self.update_note = None;
         let finished = match installed.update_running {
             Some(true) => None,
-            Some(false) if !self.update_apply_observed && self.update.running() => Some((
-                false,
-                format!("Update outcome unknown; check the update result; running {current}"),
-            )),
-            // A fresh UI cannot correlate an idle updater's last apply with a current attempt.
-            Some(false) if !self.update_apply_observed => self.update.finished.clone(),
+            Some(false) if !correlated => {
+                self.update_note = Some(format!(
+                    "Update outcome unknown; check the update result; running {current}"
+                ));
+                None
+            }
             Some(false) => match installed.last_apply.as_deref() {
                 Some("ok") => Some((true, format!("{current} installed"))),
                 Some("rolled_back") => {
@@ -202,17 +273,18 @@ impl Snapshot {
                 Some("applying") => {
                     Some((false, format!("Update was interrupted; running {current}")))
                 }
-                None if !self.update.running() => None,
-                _ => Some((false, format!("Update outcome unknown; running {current}"))),
+                _ => {
+                    self.update_note = Some(format!("Update outcome unknown; running {current}"));
+                    None
+                }
             },
             // Older daemons cannot establish that the previous outcome is this apply's result.
-            None if self.update.running() => Some((
-                false,
-                "Update outcome unknown; updater status is unavailable".into(),
-            )),
-            None => self.update.finished.clone(),
+            None => {
+                self.update_note =
+                    Some("Update outcome unknown; updater status is unavailable".into());
+                None
+            }
         };
-        let running = installed.update_running == Some(true);
         self.update_status = Some(installed);
         self.update = UpdateJob {
             asked: running,
@@ -232,14 +304,14 @@ impl Snapshot {
         self.update_recovering = running;
         if !running {
             self.update_apply_observed = false;
+            self.update_attempt = None;
         }
     }
 
     #[cfg_attr(not(unix), allow(dead_code))]
     fn update_status_failed(&mut self, generation: u64, message: String) {
-        if self.update_recovering && generation == self.update_generation {
-            // A restarted UI can first encounter carpid busy with a network/fetch job. Record
-            // that unresolved attempt, without claiming its old last_apply belongs to this job.
+        if self.update_recovering && generation == self.update_generation && self.update.running() {
+            // Keep a local attempt pending, but never manufacture one from a passive probe.
             self.update = UpdateJob {
                 asked: true,
                 stage: "status".into(),
@@ -323,6 +395,8 @@ impl Default for Snapshot {
             update_recovering: true,
             update_generation: 0,
             update_apply_observed: false,
+            update_attempt: None,
+            update_note: None,
             wifi: Wifi::default(),
             storage: Storage::default(),
         }
@@ -512,13 +586,7 @@ impl Client {
         }
         {
             let mut s = self.snapshot();
-            s.update_generation += 1;
-            s.update_recovering = false;
-            s.update_apply_observed = false;
-            s.update = UpdateJob {
-                asked: true,
-                ..Default::default()
-            };
+            s.start_update(action, and_apply);
             if self.asks.is_none() {
                 s.update.refused("not connected".into());
             }
@@ -995,7 +1063,7 @@ mod link {
                         }
                         s.wifi.job.event(event);
                     } else if s.update.job == Some(job) {
-                        s.update.event(event);
+                        s.update_event(event);
                     } else if s.storage.job.job == Some(job) {
                         s.storage.job.event(event);
                     } else {
@@ -1147,6 +1215,8 @@ impl Fixture {
         {
             let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
             self.fill(&mut s);
+            // Fixtures have no updater status probe to finish.
+            s.update_recovering = false;
             if let Some(settings) = self.settings.clone() {
                 s.take_settings(settings);
             }
@@ -1244,6 +1314,7 @@ mod tests {
     #[test]
     fn restart_recovers_persisted_success_without_reusing_the_old_job() {
         let mut s = Snapshot::default();
+        s.start_update(UpdateAction::Apply, false);
         s.update = UpdateJob {
             job: Some(7),
             stage: "restart".into(),
@@ -1254,14 +1325,14 @@ mod tests {
         assert!(s.update.running());
         assert_eq!(s.update.job, None);
         assert_ne!(s.update.message, "restarting services");
-        s.recover_update(0, installed(Some(false), Some("ok")));
+        s.recover_update(1, installed(Some(false), Some("ok")));
         assert!(!s.update.running());
         assert_eq!(s.update.finished, Some((true, "8f2a408 installed".into())));
         assert_eq!(s.update_status.unwrap().current.as_deref(), Some("8f2a408"));
     }
 
     #[test]
-    fn fresh_client_observes_apply_before_recovering_its_result() {
+    fn local_attempt_observes_apply_before_recovering_its_result() {
         for (outcome, ok, message) in [
             ("ok", true, "8f2a408 installed"),
             ("rolled_back", false, "Update rolled back; running 8f2a408"),
@@ -1269,9 +1340,11 @@ mod tests {
             ("applying", false, "Update was interrupted; running 8f2a408"),
         ] {
             let mut s = Snapshot::default();
-            s.recover_update(0, installed(Some(true), Some("applying")));
+            s.start_update(UpdateAction::Fetch, true);
+            s.update_disconnected();
+            s.recover_update(1, installed(Some(true), Some("applying")));
             assert!(s.update.running());
-            s.recover_update(0, installed(Some(false), Some(outcome)));
+            s.recover_update(1, installed(Some(false), Some(outcome)));
             assert!(!s.update.running());
             assert_eq!(s.update.finished, Some((ok, message.into())));
         }
@@ -1295,27 +1368,31 @@ mod tests {
     fn fresh_client_busy_then_fetch_failure_cannot_reuse_previous_apply_success() {
         let mut s = Snapshot::default();
         s.update_status_failed(0, "an update or Wi-Fi job is running".into());
-        assert!(s.update.running());
+        assert!(!s.update.running());
+        assert!(s.update_attempt.is_none());
+        assert!(s.update_recovering);
         assert!(s.update.finished.is_none());
         // Fetch failed without reaching switch(), so the persisted apply result is unchanged.
         s.recover_update(0, installed(Some(false), Some("ok")));
         assert!(!s.update.running());
-        let (ok, message) = s.update.finished.unwrap();
-        assert!(!ok);
-        assert!(message.contains("outcome unknown"));
+        // This UI never started the failed fetch: only the previous apply is known.
+        assert!(s.update.finished.is_none());
+        assert!(s.update_note.is_none());
         assert_eq!(s.update_status.unwrap().last_apply.as_deref(), Some("ok"));
     }
 
     #[test]
     fn active_apply_never_uses_previous_success_and_keeps_waiting_for_real_result() {
         let mut s = Snapshot::default();
-        s.recover_update(0, installed(Some(true), Some("ok")));
+        s.start_update(UpdateAction::Apply, false);
+        s.update_disconnected();
+        s.recover_update(1, installed(Some(true), Some("ok")));
         assert!(s.update.running());
         assert!(s.update.finished.is_none());
         assert!(s.update_recovering);
-        s.recover_update(0, installed(Some(true), Some("applying")));
+        s.recover_update(1, installed(Some(true), Some("applying")));
         assert!(s.update.running());
-        s.recover_update(0, installed(Some(false), Some("rolled_back")));
+        s.recover_update(1, installed(Some(false), Some("rolled_back")));
         assert!(!s.update.running());
         assert!(!s.update.finished.as_ref().unwrap().0);
     }
@@ -1323,13 +1400,12 @@ mod tests {
     #[test]
     fn legacy_status_cannot_prove_an_interrupted_apply_succeeded() {
         let mut s = Snapshot::default();
-        s.update.asked = true;
+        s.start_update(UpdateAction::Apply, false);
         s.update_disconnected();
-        s.recover_update(0, installed(None, Some("ok")));
+        s.recover_update(1, installed(None, Some("ok")));
         assert!(!s.update.running());
-        let (ok, message) = s.update.finished.unwrap();
-        assert!(!ok);
-        assert!(message.contains("outcome unknown"));
+        assert!(s.update.finished.is_none());
+        assert!(s.update_note.unwrap().contains("outcome unknown"));
     }
 
     #[test]
@@ -1340,16 +1416,31 @@ mod tests {
             asks: Some(tx),
             watch: Arc::default(),
         };
+        {
+            let mut s = client.snapshot();
+            s.update.finished = Some((false, "old failure".into()));
+            s.update_note = Some("old unknown result".into());
+            s.update_apply_observed = true;
+        }
         client.update(UpdateAction::Fetch, true);
         assert!(matches!(
             rx.try_recv(),
             Ok(Ev::Ask(Ask::Update(UpdateAction::Fetch, true)))
         ));
         let mut s = client.snapshot();
+        assert!(s.update.finished.is_none());
+        assert!(s.update_note.is_none());
+        assert!(!s.update_apply_observed);
         let before = s.update.clone();
         s.recover_update(0, installed(Some(false), Some("ok")));
         s.recover_update(1, installed(Some(false), Some("rolled_back")));
         s.update_status_failed(0, "old status error".into());
+        assert_eq!(s.update, before);
+        assert!(s.update_status.is_none());
+        s.update_disconnected();
+        let before = s.update.clone();
+        s.recover_update(0, installed(Some(false), Some("ok")));
+        s.update_status_failed(0, "old status error during recovery".into());
         assert_eq!(s.update, before);
         assert!(s.update_status.is_none());
     }
@@ -1357,30 +1448,141 @@ mod tests {
     #[test]
     fn disconnect_before_apply_does_not_report_the_previous_apply_as_success() {
         let mut s = Snapshot::default();
-        s.update_recovering = false;
+        s.update_status = Some(installed(Some(false), Some("ok")));
+        s.start_update(UpdateAction::Fetch, true);
         s.update = UpdateJob {
             job: Some(7),
             stage: "download".into(),
             ..Default::default()
         };
         s.update_disconnected();
-        s.recover_update(0, installed(Some(true), Some("ok")));
+        s.update_status_failed(1, "an update or Wi-Fi job is running".into());
         assert!(s.update.running());
-        s.recover_update(0, installed(Some(false), Some("ok")));
-        let (ok, message) = s.update.finished.unwrap();
-        assert!(!ok);
-        assert!(message.contains("outcome unknown"));
+        s.recover_update(1, installed(Some(true), Some("ok")));
+        assert!(s.update.running());
+        s.recover_update(1, installed(Some(false), Some("ok")));
+        assert!(!s.update.running());
+        assert!(s.update.finished.is_none());
+        assert!(s.update_note.as_ref().unwrap().contains("outcome unknown"));
+        assert_eq!(
+            s.update_status.as_ref().unwrap().last_apply.as_deref(),
+            Some("ok")
+        );
+        // A manual refresh must not turn unchanged history into a successful local attempt.
+        s.update_recovering = true;
+        s.recover_update(1, installed(Some(false), Some("ok")));
+        assert!(s.update.finished.is_none());
+        assert!(s.update_note.is_some());
     }
 
     #[test]
-    fn active_fetch_followed_by_idle_previous_success_has_unknown_outcome() {
+    fn passive_busy_and_live_status_during_old_updater_handoff_accept_installed_history() {
+        for (busy_first, live_reply) in [(true, false), (false, true), (true, true)] {
+            let mut s = Snapshot::default();
+            if busy_first {
+                s.update_status_failed(0, "an update or Wi-Fi job is running".into());
+            }
+            if live_reply {
+                // The older updater retains its previous terminal result while holding the lock.
+                s.recover_update(0, installed(Some(true), Some("ok")));
+                assert!(s.update_recovering);
+                assert!(!s.update.running());
+                s.update_disconnected();
+                s.update_status_failed(0, "busy during handoff".into());
+            }
+            let status = carpi_proto::Installed {
+                current: Some("beta-20261109-5e0cf2c".into()),
+                previous: Some("8f2a408".into()),
+                downloaded: None,
+                last_apply: Some("ok".into()),
+                update_running: Some(false),
+                ..Default::default()
+            };
+            s.recover_update(0, status.clone());
+            assert_eq!(s.update_status, Some(status));
+            assert_eq!(s.update, UpdateJob::default());
+            assert!(s.update_attempt.is_none());
+            assert!(s.update_note.is_none());
+            assert!(!s.update_recovering);
+        }
+    }
+
+    #[test]
+    fn passive_apply_marker_remains_history_without_inventing_a_local_job() {
+        let mut s = Snapshot::default();
+        s.recover_update(0, installed(Some(true), Some("applying")));
+        s.recover_update(0, installed(Some(false), Some("ok")));
+        assert_eq!(s.update, UpdateJob::default());
+        assert!(s.update_note.is_none());
+    }
+
+    #[test]
+    fn passive_live_fetch_followed_by_previous_success_remains_history() {
         let mut s = Snapshot::default();
         s.recover_update(0, installed(Some(true), Some("ok")));
-        assert!(s.update.running());
+        assert!(!s.update.running());
         s.recover_update(0, installed(Some(false), Some("ok")));
-        let (ok, message) = s.update.finished.unwrap();
-        assert!(!ok);
-        assert!(message.contains("outcome unknown"));
+        assert_eq!(s.update, UpdateJob::default());
+        assert!(s.update_note.is_none());
+    }
+
+    #[test]
+    fn local_apply_missing_stages_confirms_a_correlated_new_release() {
+        for action in [UpdateAction::Apply, UpdateAction::Fetch] {
+            let mut s = Snapshot::default();
+            let mut baseline = installed(Some(false), Some("ok"));
+            baseline.downloaded = Some("beta-20261109-5e0cf2c".into());
+            s.update_status = Some(baseline);
+            s.start_update(action, true);
+            s.update_disconnected();
+            s.recover_update(1, installed(Some(true), Some("ok")));
+            assert!(s.update.finished.is_none());
+            s.recover_update(
+                1,
+                carpi_proto::Installed {
+                    current: Some("beta-20261109-5e0cf2c".into()),
+                    // Apply knows the downloaded target; fetch can use the previous release.
+                    previous: (action == UpdateAction::Fetch).then(|| "8f2a408".into()),
+                    downloaded: None,
+                    last_apply: Some("ok".into()),
+                    update_running: Some(false),
+                    ..Default::default()
+                },
+            );
+            assert_eq!(
+                s.update.finished,
+                Some((true, "beta-20261109-5e0cf2c installed".into()))
+            );
+            assert!(s.update_note.is_none());
+        }
+    }
+
+    #[test]
+    fn unchanged_target_or_unrelated_release_cannot_reuse_previous_success() {
+        for current in ["8f2a408", "unrelated-release"] {
+            let mut s = Snapshot::default();
+            s.update_status = Some(installed(Some(false), Some("ok")));
+            s.start_update(UpdateAction::Apply, false);
+            s.update_disconnected();
+            let mut status = installed(Some(false), Some("ok"));
+            status.current = Some(current.into());
+            s.recover_update(1, status);
+            assert!(s.update.finished.is_none());
+            assert!(s.update_note.unwrap().contains("outcome unknown"));
+        }
+    }
+
+    #[test]
+    fn new_failure_history_confirms_a_local_apply_that_missed_stages() {
+        for outcome in ["failed", "rolled_back"] {
+            let mut s = Snapshot::default();
+            s.update_status = Some(installed(Some(false), Some("ok")));
+            s.start_update(UpdateAction::Fetch, true);
+            s.update_disconnected();
+            s.recover_update(1, installed(Some(false), Some(outcome)));
+            assert!(!s.update.finished.unwrap().0);
+            assert!(s.update_note.is_none());
+        }
     }
 
     #[cfg(unix)]

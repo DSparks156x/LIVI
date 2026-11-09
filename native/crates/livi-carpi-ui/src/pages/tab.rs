@@ -1967,7 +1967,10 @@ fn updates(snap: &Snapshot) -> View {
                 ("applying", Some(false)) => "Interrupted",
                 _ => "Unknown",
             };
-            v.row(info("Last apply", history));
+            v.row(info("Last apply", history).alert(matches!(
+                (last, status.update_running),
+                ("failed" | "rolled_back", _) | ("applying", Some(false))
+            )));
         }
         const CHANNELS: [(UpdateChannel, &str); 2] = [
             (UpdateChannel::Stable, "Stable"),
@@ -1993,11 +1996,13 @@ fn updates(snap: &Snapshot) -> View {
                 job.message.clone()
             };
             v.row(info("Updating", format!("{stage}{pct}")));
+        } else if snap.update_recovering {
+            v.row(info("Update status", "Checking update status"));
         } else {
             let last = match &job.finished {
                 Some((true, m)) => m.clone(),
                 Some((false, m)) => format!("Failed: {m}"),
-                None => String::new(),
+                None => snap.update_note.clone().unwrap_or_default(),
             };
             v.row(
                 route("Check and install", last, S::UpdateConfirm)
@@ -2490,6 +2495,7 @@ mod tests {
         let mut s = Snapshot {
             connected: true,
             problem: None,
+            update_recovering: false,
             ..Snapshot::default()
         };
         s.settings = Some(cfg::sample());
@@ -2519,16 +2525,73 @@ mod tests {
     fn updates_shows_apply_history_separately_from_a_current_job_result() {
         let mut s = snap();
         s.update_status = Some(carpi_proto::Installed {
-            current: Some("8f2a408".into()),
+            current: Some("beta-20261109-5e0cf2c".into()),
+            previous: Some("8f2a408".into()),
             last_apply: Some("ok".into()),
             update_running: Some(false),
             ..Default::default()
         });
         let v = updates(&s);
-        assert_eq!(v.rows[find(&v, "This version")].value, "8f2a408");
+        assert_eq!(
+            v.rows[find(&v, "This version")].value,
+            "beta-20261109-5e0cf2c"
+        );
         assert_eq!(v.rows[find(&v, "Last apply")].value, "Succeeded");
         assert!(v.rows[find(&v, "Check and install")].value.is_empty());
         assert!(s.update.finished.is_none());
+        assert!(!v.rows[find(&v, "Last apply")].alert);
+        assert!(!v.rows[find(&v, "Check and install")].alert);
+    }
+
+    #[test]
+    fn passive_status_polling_is_not_an_update_job() {
+        let mut s = snap();
+        s.update_recovering = true;
+        let v = updates(&s);
+        assert_eq!(
+            v.rows[find(&v, "Update status")].value,
+            "Checking update status"
+        );
+        assert!(!v.rows[find(&v, "Update status")].alert);
+        assert!(!v.rows.iter().any(|r| r.label == "Updating"));
+        assert!(!s.update.running());
+    }
+
+    #[test]
+    fn unknown_update_outcome_is_informational_and_failures_are_alerts() {
+        let mut s = snap();
+        s.update_note = Some("Update outcome unknown; running 8f2a408".into());
+        let v = updates(&s);
+        let row = &v.rows[find(&v, "Check and install")];
+        assert_eq!(row.value, "Update outcome unknown; running 8f2a408");
+        assert!(!row.alert);
+        for (outcome, history, message) in [
+            (
+                "rolled_back",
+                "Rolled back",
+                "Update rolled back; running 8f2a408",
+            ),
+            ("failed", "Failed", "Update failed; running 8f2a408"),
+        ] {
+            s.update_note = None;
+            s.update_status = Some(carpi_proto::Installed {
+                last_apply: Some(outcome.into()),
+                update_running: Some(false),
+                ..Default::default()
+            });
+            // A fresh UI still warns about authoritative failure history.
+            let v = updates(&s);
+            let row = &v.rows[find(&v, "Last apply")];
+            assert_eq!(row.value, history);
+            assert!(row.alert);
+            // The same outcome for a locally observed attempt remains an alert too.
+            s.update.finished = Some((false, message.into()));
+            let v = updates(&s);
+            let row = &v.rows[find(&v, "Check and install")];
+            assert_eq!(row.value, format!("Failed: {message}"));
+            assert!(row.alert);
+            s.update.finished = None;
+        }
     }
 
     #[test]

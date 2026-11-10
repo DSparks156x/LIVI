@@ -91,6 +91,49 @@ pub struct Snapshot {
     pub storage: Storage,
     /// The last requested installed decoder CRC read, including progress/errors.
     pub decoder: UpdateJob,
+    /// SDLink firmware as carpid last told it: its `Firmware` status reply, or the
+    /// `JobEvent::Firmware` of a firmware job. Cleared when carpid goes away.
+    pub firmware: crate::firmware::Status,
+    /// The last firmware probe or install this connection started.
+    pub firmware_job: FirmwareJob,
+}
+
+/// A firmware probe or install: one at a time (carpid refuses a second).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FirmwareJob {
+    /// What was asked; `None` before the first.
+    pub action: Option<carpi_proto::FirmwareAction>,
+    pub job: UpdateJob,
+    /// Why the last status ask didn't go through.
+    pub note: Option<String>,
+    /// When the last job was asked for or ended: opening the screen probes only after a while.
+    pub(crate) last: Option<Instant>,
+}
+
+impl FirmwareJob {
+    /// Opening the screen doesn't probe again this soon after a firmware job.
+    pub const QUIET: Duration = Duration::from_secs(60);
+
+    /// The install running now, if one is.
+    pub fn installing(&self) -> Option<crate::firmware::Unit> {
+        use carpi_proto::FirmwareAction as A;
+        if !self.job.running() {
+            return None;
+        }
+        match self.action? {
+            A::InstallRnse { .. } => Some(crate::firmware::Unit::Rnse),
+            A::InstallTeensy { .. } => Some(crate::firmware::Unit::Teensy),
+            A::Status | A::Probe => None,
+        }
+    }
+
+    /// Running, or one ran within [`Self::QUIET`] of `now`.
+    fn recent(&self, now: Instant) -> bool {
+        self.job.running()
+            || self
+                .last
+                .is_some_and(|t| now.saturating_duration_since(t) < Self::QUIET)
+    }
 }
 
 /// The disks, as carpid last told them.
@@ -173,6 +216,39 @@ impl UpdateJob {
 }
 
 impl Snapshot {
+    /// carpid's firmware status replaces what the screen shows.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    fn take_firmware(&mut self, status: carpi_proto::FirmwareStatus) {
+        self.firmware = status.into();
+        self.firmware_job.note = None;
+    }
+
+    /// An event of the firmware job: its status replaces [`Snapshot::firmware`].
+    #[cfg_attr(not(unix), allow(dead_code))]
+    fn firmware_event(&mut self, event: JobEvent) {
+        match event {
+            JobEvent::Firmware(status) => self.take_firmware(*status),
+            event => {
+                if matches!(event, JobEvent::Finished { .. }) {
+                    self.firmware_job.last = Some(Instant::now());
+                }
+                self.firmware_job.job.event(event);
+            }
+        }
+    }
+
+    /// carpid went away: what it said about the firmware no longer holds.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    fn firmware_disconnected(&mut self) {
+        self.firmware = crate::firmware::Status::default();
+        if self.firmware_job.job.running() {
+            self.firmware_job.last = Some(Instant::now());
+            self.firmware_job
+                .job
+                .refused("carpid went away; check versions again".into());
+        }
+    }
+
     fn start_update(&mut self, action: UpdateAction, and_apply: bool) {
         self.update_generation += 1;
         self.update_recovering = false;
@@ -402,6 +478,8 @@ impl Default for Snapshot {
             wifi: Wifi::default(),
             storage: Storage::default(),
             decoder: UpdateJob::default(),
+            firmware: crate::firmware::Status::default(),
+            firmware_job: FirmwareJob::default(),
         }
     }
 }
@@ -420,6 +498,7 @@ enum Ask {
     Wifi(carpi_proto::WifiAction),
     Storage(carpi_proto::StorageAction),
     DecoderCrc,
+    Firmware(carpi_proto::FirmwareAction),
     /// The names to watch changed.
     Watch,
 }
@@ -599,6 +678,50 @@ impl Client {
         self.ask(Ask::DecoderCrc);
     }
 
+    /// A firmware ask: `Status` answers in [`Snapshot::firmware`]; probe and installs are jobs
+    /// whose events land in [`Snapshot::firmware_job`], one at a time.
+    pub fn firmware(&self, action: carpi_proto::FirmwareAction) {
+        {
+            let mut s = self.snapshot();
+            if action == carpi_proto::FirmwareAction::Status {
+                s.firmware_job.note = None;
+                if self.asks.is_none() {
+                    s.firmware_job.note = Some("not connected".into());
+                }
+            } else {
+                if s.firmware_job.job.running() {
+                    return;
+                }
+                s.firmware_job = FirmwareJob {
+                    action: Some(action),
+                    job: UpdateJob {
+                        asked: true,
+                        ..Default::default()
+                    },
+                    note: None,
+                    last: Some(Instant::now()),
+                };
+                if self.asks.is_none() {
+                    s.firmware_job.job.refused("not connected".into());
+                }
+            }
+        }
+        self.ask(Ask::Firmware(action));
+    }
+
+    /// The firmware screen opened: carpid's status now, and a fresh probe unless a firmware
+    /// job is running or ran in the last minute.
+    pub fn firmware_opened(&self) {
+        self.firmware(carpi_proto::FirmwareAction::Status);
+        let probe = {
+            let s = self.snapshot();
+            s.connected && !s.firmware_job.recent(Instant::now())
+        };
+        if probe {
+            self.firmware(carpi_proto::FirmwareAction::Probe);
+        }
+    }
+
     /// Starts an update job; its events land in [`Snapshot::update`].
     pub fn update(&self, action: UpdateAction, and_apply: bool) {
         if action == UpdateAction::Status {
@@ -701,6 +824,10 @@ mod link {
         /// Move to NVMe.
         StorageJob,
         DecoderCrc,
+        /// Firmware status.
+        Firmware,
+        /// Probe, installs.
+        FirmwareJob,
         Catalog,
         Ok,
     }
@@ -736,6 +863,7 @@ mod link {
                 if s.decoder.running() {
                     s.decoder.refused("carpid went away; read again".into());
                 }
+                s.firmware_disconnected();
                 if s.capture == Capture::Saving {
                     s.captured(Err("carpid went away".into()));
                 }
@@ -761,6 +889,13 @@ mod link {
                     Ok(Ev::Ask(Ask::DecoderCrc)) => {
                         lock(&shared).decoder.refused("not connected".into())
                     }
+                    Ok(Ev::Ask(Ask::Firmware(carpi_proto::FirmwareAction::Status))) => {
+                        lock(&shared).firmware_job.note = Some("not connected".into())
+                    }
+                    Ok(Ev::Ask(Ask::Firmware(_))) => lock(&shared)
+                        .firmware_job
+                        .job
+                        .refused("not connected".into()),
                     Ok(Ev::Ask(Ask::Datalog(_))) => {
                         lock(&shared).datalog_note = Some("not connected".into())
                     }
@@ -1043,6 +1178,14 @@ mod link {
                     Ok(Ev::Ask(Ask::DecoderCrc)) => {
                         self.send(&Request::DecoderCrc, Pending::DecoderCrc)
                     }
+                    Ok(Ev::Ask(Ask::Firmware(action))) => {
+                        let pending = if action == carpi_proto::FirmwareAction::Status {
+                            Pending::Firmware
+                        } else {
+                            Pending::FirmwareJob
+                        };
+                        self.send(&Request::Firmware { action }, pending)
+                    }
                     Ok(Ev::Ask(Ask::Watch)) if *shown => self.rewatch(),
                     Ok(Ev::Ask(Ask::Watch)) => Ok(()),
                     Ok(Ev::Got(from, resp)) if from == id => {
@@ -1099,6 +1242,8 @@ mod link {
                         s.storage.job.event(event);
                     } else if s.decoder.job == Some(job) {
                         s.decoder.event(event);
+                    } else if s.firmware_job.job.job == Some(job) {
+                        s.firmware_event(event);
                     } else {
                         s.diag.event(job, event);
                     }
@@ -1209,6 +1354,18 @@ mod link {
                 (Some(Pending::DecoderCrc), Response::Error { message }) => {
                     s.decoder.refused(message)
                 }
+                (_, Response::Firmware { status }) => s.take_firmware(status),
+                (Some(Pending::Firmware), Response::Error { message }) => {
+                    s.firmware_job.note = Some(message)
+                }
+                (Some(Pending::FirmwareJob), Response::JobStarted { job }) => {
+                    s.firmware_job.job.asked = false;
+                    s.firmware_job.job.job = Some(job);
+                }
+                (Some(Pending::FirmwareJob), Response::Error { message }) => {
+                    s.firmware_job.last = Some(Instant::now());
+                    s.firmware_job.job.refused(message)
+                }
                 (Some(Pending::Diag(action)), Response::JobStarted { job }) => {
                     s.diag.started(job, action)
                 }
@@ -1241,6 +1398,7 @@ pub struct Fixture {
     pub settings: Option<Settings>,
     pub datalog: Option<DatalogStatus>,
     pub storage: Option<carpi_proto::StorageStatus>,
+    pub firmware: crate::firmware::Status,
 }
 
 impl Fixture {
@@ -1281,6 +1439,7 @@ impl Fixture {
         s.daemon = Some(self.daemon.clone().unwrap_or_else(|| "fixture".into()));
         s.take_values(self.values.clone(), Instant::now());
         s.buses = self.buses.clone();
+        s.firmware = self.firmware.clone();
     }
 
     fn run(&self, shared: &Mutex<Snapshot>, rx: &Receiver<Ev>) {
@@ -1329,7 +1488,15 @@ impl Fixture {
                     });
                 }
                 Ok(Ev::Ask(Ask::DecoderCrc)) => {
-                    s.decoder.refused("decoder reads need a live carpid connection".into());
+                    s.decoder
+                        .refused("decoder reads need a live carpid connection".into());
+                }
+                Ok(Ev::Ask(Ask::Firmware(carpi_proto::FirmwareAction::Status))) => {}
+                Ok(Ev::Ask(Ask::Firmware(_))) => {
+                    s.firmware_job.last = Some(Instant::now());
+                    s.firmware_job
+                        .job
+                        .refused("firmware jobs need a live carpid connection".into());
                 }
                 Ok(_) | Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return,
@@ -1369,6 +1536,170 @@ mod tests {
         assert_eq!(
             carpi_proto::decode::<carpi_proto::Request>(&request[4..]).unwrap(),
             carpi_proto::Request::DecoderCrc
+        );
+    }
+
+    fn asking_client() -> (Client, Receiver<Ev>) {
+        let (tx, rx) = mpsc::channel();
+        let client = Client {
+            shared: Arc::default(),
+            asks: Some(tx),
+            watch: Arc::default(),
+        };
+        (client, rx)
+    }
+
+    #[test]
+    fn firmware_jobs_run_one_at_a_time_and_offline_jobs_are_refused() {
+        use carpi_proto::FirmwareAction as A;
+        let (client, rx) = asking_client();
+        client.firmware(A::InstallRnse { confirm: true });
+        assert!(client.snapshot().firmware_job.job.running());
+        assert_eq!(
+            client.snapshot().firmware_job.installing(),
+            Some(crate::firmware::Unit::Rnse)
+        );
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Ev::Ask(Ask::Firmware(A::InstallRnse { confirm: true })))
+        ));
+        client.firmware(A::Probe);
+        assert!(rx.try_recv().is_err(), "no second firmware job");
+        // Status still goes while a job runs.
+        client.firmware(A::Status);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Ev::Ask(Ask::Firmware(A::Status)))
+        ));
+
+        let offline = Client::offline("offline");
+        offline.firmware(A::Probe);
+        assert_eq!(
+            offline.snapshot().firmware_job.job.finished,
+            Some((false, "not connected".into()))
+        );
+        let request = carpi_proto::encode(&carpi_proto::Request::Firmware {
+            action: A::InstallTeensy { confirm: true },
+        });
+        assert_eq!(
+            carpi_proto::decode::<carpi_proto::Request>(&request[4..]).unwrap(),
+            carpi_proto::Request::Firmware {
+                action: A::InstallTeensy { confirm: true }
+            }
+        );
+    }
+
+    #[test]
+    fn firmware_status_is_replaced_by_replies_and_job_events() {
+        use crate::firmware::{Comparison, Installed};
+        let mut s = Snapshot::default();
+        let mut status = carpi_proto::FirmwareStatus {
+            busy: true,
+            ..Default::default()
+        };
+        s.take_firmware(status.clone());
+        assert!(s.firmware.busy);
+        s.firmware_job.job = UpdateJob {
+            job: Some(9),
+            ..Default::default()
+        };
+        s.firmware_event(JobEvent::Stage {
+            stage: "read".into(),
+            message: "reading the module header".into(),
+        });
+        status.busy = false;
+        status.rnse.installed = carpi_proto::FirmwareInstalled::Legacy;
+        status.rnse.comparison = carpi_proto::FirmwareComparison::Newer;
+        s.firmware_event(JobEvent::Firmware(Box::new(status.clone())));
+        assert!(!s.firmware.busy);
+        assert_eq!(s.firmware.rnse.installed, Installed::Legacy);
+        assert_eq!(s.firmware.rnse.comparison, Comparison::Newer);
+        assert!(
+            s.firmware_job.job.running(),
+            "the status event doesn't end the job"
+        );
+        assert_eq!(s.firmware_job.job.message, "reading the module header");
+        // A later event replaces the whole status, not just some fields.
+        s.firmware_event(JobEvent::Firmware(Box::default()));
+        assert_eq!(s.firmware, crate::firmware::Status::default());
+        s.firmware_event(JobEvent::Finished {
+            ok: true,
+            message: "versions read".into(),
+        });
+        assert!(!s.firmware_job.job.running());
+        assert!(s.firmware_job.last.is_some());
+        // carpid going away clears the status and ends a running job.
+        s.take_firmware(status);
+        s.firmware_job.job.finished = None;
+        s.firmware_disconnected();
+        assert_eq!(s.firmware, crate::firmware::Status::default());
+        assert!(!s.firmware_job.job.running());
+    }
+
+    #[test]
+    fn opening_the_firmware_screen_probes_unless_a_job_is_recent() {
+        use carpi_proto::FirmwareAction as A;
+        let (client, rx) = asking_client();
+        client.snapshot().connected = true;
+        client.firmware_opened();
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Ev::Ask(Ask::Firmware(A::Status)))
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Ev::Ask(Ask::Firmware(A::Probe)))
+        ));
+        // Running: status only.
+        client.firmware_opened();
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Ev::Ask(Ask::Firmware(A::Status)))
+        ));
+        assert!(rx.try_recv().is_err());
+        // Ended just now: status only.
+        client.snapshot().firmware_event(JobEvent::Finished {
+            ok: true,
+            message: String::new(),
+        });
+        client.firmware_opened();
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Ev::Ask(Ask::Firmware(A::Status)))
+        ));
+        assert!(rx.try_recv().is_err());
+        // A minute later: a fresh probe.
+        client.snapshot().firmware_job.last =
+            Instant::now().checked_sub(FirmwareJob::QUIET + Duration::from_secs(1));
+        client.firmware_opened();
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Ev::Ask(Ask::Firmware(A::Status)))
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Ev::Ask(Ask::Firmware(A::Probe)))
+        ));
+    }
+
+    #[test]
+    fn fixture_refuses_firmware_jobs() {
+        let fixture: Fixture =
+            serde_json::from_str(include_str!("../fixtures/firmware-newer.json")).unwrap();
+        let client = fixture.start();
+        client.firmware(carpi_proto::FirmwareAction::Probe);
+        let until = Instant::now() + Duration::from_secs(5);
+        while client.snapshot().firmware_job.job.running() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let s = client.snapshot();
+        assert_eq!(
+            s.firmware_job.job.finished,
+            Some((false, "firmware jobs need a live carpid connection".into()))
+        );
+        assert_eq!(
+            s.firmware.rnse.comparison,
+            crate::firmware::Comparison::Newer
         );
     }
 

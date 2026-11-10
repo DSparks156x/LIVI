@@ -71,6 +71,9 @@ pub(super) fn view(pages: &Pages, snap: &Snapshot, now: Instant) -> View {
         S::Remote => remote(snap),
         S::Pin => pin_entry(snap, &pages.pin),
         S::Updates => updates(snap),
+        S::Firmware | S::AvsdFirmware => {
+            crate::firmware::view(&snap.firmware, &snap.firmware_job, pages.flashing())
+        }
         S::UpdateConfirm => update_confirm(snap),
         S::Wifi => wifi(snap),
         S::WifiNet(i) => wifi_net(snap, i, pages.forgetting()),
@@ -1756,6 +1759,9 @@ const GAIN: &str = "GAIN";
 
 fn avsd(snap: &Snapshot, now: Instant) -> View {
     with_settings(snap, "A/V over SD", |v, s| {
+        v.row(info("RNS-E firmware", snap.firmware.rnse.installed.label()));
+        v.row(info("SDLink protocol", snap.firmware.protocol.label()));
+        v.row(route("SDLink firmware", "RNS-E / Teensy", S::AvsdFirmware));
         let decoder = &snap.decoder;
         let reading = decoder.running();
         let result = match &decoder.finished {
@@ -1767,15 +1773,12 @@ fn avsd(snap: &Snapshot, now: Instant) -> View {
                 }
                 _ => "Reading… this can take several minutes".into(),
             },
-            None => "Sector 96 CRC32".into(),
+            None => "Sector 107 CRC32".into(),
         };
         v.row(
-            Row::new(RowKind::Button, "RNS-E decoder", result)
-                .button(if reading {
-                    "Reading…"
-                } else {
-                    "Read decoder"
-                })
+            Row::new(RowKind::Button, "Legacy decoder CRC", result)
+                .tag("Diagnostic only")
+                .button(if reading { "Reading…" } else { "Read CRC" })
                 .act(if reading { Act::None } else { Act::DecoderCrc })
                 .dimmed(reading)
                 .alert(decoder.finished.as_ref().is_some_and(|(ok, _)| !ok)),
@@ -2030,6 +2033,7 @@ fn updates(snap: &Snapshot) -> View {
             None => String::new(),
         };
         v.row(route("Wi-Fi networks", nets, S::Wifi).icon("WifiOutlined"));
+        v.row(route("SDLink firmware", "RNS-E / Teensy", S::Firmware));
     })
 }
 
@@ -2235,6 +2239,9 @@ impl Pages {
         if *act != Act::MoveNvme {
             self.moving = false;
         }
+        if !matches!(act, Act::FirmwareInstall(_)) {
+            self.flashing = None;
+        }
         // A screen Setup opens comes back to Setup.
         if let (S::Setup, Act::Car(to)) = (self.car, act) {
             self.via_setup = Some(*to);
@@ -2249,6 +2256,10 @@ impl Pages {
         }
         if matches!(act, Act::Car(S::Updates)) {
             client.update_status();
+        }
+        // The firmware screen asks carpid's status, and probes unless a job ran just now.
+        if matches!(act, Act::Car(S::Firmware | S::AvsdFirmware)) {
+            client.firmware_opened();
         }
         Some(match act {
             Act::Dis(a) => self.dis_run(a, client),
@@ -2277,6 +2288,20 @@ impl Pages {
             Act::SetupDone(done) => {
                 self.set_setup_done(*done);
                 if *done { self.up(1) } else { Moved::Stay }
+            }
+            Act::FirmwareProbe => {
+                client.firmware(carpi_proto::FirmwareAction::Probe);
+                Moved::Stay
+            }
+            // Same as Move to NVMe: the first push shows what happens, the second starts it.
+            Act::FirmwareInstall(unit) => {
+                if self.flashing != Some(*unit) {
+                    self.flashing = Some(*unit);
+                    return Some(Moved::Stay);
+                }
+                self.flashing = None;
+                client.firmware(unit.install());
+                Moved::Stay
             }
             Act::MoveNvme => {
                 if !self.moving {
@@ -2663,6 +2688,8 @@ mod tests {
             S::Portal,
             S::Pin,
             S::Updates,
+            S::Firmware,
+            S::AvsdFirmware,
             S::Remote,
             S::UpdateConfirm,
             S::Advanced,
@@ -2824,10 +2851,12 @@ mod tests {
         let mut s = snap();
         let row = |s: &Snapshot| {
             let v = avsd(s, Instant::now());
-            v.rows[find(&v, "RNS-E decoder")].clone()
+            v.rows[find(&v, "Legacy decoder CRC")].clone()
         };
         assert_eq!(row(&s).act, Act::DecoderCrc);
-        assert_eq!(row(&s).button, "Read decoder");
+        assert_eq!(row(&s).button, "Read CRC");
+        assert_eq!(row(&s).tag, "Diagnostic only");
+        assert_eq!(row(&s).value, "Sector 107 CRC32");
         s.decoder.asked = true;
         assert_eq!(row(&s).act, Act::None);
         assert!(row(&s).value.contains("Reading"));
@@ -2835,11 +2864,106 @@ mod tests {
         assert!(row(&s).value.contains("50%"));
         s.decoder.finished = Some((true, "0696DDE4".into()));
         assert_eq!(row(&s).value, "CRC32 0696DDE4");
+        assert_eq!(s.firmware, crate::firmware::Status::default());
         assert!(!row(&s).alert);
         s.decoder.finished = Some((false, "RNS-E did not reply".into()));
         assert!(row(&s).alert);
         assert_eq!(row(&s).value, "RNS-E did not reply");
         assert_eq!(row(&s).act, Act::DecoderCrc);
+    }
+
+    #[test]
+    fn firmware_install_needs_a_second_push() {
+        use crate::firmware::{Comparison, Identity, Installed, Target, Unit};
+        let client = Client::offline("test");
+        let mut p = Pages::new(Saved::default(), None);
+        let mut s = snap();
+        let target = Target {
+            installed: Installed::Reported(Identity {
+                version: "1".into(),
+                build_id: None,
+            }),
+            bundled: Some(Identity {
+                version: "2".into(),
+                build_id: None,
+            }),
+            comparison: Comparison::Newer,
+            ..Target::default()
+        };
+        s.firmware.rnse = target.clone();
+        s.firmware.teensy = target;
+        p.goto(S::Firmware);
+        let press = |p: &mut Pages, label: &str, nth: usize| {
+            let v = view(p, &s, Instant::now());
+            let at = v
+                .rows
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| r.label == label)
+                .nth(nth)
+                .map(|(i, _)| i)
+                .unwrap_or_else(|| panic!("no {label}"));
+            p.press(crate::PageId::Car, &v, &Hit::Row(at), 0, &client)
+        };
+        assert_eq!(press(&mut p, "Install update", 0), Moved::Stay);
+        assert_eq!(p.flashing(), Some(Unit::Rnse));
+        assert_eq!(
+            client.snapshot().firmware_job.action,
+            None,
+            "nothing sent yet"
+        );
+        let v = view(&p, &s, Instant::now());
+        assert!(v.rows.iter().any(|r| r.label == "Ignition on, engine off"));
+        // The other unit's button re-arms for that unit instead of installing.
+        press(&mut p, "Install update", 0);
+        assert_eq!(p.flashing(), Some(Unit::Teensy));
+        assert_eq!(client.snapshot().firmware_job.action, None);
+        // Anything else disarms.
+        press(&mut p, "Check versions", 0);
+        assert_eq!(p.flashing(), None);
+        client.snapshot().firmware_job = Default::default();
+        press(&mut p, "Install update", 0);
+        assert_eq!(press(&mut p, "Push again to install", 0), Moved::Stay);
+        assert_eq!(p.flashing(), None);
+        assert_eq!(
+            client.snapshot().firmware_job.action,
+            Some(carpi_proto::FirmwareAction::InstallRnse { confirm: true })
+        );
+        // Leaving the screen disarms too.
+        client.snapshot().firmware_job = Default::default();
+        press(&mut p, "Install update", 1);
+        assert_eq!(p.flashing(), Some(Unit::Teensy));
+        p.back(crate::PageId::Car);
+        assert_eq!(p.flashing(), None);
+    }
+
+    #[test]
+    fn firmware_routes_return_to_the_screen_that_opened_them() {
+        let client = Client::offline("test");
+        let mut p = Pages::new(Saved::default(), None);
+        let s = snap();
+        for (parent, screen) in [(S::Updates, S::Firmware), (S::Avsd, S::AvsdFirmware)] {
+            p.goto(parent);
+            let v = view(&p, &s, Instant::now());
+            let at = find(&v, "SDLink firmware");
+            assert_eq!(
+                p.press(crate::PageId::Car, &v, &Hit::Row(at), 2, &client),
+                Moved::Opened
+            );
+            assert_eq!(p.car, screen);
+            let v = view(&p, &s, Instant::now());
+            assert_eq!(v.title, "SDLink firmware");
+            assert_eq!(p.back(crate::PageId::Car), Some(Moved::Closed(2)));
+            assert_eq!(p.car, parent);
+        }
+        // The native Software Update slot has Updates as its root.
+        p.open_updates(&client);
+        let v = view(&p, &s, Instant::now());
+        let at = find(&v, "SDLink firmware");
+        p.press(crate::PageId::Car, &v, &Hit::Row(at), 2, &client);
+        p.back(crate::PageId::Car);
+        assert_eq!(p.car, S::Updates);
+        assert_eq!(p.back(crate::PageId::Car), None);
     }
 
     fn nvme_snap(root: carpi_proto::RootDisk) -> Snapshot {

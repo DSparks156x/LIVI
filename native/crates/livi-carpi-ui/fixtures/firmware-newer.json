@@ -1,0 +1,19 @@
+{
+  "daemon": "synthetic firmware fixture",
+  "firmware": {
+    "protocol": { "negotiated": "1" },
+    "busy": false,
+    "rnse": {
+      "installed": { "reported": { "version": "demo-installed", "build_id": "a1b2c3d" } },
+      "bundled": { "version": "demo-bundled", "build_id": "d4e5f6a" },
+      "comparison": "newer",
+      "detail": "Synthetic table 3; formats legacy, 1; read from the module header"
+    },
+    "teensy": {
+      "installed": { "reported": { "version": "demo-teensy", "build_id": "123abcd" } },
+      "bundled": { "version": "demo-teensy", "build_id": "123abcd" },
+      "comparison": "same",
+      "detail": "Synthetic; announced at startup"
+    }
+  }
+}

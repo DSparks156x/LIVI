@@ -75,6 +75,8 @@ pub struct Pages {
     via_setup: Option<CarScreen>,
     /// Starting Move to NVMe waits for a second push.
     moving: bool,
+    /// A firmware install waits for a second push.
+    flashing: Option<crate::firmware::Unit>,
 }
 
 impl Pages {
@@ -107,6 +109,7 @@ impl Pages {
             field: None,
             via_setup: None,
             moving: false,
+            flashing: None,
         }
     }
 
@@ -183,6 +186,10 @@ impl Pages {
 
     pub(crate) fn moving(&self) -> bool {
         self.moving
+    }
+
+    pub(crate) fn flashing(&self) -> Option<crate::firmware::Unit> {
+        self.flashing
     }
 
     /// Where back goes from the Car tab's screen now.
@@ -457,6 +464,7 @@ impl Pages {
                 self.removing = false;
                 self.via_setup = None;
                 self.moving = false;
+                self.flashing = None;
             }
         }
         self.trail.clear();
@@ -492,6 +500,7 @@ impl Pages {
                 }
                 self.car = up;
                 self.moving = false;
+                self.flashing = None;
                 self.log.removing = false;
                 self.removing = false;
                 if self.car == CarScreen::Logging {
@@ -626,7 +635,9 @@ impl Pages {
             | Act::Keyboard(_)
             | Act::SetupDone(_)
             | Act::PhoneSettings
-            | Act::MoveNvme => false,
+            | Act::MoveNvme
+            | Act::FirmwareProbe
+            | Act::FirmwareInstall(_) => false,
             Act::PinSave => {
                 let pin = std::mem::take(&mut self.pin);
                 client.set(SettingsPatch {

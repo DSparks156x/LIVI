@@ -49,8 +49,12 @@ pub enum Act {
     PinSave,
     /// Starts a diag job.
     Diag(carpi_proto::DiagAction),
-    /// Display the installed SDLink sector 96 CRC.
+    /// Display the installed SDLink sector 107 CRC.
     DecoderCrc,
+    /// Starts carpid's firmware probe: reads what the RNS-E and the Teensy run.
+    FirmwareProbe,
+    /// Asks, then installs the bundled firmware on this unit.
+    FirmwareInstall(crate::firmware::Unit),
     /// Asks to confirm clearing a module's fault codes, or doesn't.
     ClearAsk(u8),
     ClearCancel,
@@ -185,6 +189,9 @@ pub enum CarScreen {
     /// Entering a new portal PIN.
     Pin,
     Updates,
+    Firmware,
+    /// Same status page, reached from A/V over SD.
+    AvsdFirmware,
     UpdateConfirm,
     /// Saved Wi-Fi networks, one of them, and adding one.
     Wifi,
@@ -218,8 +225,9 @@ impl CarScreen {
             S::Zones => S::Power,
             S::Zone(_) => S::Zones,
             S::Picture => S::Avsd,
+            S::AvsdFirmware => S::Avsd,
             S::Pin => S::Portal,
-            S::UpdateConfirm | S::Wifi => S::Updates,
+            S::UpdateConfirm | S::Wifi | S::Firmware => S::Updates,
             S::WifiNet(_) | S::WifiAdd => S::Wifi,
             S::Nvme => S::Advanced,
             _ => S::Root,

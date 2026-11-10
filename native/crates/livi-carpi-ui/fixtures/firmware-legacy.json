@@ -1,0 +1,19 @@
+{
+  "daemon": "synthetic legacy firmware fixture",
+  "firmware": {
+    "protocol": "legacy",
+    "busy": false,
+    "rnse": {
+      "installed": "legacy",
+      "bundled": { "version": "demo-bundled", "build_id": "d4e5f6a" },
+      "comparison": "unknown",
+      "detail": "Synthetic; sector 107 holds no SDLink module header"
+    },
+    "teensy": {
+      "installed": "unknown",
+      "bundled": { "version": "demo-teensy", "build_id": "123abcd" },
+      "comparison": "unknown",
+      "blocked": "Synthetic: the Teensy is streaming; stop the chain first"
+    }
+  }
+}

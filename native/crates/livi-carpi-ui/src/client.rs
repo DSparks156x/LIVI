@@ -89,6 +89,8 @@ pub struct Snapshot {
     pub wifi: Wifi,
     /// Where the system runs from, and Move to NVMe.
     pub storage: Storage,
+    /// The last requested installed decoder CRC read, including progress/errors.
+    pub decoder: UpdateJob,
 }
 
 /// The disks, as carpid last told them.
@@ -399,6 +401,7 @@ impl Default for Snapshot {
             update_note: None,
             wifi: Wifi::default(),
             storage: Storage::default(),
+            decoder: UpdateJob::default(),
         }
     }
 }
@@ -416,6 +419,7 @@ enum Ask {
     UpdateStatus,
     Wifi(carpi_proto::WifiAction),
     Storage(carpi_proto::StorageAction),
+    DecoderCrc,
     /// The names to watch changed.
     Watch,
 }
@@ -578,6 +582,23 @@ impl Client {
         self.ask(Ask::Storage(action));
     }
 
+    pub fn decoder_crc(&self) {
+        {
+            let mut s = self.snapshot();
+            if s.decoder.running() {
+                return;
+            }
+            s.decoder = UpdateJob {
+                asked: true,
+                ..Default::default()
+            };
+            if self.asks.is_none() {
+                s.decoder.refused("not connected".into());
+            }
+        }
+        self.ask(Ask::DecoderCrc);
+    }
+
     /// Starts an update job; its events land in [`Snapshot::update`].
     pub fn update(&self, action: UpdateAction, and_apply: bool) {
         if action == UpdateAction::Status {
@@ -679,6 +700,7 @@ mod link {
         Storage,
         /// Move to NVMe.
         StorageJob,
+        DecoderCrc,
         Catalog,
         Ok,
     }
@@ -711,6 +733,9 @@ mod link {
                 s.connected = false;
                 s.problem = Some(why);
                 s.update_disconnected();
+                if s.decoder.running() {
+                    s.decoder.refused("carpid went away; read again".into());
+                }
                 if s.capture == Capture::Saving {
                     s.captured(Err("carpid went away".into()));
                 }
@@ -732,6 +757,9 @@ mod link {
                     }
                     Ok(Ev::Ask(Ask::Diag(action))) => {
                         lock(&shared).diag.refused(action, "not connected".into())
+                    }
+                    Ok(Ev::Ask(Ask::DecoderCrc)) => {
+                        lock(&shared).decoder.refused("not connected".into())
                     }
                     Ok(Ev::Ask(Ask::Datalog(_))) => {
                         lock(&shared).datalog_note = Some("not connected".into())
@@ -1012,6 +1040,9 @@ mod link {
                         };
                         self.send(&Request::Storage { action }, pending)
                     }
+                    Ok(Ev::Ask(Ask::DecoderCrc)) => {
+                        self.send(&Request::DecoderCrc, Pending::DecoderCrc)
+                    }
                     Ok(Ev::Ask(Ask::Watch)) if *shown => self.rewatch(),
                     Ok(Ev::Ask(Ask::Watch)) => Ok(()),
                     Ok(Ev::Got(from, resp)) if from == id => {
@@ -1066,6 +1097,8 @@ mod link {
                         s.update_event(event);
                     } else if s.storage.job.job == Some(job) {
                         s.storage.job.event(event);
+                    } else if s.decoder.job == Some(job) {
+                        s.decoder.event(event);
                     } else {
                         s.diag.event(job, event);
                     }
@@ -1168,6 +1201,13 @@ mod link {
                 }
                 (Some(Pending::StorageJob), Response::Error { message }) => {
                     s.storage.job.refused(message)
+                }
+                (Some(Pending::DecoderCrc), Response::JobStarted { job }) => {
+                    s.decoder.asked = false;
+                    s.decoder.job = Some(job);
+                }
+                (Some(Pending::DecoderCrc), Response::Error { message }) => {
+                    s.decoder.refused(message)
                 }
                 (Some(Pending::Diag(action)), Response::JobStarted { job }) => {
                     s.diag.started(job, action)
@@ -1288,6 +1328,9 @@ impl Fixture {
                         total: Some(100),
                     });
                 }
+                Ok(Ev::Ask(Ask::DecoderCrc)) => {
+                    s.decoder.refused("decoder reads need a live carpid connection".into());
+                }
                 Ok(_) | Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return,
             }
@@ -1299,6 +1342,35 @@ impl Fixture {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decoder_action_queues_one_read_and_offline_read_reports_error() {
+        let (tx, rx) = mpsc::channel();
+        let client = Client {
+            shared: Arc::default(),
+            asks: Some(tx),
+            watch: Arc::default(),
+        };
+        client.decoder_crc();
+        assert!(client.snapshot().decoder.running());
+        assert!(matches!(rx.try_recv(), Ok(Ev::Ask(Ask::DecoderCrc))));
+        client.decoder_crc();
+        assert!(
+            rx.try_recv().is_err(),
+            "must not start a second overlapping read"
+        );
+        let offline = Client::offline("offline");
+        offline.decoder_crc();
+        assert_eq!(
+            offline.snapshot().decoder.finished,
+            Some((false, "not connected".into()))
+        );
+        let request = carpi_proto::encode(&carpi_proto::Request::DecoderCrc);
+        assert_eq!(
+            carpi_proto::decode::<carpi_proto::Request>(&request[4..]).unwrap(),
+            carpi_proto::Request::DecoderCrc
+        );
+    }
 
     fn installed(running: Option<bool>, outcome: Option<&str>) -> carpi_proto::Installed {
         carpi_proto::Installed {

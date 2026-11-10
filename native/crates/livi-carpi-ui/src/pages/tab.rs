@@ -1756,6 +1756,30 @@ const GAIN: &str = "GAIN";
 
 fn avsd(snap: &Snapshot, now: Instant) -> View {
     with_settings(snap, "A/V over SD", |v, s| {
+        let decoder = &snap.decoder;
+        let reading = decoder.running();
+        let result = match &decoder.finished {
+            Some((true, crc)) => format!("CRC32 {crc}"),
+            Some((false, error)) => error.clone(),
+            None if reading => match decoder.progress {
+                Some((done, Some(total))) if total > 0 => {
+                    format!("Reading… {}%", done * 100 / total)
+                }
+                _ => "Reading… this can take several minutes".into(),
+            },
+            None => "Sector 96 CRC32".into(),
+        };
+        v.row(
+            Row::new(RowKind::Button, "RNS-E decoder", result)
+                .button(if reading {
+                    "Reading…"
+                } else {
+                    "Read decoder"
+                })
+                .act(if reading { Act::None } else { Act::DecoderCrc })
+                .dimmed(reading)
+                .alert(decoder.finished.as_ref().is_some_and(|(ok, _)| !ok)),
+        );
         if s.avsd.ranges.is_empty() {
             v.row(info("Waiting for carpid's A/V settings", "").dimmed(true));
             return;
@@ -2793,6 +2817,29 @@ mod tests {
             ..r
         };
         assert_eq!(avsd_row(&on, 1.0).kind, RowKind::Toggle);
+    }
+
+    #[test]
+    fn decoder_row_reads_and_displays_progress_crc_and_errors() {
+        let mut s = snap();
+        let row = |s: &Snapshot| {
+            let v = avsd(s, Instant::now());
+            v.rows[find(&v, "RNS-E decoder")].clone()
+        };
+        assert_eq!(row(&s).act, Act::DecoderCrc);
+        assert_eq!(row(&s).button, "Read decoder");
+        s.decoder.asked = true;
+        assert_eq!(row(&s).act, Act::None);
+        assert!(row(&s).value.contains("Reading"));
+        s.decoder.progress = Some((65536, Some(131072)));
+        assert!(row(&s).value.contains("50%"));
+        s.decoder.finished = Some((true, "0696DDE4".into()));
+        assert_eq!(row(&s).value, "CRC32 0696DDE4");
+        assert!(!row(&s).alert);
+        s.decoder.finished = Some((false, "RNS-E did not reply".into()));
+        assert!(row(&s).alert);
+        assert_eq!(row(&s).value, "RNS-E did not reply");
+        assert_eq!(row(&s).act, Act::DecoderCrc);
     }
 
     fn nvme_snap(root: carpi_proto::RootDisk) -> Snapshot {

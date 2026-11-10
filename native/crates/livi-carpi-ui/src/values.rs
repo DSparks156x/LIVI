@@ -5,10 +5,10 @@
 //! good.
 //!
 //! carpid says a value is invalid (`None`) when the car sent an error or init value, or the
-//! value's own timeout ran out. On top of that a value goes stale here when nothing refreshed it
-//! for [`STALE_AFTER`]: carpid sends a subscription update only on change, so the pages poll the
-//! full set every second to keep ages true, and a gap longer than that means carpid or the link is
-//! gone.
+//! value's own timeout ran out. Most sources also grey out after [`STALE_AFTER`]. SDLink status
+//! is sampled every 3 s, so it uses the daemon's 15 s source timeout instead. Independently, no
+//! reading is live after [`STALE_AFTER`] without a reply: carpid sends subscription updates only
+//! on change, so the pages poll the full set every second to keep ages true.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -19,6 +19,9 @@ use crate::defs::{Kind, describe, selector};
 
 /// A value no update refreshed for this long greys out.
 pub const STALE_AFTER: Duration = Duration::from_secs(3);
+/// Matches carpid's avsd_status::TIMEOUT. Its 3 s sampling period must not
+/// race the generic 3 s source threshold when the UI receives the next poll.
+const AVSD_SOURCE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// A reading and when it arrived.
 #[derive(Debug, Clone, PartialEq)]
@@ -54,10 +57,22 @@ impl Freshness {
 }
 
 pub fn freshness(seen: Option<&Seen>, now: Instant) -> Freshness {
+    freshness_with_timeout(seen, now, STALE_AFTER)
+}
+
+fn freshness_with_timeout(
+    seen: Option<&Seen>,
+    now: Instant,
+    source_timeout: Duration,
+) -> Freshness {
     match seen {
         None => Freshness::Missing,
         Some(s) if s.value.is_none() => Freshness::Invalid,
-        Some(s) if s.age(now) > STALE_AFTER => Freshness::Stale,
+        Some(s)
+            if s.age(now) > source_timeout || now.saturating_duration_since(s.at) > STALE_AFTER =>
+        {
+            Freshness::Stale
+        }
         Some(_) => Freshness::Fresh,
     }
 }
@@ -119,7 +134,11 @@ pub const NONE: &str = "—";
 
 pub fn show(name: &str, seen: Option<&Seen>, now: Instant) -> Shown {
     let d = describe(name);
-    let freshness = freshness(seen, now);
+    let freshness = if name.starts_with("avsd.") {
+        freshness_with_timeout(seen, now, AVSD_SOURCE_TIMEOUT)
+    } else {
+        freshness(seen, now)
+    };
     let value = seen
         .and_then(|s| s.value.as_ref())
         .map(|v| text(v, d.kind))
@@ -271,6 +290,39 @@ mod tests {
         assert_eq!(age(Duration::from_millis(12_400)), "12 s");
         assert_eq!(age(Duration::from_secs(185)), "3 min");
         assert_eq!(age(Duration::from_secs(7300)), "2 h");
+    }
+
+    #[test]
+    fn sdlink_source_cadence_does_not_look_like_a_stale_connection() {
+        let now = Instant::now();
+        for age_ms in [3100, 4000, 5000] {
+            let sample = seen(Some(Value::Num(59.6)), age_ms, now);
+            let shown = show("avsd.fps", Some(&sample), now + Duration::from_millis(900));
+            assert_eq!(shown.freshness, Freshness::Fresh, "source age {age_ms} ms");
+            assert_eq!(shown.value, "59.6");
+            // The exception belongs to the slow SDLink source, not all data.
+            assert_eq!(
+                show("engine.rpm", Some(&sample), now).freshness,
+                Freshness::Stale
+            );
+        }
+        let sample = seen(Some(Value::Num(59.6)), 5000, now);
+        assert_eq!(
+            show("avsd.fps", Some(&sample), now + Duration::from_millis(3001)).freshness,
+            Freshness::Stale,
+            "no UI reply for 3 s still marks a disconnected link stale"
+        );
+        let old = seen(Some(Value::Num(59.6)), 15001, now);
+        assert_eq!(
+            show("avsd.fps", Some(&old), now).freshness,
+            Freshness::Stale,
+            "a fresh poll cannot revive an expired source"
+        );
+        let invalid = seen(None, 0, now);
+        assert_eq!(
+            show("avsd.fps", Some(&invalid), now).freshness,
+            Freshness::Invalid
+        );
     }
 
     #[test]

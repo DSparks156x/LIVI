@@ -603,6 +603,10 @@ impl Pages {
                 client.diag(action);
                 false
             }
+            Act::DecoderCrc => {
+                client.decoder_crc();
+                false
+            }
             Act::ClearAsk(module) => {
                 self.confirm = Some(module);
                 false
@@ -1037,9 +1041,35 @@ fn capital(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use carpi_proto::Reading;
+    use std::time::Duration;
 
     use super::*;
     use crate::client::Capture;
+
+    #[test]
+    fn sdlink_rows_hold_the_reading_between_normal_status_samples() {
+        let now = Instant::now();
+        let mut s = Snapshot::default();
+        for age_ms in [0, 1000, 2000, 3100, 4000, 5000] {
+            s.values.take(
+                vec![Reading {
+                    name: "avsd.fps".into(),
+                    value: Some(Value::Num(59.6)),
+                    age_ms,
+                }],
+                now,
+            );
+            let row = value_row("avsd.fps", &s, now + Duration::from_millis(500));
+            assert_eq!(row.value, "59.6 fps", "source age {age_ms} ms");
+            assert!(!row.dimmed);
+        }
+        let row = value_row("avsd.fps", &s, now + Duration::from_millis(3001));
+        assert!(row.dimmed);
+        assert!(
+            row.value.contains(" · "),
+            "a disconnected link still shows the age"
+        );
+    }
 
     fn snap(values: &[(&str, Option<Value>)]) -> Snapshot {
         let mut s = Snapshot {

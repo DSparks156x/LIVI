@@ -49,6 +49,8 @@ pub enum Act {
     PinSave,
     /// Starts a diag job.
     Diag(carpi_proto::DiagAction),
+    /// Display the installed SDLink sector 96 CRC.
+    DecoderCrc,
     /// Asks to confirm clearing a module's fault codes, or doesn't.
     ClearAsk(u8),
     ClearCancel,

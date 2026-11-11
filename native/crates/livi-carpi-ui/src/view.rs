@@ -15,6 +15,8 @@ pub enum Layout {
     List,
     /// Only the grid, filling the page.
     Grid,
+    /// A Data panel filling the page.
+    Panel,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,13 +62,15 @@ pub enum Act {
     /// Asks to confirm clearing a module's fault codes, or doesn't.
     ClearAsk(u8),
     ClearCancel,
+    /// Asks, then clears every module with faults, one after the other.
+    ClearAll,
     /// A brightness nudge or "reset learned".
     Light(carpi_proto::LightAction),
     /// Shows or hides the manual curve's points.
     Advanced,
     /// The slot editor and the picker.
     Slots(SlotAct),
-    /// Data logging: the run and the profiles.
+    /// Data logging: the run and the profiles (the Data page's Logs tab).
     Log(crate::logging::LogAct),
     /// Changes to the cluster display's readings pages.
     Dis(DisAct),
@@ -86,8 +90,44 @@ pub enum Act {
     PhoneSettings,
     /// Asks, then starts Move to NVMe.
     MoveNvme,
+    /// Switches the Data page's tab.
+    Tab(DataTab),
+    /// Data panels: viewing, the menu, the editor.
+    Panel(crate::panels::PanelAct),
+    /// Starts a data log of the shown panel's values.
+    LogPanel,
     /// Back a screen.
     Back,
+}
+
+/// The Data page's tabs (docs/PAGES.md 5c).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DataTab {
+    #[default]
+    Panels,
+    Logs,
+    Faults,
+}
+
+impl DataTab {
+    pub const ALL: [DataTab; 3] = [DataTab::Panels, DataTab::Logs, DataTab::Faults];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            DataTab::Panels => "Panels",
+            DataTab::Logs => "Logs",
+            DataTab::Faults => "Faults",
+        }
+    }
+
+    /// The name in a UI path: `/carpi/data/<name>`.
+    pub fn name(self) -> &'static str {
+        match self {
+            DataTab::Panels => "panels",
+            DataTab::Logs => "logs",
+            DataTab::Faults => "faults",
+        }
+    }
 }
 
 /// What the on-screen keyboard is typing.
@@ -174,11 +214,8 @@ pub enum CarScreen {
     /// One key's bindings ([`crate::keys::KEYS`] index), and the action picker for one row.
     Key(usize),
     Binding(usize, usize),
+    /// Debug logs.
     Logs,
-    /// Data logging: the run and the profiles, one profile, its channels.
-    Logging,
-    LogProfile,
-    LogChannels,
     Power,
     /// Time zone regions, and the zones in one.
     Zones,
@@ -220,9 +257,6 @@ impl CarScreen {
                 _ => S::Faceplate,
             },
             S::Binding(k, _) => S::Key(k),
-            S::Logging => S::Logs,
-            S::LogProfile => S::Logging,
-            S::LogChannels => S::LogProfile,
             S::Zones => S::Power,
             S::Zone(_) => S::Zones,
             S::Picture => S::Avsd,
@@ -392,6 +426,8 @@ pub enum Spot {
     Tile(i32),
     /// A row with this many plain rows and sections above it.
     Row(i32, i32),
+    /// A Data panel, or a widget or free cell of one being edited.
+    Panel,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -423,6 +459,12 @@ pub struct View {
     pub custom: bool,
     /// A pick from a list: LIVI's select screen, the checked row is the current one.
     pub select: bool,
+    /// A Data panel: the page itself, or beside the rows (the widget editor).
+    pub panel: Option<crate::panels::PanelDraw>,
+    /// Focus index of the viewed panel: the knob flips panels there instead of moving focus.
+    pub flip: i32,
+    /// Focusable parts of the panel: focus index, push, D-pad.
+    pub panel_hits: Vec<(i32, Act, Side)>,
 }
 
 /// What a focus index points at.
@@ -432,6 +474,8 @@ pub enum Hit {
     Pill(usize),
     Cell(usize),
     Row(usize),
+    /// A part of the panel, by [`View::panel_hits`] index.
+    Panel(usize),
 }
 
 impl View {
@@ -453,6 +497,9 @@ impl View {
             start: -1,
             custom: false,
             select: false,
+            panel: None,
+            flip: -1,
+            panel_hits: Vec::new(),
         }
     }
 
@@ -495,6 +542,14 @@ impl View {
 
     pub fn section(&mut self, title: impl Into<String>) {
         self.rows.push(Row::new(RowKind::Section, title, ""));
+    }
+
+    /// A focusable part of the panel (after pills, before rows); returns its focus index.
+    pub fn panel_part(&mut self, act: Act, side: Side) -> i32 {
+        debug_assert!(self.rows.is_empty(), "panel parts go before rows");
+        let at = self.take(Spot::Panel);
+        self.panel_hits.push((at, act, side));
+        at
     }
 
     /// Adds a row; returns its focus index, -1 for a section.
@@ -552,6 +607,9 @@ impl View {
         if let Some(i) = self.cells.iter().position(|c| c.focus_at == at) {
             return Some(Hit::Cell(i));
         }
+        if let Some(i) = self.panel_hits.iter().position(|p| p.0 == at) {
+            return Some(Hit::Panel(i));
+        }
         self.rows
             .iter()
             .position(|r| r.focus_at == at)
@@ -565,6 +623,7 @@ impl View {
             Hit::Pill(i) => &self.pills.get(*i)?.act,
             Hit::Cell(i) => &self.cells.get(*i)?.act,
             Hit::Row(i) => &self.rows.get(*i)?.act,
+            Hit::Panel(i) => &self.panel_hits.get(*i)?.1,
         };
         (*act != Act::None).then_some(act)
     }
@@ -575,6 +634,7 @@ impl View {
             Some(Hit::Pill(i)) => self.pills.get(*i).and_then(|p| p.side.as_ref()),
             Some(Hit::Cell(i)) => self.cells.get(*i).and_then(|c| c.side.as_ref()),
             Some(Hit::Row(i)) => self.rows.get(*i).and_then(|r| r.side.as_ref()),
+            Some(Hit::Panel(i)) => self.panel_hits.get(*i).and_then(|p| p.2.as_ref()),
             _ => None,
         };
         let (l, r) = own.or(self.side.as_ref())?;

@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Drew Sparks
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The Logging screens under the Car page (docs/PAGES.md 4): start and stop a run, and the
-//! profiles carpid keeps. A profile is a name from a fixed list, a rate, and a channel set edited
+//! The Data page's Logs tab (docs/PAGES.md 5c): start, stop and mark a run, and the profiles
+//! carpid keeps. A profile is a name from a fixed list, a rate, and a channel set edited
 //! with the slot editor's list form. Every change goes to carpid at once, like the Data page's.
 
 use std::time::Instant;
@@ -11,7 +11,7 @@ use carpi_proto::{DATALOG_RATES, DatalogAction, DatalogLoad, DatalogProfile, Dat
 
 use crate::client::{Client, Snapshot};
 use crate::slots::{self, Editor, Focus, SlotAct};
-use crate::view::{Act, CarScreen, Layout, Row, RowKind, View};
+use crate::view::{Act, Layout, Row, RowKind, View};
 
 /// Profile names, cycled like the Data page's. Others come from the portal.
 pub const NAMES: &[&str] = &[
@@ -33,6 +33,8 @@ const RATE: u32 = 10;
 pub enum LogAct {
     Start,
     Stop,
+    /// Numbers the next row of the running log.
+    Mark,
     /// The D-pad on the profile row: the one Start uses.
     Pick(i32),
     /// Opens a profile by name.
@@ -43,14 +45,44 @@ pub enum LogAct {
     Rate(i32),
     /// Asks, then removes the open profile.
     Remove,
+    Profiles,
+    Channels,
 }
 
 /// What an act did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Done {
     Stay,
-    Opened(CarScreen),
+    /// Another screen: [`Logging::screen`] says which.
+    Opened,
     Back,
+}
+
+/// A screen of the Logs tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LogScreen {
+    /// The run: start, stop, mark.
+    #[default]
+    Top,
+    Profiles,
+    Profile,
+    /// The open profile's values: the list editor and its picker.
+    Channels,
+}
+
+impl LogScreen {
+    pub fn parent(self) -> Option<LogScreen> {
+        match self {
+            LogScreen::Top => None,
+            LogScreen::Profiles => Some(LogScreen::Top),
+            LogScreen::Profile => Some(LogScreen::Profiles),
+            LogScreen::Channels => Some(LogScreen::Profile),
+        }
+    }
+
+    pub fn depth(self) -> usize {
+        std::iter::successors(self.parent(), |s| s.parent()).count()
+    }
 }
 
 /// The Logging screens' own state.
@@ -64,6 +96,7 @@ pub struct Logging {
     pub editor: Editor,
     /// "Remove this profile" waits for a second push.
     pub removing: bool,
+    pub screen: LogScreen,
 }
 
 impl Logging {
@@ -84,6 +117,32 @@ impl Logging {
         self.open = None;
         self.editor = Editor::default();
         self.removing = false;
+        self.screen = LogScreen::Top;
+    }
+
+    /// Screens below the first, the picker's levels included.
+    pub fn depth(&self) -> usize {
+        let picker = match (&self.editor.picker, self.screen) {
+            (Some(p), LogScreen::Channels) => 1 + p.level(),
+            _ => 0,
+        };
+        self.screen.depth() + picker
+    }
+
+    /// One screen up; false on the first.
+    pub fn back(&mut self) -> bool {
+        if self.screen == LogScreen::Channels && self.editor.back() {
+            return true;
+        }
+        let Some(up) = self.screen.parent() else {
+            return false;
+        };
+        self.screen = up;
+        self.removing = false;
+        if up == LogScreen::Profiles {
+            self.open = None;
+        }
+        true
     }
 
     pub fn apply(&mut self, a: &LogAct, st: Option<&DatalogStatus>, client: &Client) -> Done {
@@ -106,6 +165,10 @@ impl Logging {
                 client.datalog(DatalogAction::Stop);
                 Done::Stay
             }
+            LogAct::Mark => {
+                client.datalog(DatalogAction::Mark);
+                Done::Stay
+            }
             LogAct::Pick(d) => {
                 let Some(now) = st.and_then(|s| self.pick(s)) else {
                     return Done::Stay;
@@ -122,7 +185,8 @@ impl Logging {
                 };
                 self.open = Some((name.clone(), p.profile.clone()));
                 self.editor = Editor::default();
-                Done::Opened(CarScreen::LogProfile)
+                self.screen = LogScreen::Profile;
+                Done::Opened
             }
             LogAct::Add => {
                 let Some(name) = NAMES.iter().find(|n| !names.iter().any(|x| x == *n)) else {
@@ -132,6 +196,7 @@ impl Logging {
                     name: name.to_string(),
                     values: Vec::new(),
                     rate_hz: RATE,
+                    labels: Vec::new(),
                 };
                 client.datalog(DatalogAction::Save {
                     profile: p.clone(),
@@ -139,7 +204,8 @@ impl Logging {
                 });
                 self.open = Some((p.name.clone(), p));
                 self.editor = Editor::default();
-                Done::Opened(CarScreen::LogProfile)
+                self.screen = LogScreen::Profile;
+                Done::Opened
             }
             LogAct::Name(d) => {
                 let Some((at, p)) = &mut self.open else {
@@ -189,8 +255,19 @@ impl Logging {
                 if self.pick.as_ref() == Some(at) {
                     self.pick = None;
                 }
-                self.reset();
+                self.open = None;
+                self.editor = Editor::default();
+                self.removing = false;
                 Done::Back
+            }
+            LogAct::Profiles => {
+                self.screen = LogScreen::Profiles;
+                Done::Opened
+            }
+            LogAct::Channels => {
+                self.editor = Editor::default();
+                self.screen = LogScreen::Channels;
+                Done::Opened
             }
         }
     }
@@ -221,6 +298,7 @@ impl Logging {
             return;
         };
         let replaces = (*at != p.name).then(|| at.clone());
+        p.labels = labels(&p.values);
         client.datalog(DatalogAction::Save {
             profile: p.clone(),
             replaces: replaces.clone(),
@@ -243,6 +321,22 @@ impl Logging {
             .find(|x| x.profile == *p)
             .map(|x| &x.load)
     }
+}
+
+/// CSV column headers for `values`: the catalog's label and the value's own unit, as Datazap
+/// reads them: `Boost actual (mbar)`.
+pub fn labels(values: &[String]) -> Vec<String> {
+    values
+        .iter()
+        .map(|n| {
+            let d = crate::defs::describe(n);
+            let label = crate::slots::label(n);
+            match d.unit {
+                "" => label,
+                u => format!("{label} ({u})"),
+            }
+        })
+        .collect()
 }
 
 /// `12 values · 10 Hz`.
@@ -318,33 +412,54 @@ fn log(a: LogAct) -> Act {
     Act::Log(a)
 }
 
-/// The Logging screen: the run, then the profiles.
-pub fn root(state: &Logging, snap: &Snapshot) -> View {
-    let mut v = View::new(Layout::List, "Logging", true).note(note(snap));
+/// The Logs tab's first screen, into `v` (which has the tabs): the run and its controls, or
+/// what Start starts. `panel` is the shown panel, for Log this panel.
+pub fn top(mut v: View, state: &Logging, snap: &Snapshot, panel: Option<&str>) -> View {
+    v.note = note(snap);
     let Some(st) = &snap.datalog else {
         v.row(Row::new(RowKind::Info, "Waiting for carpid", "").dimmed(true));
         return v.finish();
     };
     match &st.running {
         Some(r) => {
-            let at = v.row(
-                Row::new(
-                    RowKind::Button,
-                    format!("Logging {}", r.label),
-                    format!("{} · {} rows", clock(r.elapsed_ms), group(r.rows)),
-                )
-                .button("Stop")
-                .act(log(LogAct::Stop)),
-            );
-            v.start = at;
             v.row(Row::new(
                 RowKind::Info,
-                "Profile",
-                format!("{} · {} values · {} Hz", r.profile, r.values, r.rate_hz),
+                format!("● {}", r.profile),
+                format!("{} · {} rows", clock(r.elapsed_ms), group(r.rows)),
             ));
+            let marks = match r.marks {
+                0 => String::new(),
+                n => format!("{n} so far"),
+            };
+            v.start = v.row(
+                Row::new(RowKind::Button, "Mark", marks)
+                    .button("Mark")
+                    .act(log(LogAct::Mark)),
+            );
+            v.row(
+                Row::new(RowKind::Button, "Stop", r.label.clone())
+                    .button("Stop")
+                    .act(log(LogAct::Stop)),
+            );
         }
-        None => match state.pick(st) {
-            Some(p) => {
+        None => {
+            match state.pick(st) {
+                Some(p) if p.values.is_empty() => {
+                    v.row(
+                        Row::new(RowKind::Info, "Start", format!("{} is empty", p.name))
+                            .dimmed(true),
+                    );
+                }
+                Some(p) if snap.connected => {
+                    v.start = v.row(
+                        Row::new(RowKind::Button, "Start", size(p))
+                            .button("Start")
+                            .act(log(LogAct::Start)),
+                    );
+                }
+                _ => {}
+            }
+            if let Some(p) = state.pick(st) {
                 let mut row = Row::new(RowKind::Choice, "Profile", p.name.clone());
                 if st.profiles.len() > 1 {
                     row = row
@@ -354,40 +469,41 @@ pub fn root(state: &Logging, snap: &Snapshot) -> View {
                     row.kind = RowKind::Info;
                 }
                 v.row(row);
-                let at = if p.values.is_empty() {
-                    v.row(
-                        Row::new(RowKind::Info, format!("{} has no channels yet", p.name), "")
-                            .dimmed(true),
-                    )
-                } else if snap.connected {
-                    v.row(
-                        Row::new(RowKind::Button, "Start logging", size(p))
-                            .button("Start")
-                            .act(log(LogAct::Start)),
-                    )
-                } else {
-                    -1
-                };
-                v.start = at;
             }
-            None => {
-                v.row(Row::new(RowKind::Info, "No profiles yet", "").dimmed(true));
+            if let Some(name) = panel.filter(|_| snap.connected) {
+                v.row(
+                    Row::new(RowKind::Button, "Log this panel", name)
+                        .button("Start")
+                        .act(Act::LogPanel),
+                );
             }
-        },
+            if let Some(r) = &st.last {
+                let mut row = Row::new(
+                    RowKind::Info,
+                    "Last",
+                    match &r.error {
+                        Some(e) => format!("{} · stopped: {e}", r.label),
+                        None => format!("{} · {}", r.label, r.summary),
+                    },
+                );
+                row.alert = r.error.is_some();
+                v.row(row);
+            }
+        }
     }
-    if let Some(r) = st.last.as_ref().filter(|_| st.running.is_none()) {
-        let mut row = Row::new(
-            RowKind::Info,
-            format!("Last: {}", r.label),
-            match &r.error {
-                Some(e) => format!("stopped: {e}"),
-                None => r.summary.clone(),
-            },
-        );
-        row.alert = r.error.is_some();
-        v.row(row);
-    }
-    v.section("Profiles");
+    let mut row = Row::new(RowKind::Route, "Profiles", "").act(log(LogAct::Profiles));
+    row.alert = st.profiles.iter().any(|p| slow(&p.load, p.profile.rate_hz));
+    v.row(row);
+    v.finish()
+}
+
+/// The profiles, and Add.
+pub fn profiles(snap: &Snapshot) -> View {
+    let mut v = View::new(Layout::List, "Profiles", true).note(note(snap));
+    let Some(st) = &snap.datalog else {
+        v.row(Row::new(RowKind::Info, "Waiting for carpid", "").dimmed(true));
+        return v.finish();
+    };
     for p in &st.profiles {
         let mut row = Row::new(RowKind::Route, p.profile.name.clone(), size(&p.profile))
             .act(log(LogAct::Open(p.profile.name.clone())));
@@ -401,7 +517,7 @@ pub fn root(state: &Logging, snap: &Snapshot) -> View {
         .collect();
     if NAMES.iter().any(|n| !names.contains(n)) {
         v.row(
-            Row::new(RowKind::Button, "Add a profile", "")
+            Row::new(RowKind::Button, "Add profile", "")
                 .button("Add")
                 .act(log(LogAct::Add)),
         );
@@ -430,7 +546,7 @@ pub fn profile(state: &Logging, snap: &Snapshot) -> View {
         1 => "1 value".to_string(),
         n => format!("{n} values"),
     };
-    v.row(Row::new(RowKind::Route, "Channels", channels).act(Act::Car(CarScreen::LogChannels)));
+    v.row(Row::new(RowKind::Route, "Channels", channels).act(log(LogAct::Channels)));
     if n > 0 {
         let row = match state.load(snap) {
             Some(l) => {
@@ -520,7 +636,13 @@ pub fn apply(st: &mut DatalogStatus, a: &DatalogAction) {
                 dir: "/home/pi/logs/2026-11-08/04".into(),
                 summary: String::new(),
                 error: None,
+                marks: 0,
             });
+        }
+        DatalogAction::Mark => {
+            if let Some(r) = st.running.as_mut() {
+                r.marks += 1;
+            }
         }
         DatalogAction::Stop => {
             if let Some(mut r) = st.running.take() {
@@ -544,6 +666,7 @@ pub(crate) mod tests {
                 name: name.into(),
                 values: values.iter().map(|v| v.to_string()).collect(),
                 rate_hz,
+                labels: Vec::new(),
             },
             load,
         };
@@ -609,20 +732,27 @@ pub(crate) mod tests {
             .unwrap_or_else(|| panic!("no row {label}"))
     }
 
+    fn top_of(l: &Logging, s: &Snapshot) -> View {
+        top(View::new(Layout::List, "Data", false), l, s, Some("Daily"))
+    }
+
     #[test]
-    fn the_root_starts_the_picked_profile_and_shows_the_run() {
+    fn the_top_starts_the_picked_profile_and_shows_the_run() {
         let client = Client::offline("test");
         let mut l = Logging::default();
         let mut st = status();
-        let v = root(&l, &snap(st.clone()));
+        let v = top_of(&l, &snap(st.clone()));
         let pick = &v.rows[find(&v, "Profile")];
         assert_eq!(
             (pick.kind, pick.value.as_str()),
             (RowKind::Choice, "Haldex")
         );
-        assert_eq!(v.hit(v.start), Some(Hit::Row(find(&v, "Start logging"))));
-        assert_eq!(v.rows[find(&v, "Start logging")].value, "3 values · 20 Hz");
+        assert_eq!(v.hit(v.start), Some(Hit::Row(find(&v, "Start"))));
+        assert_eq!(v.rows[find(&v, "Start")].value, "3 values · 20 Hz");
+        assert_eq!(v.rows[find(&v, "Log this panel")].act, Act::LogPanel);
         // Haldex can't poll at 20 Hz: flagged.
+        assert!(v.rows[find(&v, "Profiles")].alert);
+        let v = profiles(&snap(st.clone()));
         assert!(v.rows[find(&v, "Haldex")].alert);
         assert!(!v.rows[find(&v, "Boost")].alert);
         assert!(v.rows.iter().any(|r| r.act == Act::Log(LogAct::Add)));
@@ -649,24 +779,25 @@ pub(crate) mod tests {
             dir: String::new(),
             summary: String::new(),
             error: None,
+            marks: 0,
         });
-        let v = root(&l, &snap(st.clone()));
-        let run = &v.rows[v.rows.iter().position(|r| r.button == "Stop").unwrap()];
-        assert_eq!(run.label, "Logging 2026-11-08 #04");
-        assert_eq!(run.value, "1:23 · 4 812 rows");
-        assert_eq!(v.hit(v.start), Some(Hit::Row(0)));
-        assert!(!v.rows.iter().any(|r| r.label == "Start logging"));
+        let v = top_of(&l, &snap(st.clone()));
+        assert_eq!(v.rows[0].label, "● Boost");
+        assert_eq!(v.rows[0].value, "1:23 · 4 812 rows");
+        assert_eq!(v.hit(v.start), Some(Hit::Row(find(&v, "Mark"))));
+        assert!(v.rows.iter().any(|r| r.act == Act::Log(LogAct::Stop)));
+        assert!(!v.rows.iter().any(|r| r.label == "Start"));
 
         st.last = st.running.take().map(|mut r| {
             r.summary = "3 values, 10 Hz, 4 812 rows".into();
             r
         });
-        let v = root(&l, &snap(st));
+        let v = top_of(&l, &snap(st));
         assert_eq!(
-            v.rows[find(&v, "Last: 2026-11-08 #04")].value,
-            "3 values, 10 Hz, 4 812 rows"
+            v.rows[find(&v, "Last")].value,
+            "2026-11-08 #04 · 3 values, 10 Hz, 4 812 rows"
         );
-        let v = root(&l, &Snapshot::default());
+        let v = top_of(&l, &Snapshot::default());
         assert_eq!(v.rows[0].label, "Waiting for carpid");
     }
 
@@ -677,8 +808,9 @@ pub(crate) mod tests {
         let mut st = status();
         assert_eq!(
             l.apply(&LogAct::Add, Some(&st), &client),
-            Done::Opened(CarScreen::LogProfile)
+            Done::Opened
         );
+        assert_eq!(l.screen, LogScreen::Profile);
         // Engine is the first free name.
         let (at, p) = l.open.clone().unwrap();
         assert_eq!(

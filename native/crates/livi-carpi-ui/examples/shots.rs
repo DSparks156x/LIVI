@@ -26,8 +26,8 @@ slint::slint! {
     import "../../livi-ui/ui/fonts/Roboto-700.ttf";
     import { Theme } from "../../livi-ui/ui/theme.slint";
     import { Focus, FocusZone } from "../../livi-ui/ui/focus.slint";
-    import { CarpiView, CarpiState, CarpiLayout, CarpiKind, CarpiPill, CarpiRow, CarpiCell, CarpiSpot, CarpiPoint, CarpiTick, CarpiToast, CarpiToastView } from "../ui/carpi.slint";
-    export { Theme, Focus, FocusZone, CarpiState, CarpiLayout, CarpiKind, CarpiPill, CarpiRow, CarpiCell, CarpiSpot, CarpiPoint, CarpiTick, CarpiToast }
+    import { CarpiView, CarpiState, CarpiLayout, CarpiKind, CarpiPill, CarpiRow, CarpiCell, CarpiSpot, CarpiPoint, CarpiTick, CarpiToast, CarpiToastView, CarpiKeyboard, CarpiKey, CarpiKeyRow, CarpiWidget, CarpiLine, CarpiItem, CarpiMark, CarpiEmpty } from "../ui/carpi.slint";
+    export { Theme, Focus, FocusZone, CarpiState, CarpiLayout, CarpiKind, CarpiPill, CarpiRow, CarpiCell, CarpiSpot, CarpiPoint, CarpiTick, CarpiToast, CarpiKeyboard, CarpiKey, CarpiKeyRow, CarpiWidget, CarpiLine, CarpiItem, CarpiMark, CarpiEmpty }
 
     export component Shot inherits Window {
         width: 800px;
@@ -183,51 +183,137 @@ fn main() {
     let now = Instant::now();
     let view = |p: &Pages| p.view(PageId::Data, &client.snapshot(), now);
 
-    // The Data page, at night and by day, and with the 4×4 page.
+    // Panels, with a minute of history so graphs and peaks have something.
+    pages.set_panels(demo());
+    for i in 0..300u32 {
+        let t = i as f64 / 10.0;
+        let boost = 1013.0 + 900.0 * ((t * 0.35).sin().max(-0.4) + 0.1);
+        let spec = 1013.0 + if (t * 0.35).sin() > 0.2 { 1050.0 } else { 80.0 };
+        let vals = [
+            ("engine.boost.actual", boost),
+            ("engine.boost.specified", spec),
+            ("engine.altitude_factor", 0.98),
+            ("engine.rpm", 2400.0 + 1800.0 * (t * 0.35).sin().max(0.0)),
+            ("engine.coolant_c", 91.0),
+            ("engine.oil_temp_c", 108.0),
+            ("awd.plate_temp_c", 48.0),
+            ("power.battery_v", 14.2),
+            ("ambient.outside_temp_c", 7.5),
+            ("engine.n75_duty_pct", 71.0),
+            ("engine.load_pct", 162.0),
+            ("engine.timing_retard.cyl1_deg", -1.5),
+            ("engine.timing_retard.cyl2_deg", -4.5),
+            ("engine.timing_retard.cyl3_deg", 0.0),
+            ("engine.timing_retard.cyl4_deg", -0.8),
+            ("trans.selector", 5.0),
+            ("trans.shifting", 0.0),
+            ("vehicle.speed_kmh", 87.0),
+        ];
+        let at = now - Duration::from_millis(100 * (300 - i as u64));
+        client.snapshot().values.take(
+            vals.iter()
+                .map(|(n, v)| Reading {
+                    name: n.to_string(),
+                    value: Some(if *n == "trans.shifting" {
+                        Value::Bool(false)
+                    } else {
+                        Value::Num(*v)
+                    }),
+                    age_ms: 0,
+                })
+                .collect(),
+            at,
+        );
+        if i % 3 == 0 {
+            for k in 0..3 {
+                pages.set_shown(k);
+                let _ = pages.view(PageId::Data, &client.snapshot(), at);
+            }
+        }
+    }
+    pages.mark(3, now - Duration::from_secs(4));
+    pages.set_shown(0);
     let v = view(&pages);
-    shots.show(&v, 0, true);
-    shots.save("01-data");
-    shots.show(&v, 0, false);
-    shots.save("02-data-day");
-    pages.side(PageId::Data, &v, v.hit(0).as_ref(), 1, 0, &client);
+    shots.show(&v, v.start, true);
+    shots.save("01-panel-daily");
+    shots.show(&v, v.start, false);
+    shots.save("02-panel-daily-day");
+    pages.set_shown(1);
+    let v = view(&pages);
+    shots.show(&v, v.start, true);
+    shots.save("03-panel-boost");
+    pages.set_shown(2);
+    let v = view(&pages);
+    shots.show(&v, v.start, true);
+    shots.save("03b-panel-drive");
+
+    // The menu, then the editor with a widget focused, then the widget's settings.
+    pages.set_shown(0);
+    let v = view(&pages);
+    pages.press(PageId::Data, &v, &v.hit(v.flip).unwrap(), v.flip, &client);
+    let v = view(&pages);
+    shots.show(&v, v.start, true);
+    shots.save("04-panel-menu");
+    pages.press(PageId::Data, &v, &row(&v, "Edit panel"), 0, &client);
+    let v = view(&pages);
+    shots.show(&v, v.start, true);
+    shots.save("05-panel-edit");
+    pages.press(PageId::Data, &v, &Hit::Panel(0), v.start, &client);
     let v = view(&pages);
     shots.show(&v, 1, true);
-    shots.save("03-data-4x4");
-    pages.side(PageId::Data, &v, v.hit(1).as_ref(), -1, 1, &client);
+    shots.save("05b-widget");
+    shots.show(&v, 1, false);
+    shots.save("05c-widget-day");
+    pages.reset(PageId::Data);
 
-    // The editor: first slot focused, then a row of the page settings.
+    // Scratch: empty, then the picker.
+    pages.set_shown(99);
     let v = view(&pages);
-    let edit = Hit::Pill(v.pills.len() - 1);
-    pages.press(PageId::Data, &v, &edit, 0, &client);
-    let v = view(&pages);
-    shots.show(&v, v.start + 4, true);
-    shots.save("04-edit");
-    shots.show(&v, v.start + 4, false);
-    shots.save("05-edit-day");
-    let first_row = (v.pills.len() + v.cells.len()) as i32;
-    shots.show(&v, first_row + 1, true);
-    shots.save("05b-edit-page-rows");
-
-    // The picker: level 1, then Engine.
-    pages.press(PageId::Data, &v, &Hit::Cell(4), v.start + 4, &client);
-    let v = view(&pages);
-    shots.show(&v, 0, true);
-    shots.save("06a-picker-top");
     shots.show(&v, v.start, true);
-    shots.save("06-picker");
+    shots.save("06-scratch");
+    pages.press(PageId::Data, &v, &v.hit(v.flip).unwrap(), v.flip, &client);
+    let v = view(&pages);
+    shots.show(&v, v.start, true);
+    shots.save("07-picker");
     pages.press(PageId::Data, &v, &row(&v, "Engine"), v.start, &client);
     let v = view(&pages);
     shots.show(&v, v.start, true);
-    shots.save("07-picker-engine");
-    shots.show(&v, v.start, false);
-    shots.save("08-picker-engine-day");
+    shots.save("08-picker-engine");
+    pages.back(PageId::Data);
+    let v = view(&pages);
+    pages.press(PageId::Data, &v, &row(&v, "Module groups"), 0, &client);
+    let v = view(&pages);
+    shots.show(&v, 0, true);
+    shots.save("08b-module-groups");
+    pages.press(PageId::Data, &v, &row(&v, "01  Engine"), 0, &client);
+    {
+        let mut s = client.snapshot();
+        s.diag.groups.insert(
+            (1, 1),
+            ["840 /min", "92 °C", "1.6 %", "6 °KW"]
+                .iter()
+                .map(|t| {
+                    let (v, u) = t.split_once(' ').unwrap();
+                    carpi_proto::GroupField {
+                        value: v.parse().ok(),
+                        text: v.into(),
+                        unit: u.into(),
+                    }
+                })
+                .collect(),
+        );
+    }
+    let v = view(&pages);
+    shots.show(&v, v.start, true);
+    shots.save("08c-module-group");
     pages.reset(PageId::Data);
+    pages.set_shown(0);
 
     // A toast over the Data page.
     let v = view(&pages);
     shots.show(&v, -1, true);
     let t = shots.ui.global::<CarpiToast>();
-    t.set_text("Capture 2026-11-08 #03".into());
+    t.set_text("Debug logs 2026-11-08 #03".into());
     t.set_level(match ToastLevel::Info {
         ToastLevel::Info => 0,
         ToastLevel::Warn => 1,
@@ -239,17 +325,60 @@ fn main() {
     t.set_shown(false);
     shots.settle();
 
-    // Diagnostics. The Car Integration tab is drawn by livi-carpi-shots.
-    let v = pages.view(PageId::Diagnostics, &client.snapshot(), now);
-    shots.show(&v, 1, true);
-    shots.save("12-diagnostics");
-
-    // Logging: idle with a last run, running, a profile, its channels, a channel's picker.
-    client.snapshot().datalog = Some(datalog());
-    pages.open(PageId::Car, "logging");
-    let v = pages.view(PageId::Car, &client.snapshot(), now);
+    // Faults. The Car Integration tab is drawn by livi-carpi-shots.
+    pages.open(PageId::Data, "faults");
+    {
+        use carpi_proto::{DiagAction, Dtc, JobEvent};
+        let mut s = client.snapshot();
+        s.diag.started(9, DiagAction::Scan);
+        s.diag.event(
+            9,
+            JobEvent::Dtcs {
+                module: 1,
+                dtcs: vec![Dtc { code: 16684, status: 0x23 }, Dtc { code: 17965, status: 0x24 }],
+            },
+        );
+        s.diag.event(9, JobEvent::Dtcs { module: 3, dtcs: vec![] });
+        s.diag.event(
+            9,
+            JobEvent::Stage {
+                stage: "failed".into(),
+                message: "46 Central convenience".into(),
+            },
+        );
+        s.diag.event(
+            9,
+            JobEvent::Stage {
+                stage: "module".into(),
+                message: "08 Auto HVAC".into(),
+            },
+        );
+        s.diag.identity.insert(
+            1,
+            livi_carpi_ui::diag::Identity {
+                part_no: Some("8P0907115H".into()),
+                component: Some("2.0l R4/4V TFSI".into()),
+                sw_version: Some("0040".into()),
+                coding: Some("0403010A1C0700".into()),
+                workshop: None,
+            },
+        );
+    }
+    let v = view(&pages);
+    shots.show(&v, 3, true);
+    shots.save("12-faults");
+    pages.press(PageId::Data, &v, &row(&v, "01  Engine"), 3, &client);
+    let v = view(&pages);
     shots.show(&v, v.start, true);
-    shots.save("14-logging");
+    shots.save("13-fault-module");
+    pages.reset(PageId::Data);
+
+    // Logs: idle with a last run, running, profiles, a profile, its channels, a picker.
+    client.snapshot().datalog = Some(datalog());
+    pages.open(PageId::Data, "logs");
+    let v = view(&pages);
+    shots.show(&v, v.start, true);
+    shots.save("14-logs");
     {
         let mut s = client.snapshot();
         let st = s.datalog.as_mut().unwrap();
@@ -260,23 +389,95 @@ fn main() {
         r.summary.clear();
         st.running = Some(r);
     }
-    let v = pages.view(PageId::Car, &client.snapshot(), now);
+    let v = view(&pages);
     shots.show(&v, v.start, false);
-    shots.save("15-logging-running");
+    shots.save("15-logs-running");
+    let profiles = row(&v, "Profiles");
+    pages.press(PageId::Data, &v, &profiles, 0, &client);
+    let v = view(&pages);
+    shots.show(&v, 0, true);
+    shots.save("16-log-profiles");
     let boost = row(&v, "Boost");
-    pages.press(PageId::Car, &v, &boost, 0, &client);
-    let v = pages.view(PageId::Car, &client.snapshot(), now);
+    pages.press(PageId::Data, &v, &boost, 0, &client);
+    let v = view(&pages);
     shots.show(&v, 1, true);
-    shots.save("16-log-profile");
+    shots.save("16b-log-profile");
     let ch = row(&v, "Channels");
-    pages.press(PageId::Car, &v, &ch, 2, &client);
-    let v = pages.view(PageId::Car, &client.snapshot(), now);
+    pages.press(PageId::Data, &v, &ch, 2, &client);
+    let v = view(&pages);
     shots.show(&v, 1, true);
     shots.save("17-log-channels");
-    pages.press(PageId::Car, &v, &Hit::Row(1), 1, &client);
-    let v = pages.view(PageId::Car, &client.snapshot(), now);
+    pages.press(PageId::Data, &v, &Hit::Row(1), 1, &client);
+    let v = view(&pages);
     shots.show(&v, v.start, true);
     shots.save("18-log-channel-picker");
+}
+
+/// Panels to show off every widget.
+fn demo() -> livi_carpi_ui::panels::Panels {
+    use livi_carpi_ui::panels::{Grid, Panel, Panels, Peak, Style, Widget};
+    let mut boost = Widget::new(0, 0, Style::Gauge, &["engine.boost.actual"]).size(2, 3);
+    boost.opts.relative = true;
+    boost.opts.unit = Some("bar".into());
+    boost.opts.peak = Peak::Hold;
+    let mut graph = Widget::new(
+        0,
+        0,
+        Style::Graph,
+        &["engine.boost.actual", "engine.boost.specified"],
+    )
+    .size(3, 2);
+    graph.opts.relative = true;
+    graph.opts.unit = Some("bar".into());
+    let mut pair = Widget::new(0, 1, Style::Pair, &["engine.boost.actual", "engine.boost.specified"]);
+    pair.opts.relative = true;
+    pair.opts.unit = Some("bar".into());
+    Panels {
+        panels: vec![
+            Panel::new(
+                "Daily",
+                Grid::G4x3,
+                vec![
+                    boost,
+                    Widget::new(2, 0, Style::Bar, &["engine.coolant_c"]).size(2, 1),
+                    Widget::new(2, 1, Style::Bar, &["engine.oil_temp_c"]).size(2, 1),
+                    Widget::new(2, 2, Style::Number, &["power.battery_v"]),
+                    Widget::new(3, 2, Style::Number, &["vehicle.speed_kmh"]),
+                ],
+            ),
+            Panel::new(
+                "Boost",
+                Grid::G3x3,
+                vec![
+                    graph,
+                    Widget::new(0, 2, Style::Number, &["engine.n75_duty_pct"]),
+                    Widget::new(1, 2, Style::Number, &["engine.load_pct"]),
+                    Widget::new(
+                        2,
+                        2,
+                        Style::Set,
+                        &[
+                            "engine.timing_retard.cyl1_deg",
+                            "engine.timing_retard.cyl2_deg",
+                            "engine.timing_retard.cyl3_deg",
+                            "engine.timing_retard.cyl4_deg",
+                        ],
+                    ),
+                ],
+            ),
+            Panel::new(
+                "Drive",
+                Grid::G3x2,
+                vec![
+                    Widget::new(0, 0, Style::Selector, &["trans.selector"]).size(2, 1),
+                    Widget::new(2, 0, Style::Gauge, &["engine.rpm"]).size(1, 2),
+                    pair,
+                    Widget::new(1, 1, Style::Number, &["vehicle.speed_kmh"]),
+                ],
+            ),
+        ],
+        shown: 0,
+    }
 }
 
 /// Two profiles and a run that ended, as carpid reports them.
@@ -287,6 +488,7 @@ fn datalog() -> carpi_proto::DatalogStatus {
             name: name.into(),
             values: values.iter().map(|v| v.to_string()).collect(),
             rate_hz,
+            labels: Vec::new(),
         },
         load,
     };
@@ -341,6 +543,7 @@ fn datalog() -> carpi_proto::DatalogStatus {
             dir: "/home/pi/logs/2026-11-08/03".into(),
             summary: "8 values, 10 Hz, 4 812 rows".into(),
             error: None,
+            marks: 0,
         }),
     }
 }

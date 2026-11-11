@@ -12,16 +12,22 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::defs::PRESETS;
+use crate::panels::{Grid, Panel, Panels, Style, Widget};
 use crate::slots::{Board, SlotPage, fit};
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Saved {
-    /// The Data page's pages; `None` until edited.
+    /// The Data page's panels; `None` until edited.
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub panels: Option<Panels>,
+    /// The first Data page's tiles, read once into panels.
+    #[serde(skip_serializing)]
     pub data: Option<Board>,
     /// Last values picked, newest first.
     pub recent: Vec<String>,
+    /// Units carpid gave module-group values (`diag.01.103.2`), so widgets show them at once.
+    pub units: BTreeMap<String, String>,
     /// The on-screen keyboard: knob, touch or off, and its letters.
     pub keyboard: crate::keyboard::Prefs,
     /// The Setup screen was hidden ("Done, hide this").
@@ -34,6 +40,44 @@ pub struct Saved {
 }
 
 impl Saved {
+    /// The Data page's panels: saved, or the old pages as panels of numbers, then Scratch.
+    pub fn panels(&self) -> Panels {
+        if let Some(p) = &self.panels {
+            return p.clone().fixed();
+        }
+        if self.data.is_none() && self.groups.is_empty() {
+            return Panels::default().fixed();
+        }
+        let board = self.board();
+        let panels = board
+            .pages
+            .iter()
+            .map(|pg| {
+                let values: Vec<&String> = pg.shown().iter().flatten().collect();
+                let grid = Grid::fit(values.len());
+                let (cols, _) = grid.size();
+                let widgets = values
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| {
+                        Widget::new(
+                            (i % cols as usize) as u8,
+                            (i / cols as usize) as u8,
+                            Style::Number,
+                            &[v.as_str()],
+                        )
+                    })
+                    .collect();
+                Panel::new(&pg.name, grid, widgets)
+            })
+            .collect();
+        Panels {
+            panels,
+            shown: board.shown,
+        }
+        .fixed()
+    }
+
     /// The Data page's pages: saved, from the first version's groups, or today's groups.
     pub fn board(&self) -> Board {
         if let Some(b) = &self.data {
@@ -106,16 +150,24 @@ mod tests {
         assert_eq!(b.pages[0].slots[1].as_deref(), Some("engine.boost.actual"));
         assert_eq!(b.pages[2].slots[0].as_deref(), Some("body.door_fl_open"));
         assert_eq!(Saved::default().board(), Board::data());
+        // The old pages become panels of numbers, Scratch last.
+        let p = s.panels();
+        assert_eq!(p.shown, 2);
+        assert_eq!(p.panels[0].widgets[1].values, ["engine.boost.actual"]);
+        assert_eq!(p.panels[0].grid, Grid::G2x1);
+        assert!(p.panels.last().unwrap().scratch);
     }
 
     #[test]
     fn round_trips_and_survives_a_broken_file() {
         let dir = std::env::temp_dir().join(format!("carpi-ui-{}", std::process::id()));
         let file = dir.join("LIVI").join("carpi-ui.json");
-        let mut b = Board::data();
-        b.shown = 3;
+        let b = Panels {
+            shown: 3,
+            ..Panels::default()
+        };
         let s = Saved {
-            data: Some(b),
+            panels: Some(b),
             recent: vec!["engine.rpm".into()],
             ..Saved::default()
         };

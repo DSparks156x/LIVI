@@ -16,10 +16,10 @@ import { Dashboard, DashState, GaugeData, CapData, TrailData, LabelData, LaneDat
 import { LevelOverlay, PhoneOverlay, OverlayState } from "overlays.slint";
 import { MaskData } from "mask.slint";
 import { TouchCalibration, TouchCalibrationState } from "touch_calibration.slint";
-import { CarpiView, CarpiState, CarpiLayout, CarpiKind, CarpiPill, CarpiRow, CarpiCell, CarpiSpot, CarpiPoint, CarpiTick, CarpiToast, CarpiToastView, CarpiKeyboard, CarpiKeyboardView, CarpiKey, CarpiKeyRow } from "../../livi-carpi-ui/ui/carpi.slint";
+import { CarpiView, CarpiState, CarpiLayout, CarpiKind, CarpiPill, CarpiRow, CarpiCell, CarpiSpot, CarpiPoint, CarpiTick, CarpiToast, CarpiToastView, CarpiKeyboard, CarpiKeyboardView, CarpiKey, CarpiKeyRow, CarpiWidget, CarpiLine, CarpiItem, CarpiMark, CarpiEmpty } from "../../livi-carpi-ui/ui/carpi.slint";
 
 export { Theme, Focus, FocusZone, Page, PhoneState, TabData, TouchPhase, SettingsState, ScreenKind, RowData, RowKind, PickData, KnobData, MediaSource, MediaText, Press, DabState, StationData, DashState, GaugeData, CapData, TrailData, LabelData, LaneData, LaneArrowData, LampData, OverlayState, MaskData, TouchCalibrationState }
-export { CarpiState, CarpiLayout, CarpiKind, CarpiPill, CarpiRow, CarpiCell, CarpiSpot, CarpiPoint, CarpiTick, CarpiToast, CarpiKeyboard, CarpiKey, CarpiKeyRow }
+export { CarpiState, CarpiLayout, CarpiKind, CarpiPill, CarpiRow, CarpiCell, CarpiSpot, CarpiPoint, CarpiTick, CarpiToast, CarpiKeyboard, CarpiKey, CarpiKeyRow, CarpiWidget, CarpiLine, CarpiItem, CarpiMark, CarpiEmpty }
 
 export component AppWindow inherits Window {
     in-out property <Page> page: Page.media;
@@ -188,7 +188,7 @@ export component AppWindow inherits Window {
                 width: parent.width;
                 height: parent.height;
             }
-            if root.page == Page.carpi-data || root.page == Page.carpi-diagnostics || (root.page == Page.settings && CarpiState.over-settings): CarpiView {
+            if root.page == Page.carpi-data || (root.page == Page.settings && CarpiState.over-settings): CarpiView {
                 width: parent.width;
                 height: parent.height;
             }

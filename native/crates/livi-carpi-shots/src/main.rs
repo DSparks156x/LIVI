@@ -31,8 +31,8 @@ slint::slint! {
     import { Focus, FocusZone } from "../../livi-ui/ui/focus.slint";
     import { SettingsView, SettingsState, RowData, RowKind, ScreenKind, PickData, KnobData } from "../../livi-ui/ui/settings/view.slint";
     import { ToolData } from "../../livi-ui/ui/settings/row.slint";
-    import { CarpiView, CarpiState, CarpiLayout, CarpiKind, CarpiPill, CarpiRow, CarpiCell, CarpiSpot, CarpiPoint, CarpiTick, CarpiKeyboard, CarpiKeyboardView, CarpiKey, CarpiKeyRow } from "../../livi-carpi-ui/ui/carpi.slint";
-    export { Theme, Ui, Focus, FocusZone, SettingsState, RowData, RowKind, ScreenKind, PickData, KnobData, ToolData, CarpiState, CarpiLayout, CarpiKind, CarpiPill, CarpiRow, CarpiCell, CarpiSpot, CarpiPoint, CarpiTick, CarpiKeyboard, CarpiKey, CarpiKeyRow }
+    import { CarpiView, CarpiState, CarpiLayout, CarpiKind, CarpiPill, CarpiRow, CarpiCell, CarpiSpot, CarpiPoint, CarpiTick, CarpiKeyboard, CarpiKeyboardView, CarpiKey, CarpiKeyRow, CarpiWidget, CarpiLine, CarpiItem, CarpiMark, CarpiEmpty } from "../../livi-carpi-ui/ui/carpi.slint";
+    export { Theme, Ui, Focus, FocusZone, SettingsState, RowData, RowKind, ScreenKind, PickData, KnobData, ToolData, CarpiState, CarpiLayout, CarpiKind, CarpiPill, CarpiRow, CarpiCell, CarpiSpot, CarpiPoint, CarpiTick, CarpiKeyboard, CarpiKey, CarpiKeyRow, CarpiWidget, CarpiLine, CarpiItem, CarpiMark, CarpiEmpty }
 
     export component Shot inherits Window {
         width: 800px;
@@ -501,7 +501,6 @@ fn main() {
         ("key", S::Key(3)),
         ("binding", S::Binding(3, 0)),
         ("logs", S::Logs),
-        ("logging", S::Logging),
         ("power", S::Power),
         ("zones", S::Zones),
         ("zone", S::Zone(1)),

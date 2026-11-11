@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Drew Sparks
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! carpid's pages in LIVI: Data, Diagnostics and the Car Integration tab in LIVI's Settings
-//! (docs/PAGES.md 5a), and carpid's toasts.
+//! carpid's pages in LIVI: Data (panels, logs, faults; docs/PAGES.md 5c) and the Car
+//! Integration tab in LIVI's Settings (docs/PAGES.md 5a), and carpid's toasts.
 //!
 //! The pages are Slint (`ui/carpi.slint`), drawn with LIVI's own rows, header and theme, and
 //! focused the way LIVI's settings are. This crate holds everything that isn't Slint glue: its own
@@ -21,8 +21,8 @@
 //! LIVI_UI_SIZE=800x480 LIVI_UI_PAGE=carpi/data LIVI_UI_SNAPSHOT=/tmp/data.png LIVI
 //! ```
 //!
-//! `LIVI_UI_PAGE` takes `carpi/data` or `carpi/diagnostics`. The tab's screens are drawn by
-//! `livi-carpi-shots`.
+//! `LIVI_UI_PAGE` takes `carpi/data`, `carpi/data/logs` or `carpi/data/faults`. The tab's
+//! screens are drawn by `livi-carpi-shots`.
 
 pub mod catalog;
 pub mod client;
@@ -35,6 +35,7 @@ pub mod keys;
 pub mod light;
 pub mod logging;
 pub mod pages;
+pub mod panels;
 pub mod settings;
 pub mod slots;
 pub mod values;
@@ -47,19 +48,18 @@ pub use pages::{Moved, Pages};
 /// One of our pages. `Car` is the Car Integration tab, shown inside Settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PageId {
+    /// Panels, Logs and Faults.
     Data,
-    Diagnostics,
     Car,
 }
 
 impl PageId {
     /// In tab order.
-    pub const ALL: [PageId; 3] = [PageId::Data, PageId::Diagnostics, PageId::Car];
+    pub const ALL: [PageId; 2] = [PageId::Data, PageId::Car];
 
     pub fn name(self) -> &'static str {
         match self {
             PageId::Data => "data",
-            PageId::Diagnostics => "diagnostics",
             PageId::Car => "car",
         }
     }
@@ -68,7 +68,6 @@ impl PageId {
     pub fn path(self) -> &'static str {
         match self {
             PageId::Data => "/carpi/data",
-            PageId::Diagnostics => "/carpi/diagnostics",
             PageId::Car => "/carpi/car",
         }
     }
@@ -77,7 +76,6 @@ impl PageId {
     pub fn icon(self) -> &'static str {
         match self {
             PageId::Data => "SpeedOutlined",
-            PageId::Diagnostics => "BugReportOutlined",
             PageId::Car => "DirectionsCarOutlined",
         }
     }
@@ -103,10 +101,14 @@ pub fn focus(ui_path: &str) -> Option<String> {
     PageId::from_name(name).map(|p| format!("page:{}", p.name()))
 }
 
-/// LIVI's UI path for one of our pages by name, as carpid's `OpenPage` names them.
+/// LIVI's UI path for one of our pages by name, as carpid's `OpenPage` names them: a page, `light`,
+/// or a Data tab (`logs`, `faults`).
 pub fn page_path(name: &str) -> Option<String> {
     if name == "light" {
         return Some(LIGHT_PATH.into());
+    }
+    if let Some(t) = view::DataTab::ALL.into_iter().find(|t| t.name() == name) {
+        return Some(format!("{}/{}", PageId::Data.path(), t.name()));
     }
     PageId::from_name(name).map(|p| p.path().to_string())
 }
@@ -147,11 +149,13 @@ mod tests {
         assert_eq!(focus("/carpi/car/settings"), Some("page:car".into()));
         assert_eq!(focus("/media"), None);
         assert_eq!(focus("/carpi/nope"), None);
-        assert_eq!(PageId::from_name("diagnostics"), Some(PageId::Diagnostics));
+        assert_eq!(PageId::from_name("diagnostics"), None);
         assert_eq!(page_path("car").as_deref(), Some("/carpi/car"));
         assert_eq!(page_path("light").as_deref(), Some(LIGHT_PATH));
         assert_eq!(focus(LIGHT_PATH), Some("page:light".into()));
         assert_eq!(page_path("nope"), None);
+        assert_eq!(page_path("faults").as_deref(), Some("/carpi/data/faults"));
+        assert_eq!(focus("/carpi/data/faults"), Some("page:data".into()));
     }
 
     #[test]

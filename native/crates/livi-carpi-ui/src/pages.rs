@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Drew Sparks
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The three pages: what each shows, and what pushing and the D-pad do (docs/PAGES.md 1).
+//! Our pages: what each shows, and what pushing and the D-pad do (docs/PAGES.md 1).
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -12,12 +12,12 @@ use crate::PageId;
 use crate::client::{Client, Snapshot};
 use crate::config::{self, Saved};
 use crate::defs::{DEFS, hidden};
-use crate::diag::{self, NO_POLL};
 use crate::light;
-use crate::logging::{self, Logging};
-use crate::slots::{self, Board, Editor, Picker, SlotAct, polled, reading, tile};
+use crate::logging::Logging;
+use crate::panels::{Memory, PanelScreen, Panels};
+use crate::slots::{self, Picker, SlotAct, reading};
 use crate::values::{Store, show};
-use crate::view::{Act, CarScreen, Hit, Layout, Row, RowKind, View};
+use crate::view::{Act, CarScreen, DataTab, Hit, Layout, Row, RowKind, View};
 
 /// The light model's curve, JSON for the plot: no use as a reading.
 const CURVE: &str = "light.curve";
@@ -25,6 +25,7 @@ const CURVE: &str = "light.curve";
 /// The native Settings slot that owns the bundled update screens.
 pub const UPDATES_PATH: &str = "/settings/system/softwareUpdate";
 
+mod data;
 mod tab;
 
 use tab::PIN_MAX;
@@ -44,10 +45,25 @@ pub enum Moved {
 pub struct Pages {
     saved: Saved,
     file: Option<PathBuf>,
-    /// The Data page's pages.
-    board: Board,
-    /// The Data page's slot editor, while editing.
-    editor: Option<Editor>,
+    /// The Data page's panels.
+    panels: Panels,
+    /// The Panels tab's screen.
+    panel: PanelScreen,
+    /// The Panels tab's value picker.
+    pick: Picker,
+    /// Graph history and peaks of the shown panel.
+    mem: std::cell::RefCell<Memory>,
+    /// Removing a widget or panel waits for a second push.
+    dropping: bool,
+    /// Clear all waits for a second push.
+    clear_all: bool,
+    /// Modules Clear all has still to clear (TP2), one job at a time.
+    clearing: Vec<u8>,
+    /// The module group last asked for, so it's asked once.
+    asked: Option<(u8, u8)>,
+    /// The Data page's tab.
+    tab: DataTab,
+    /// The module open on the Faults tab.
     module: Option<usize>,
     car: CarScreen,
     /// The first bundled screen of the current native Settings route.
@@ -61,7 +77,7 @@ pub struct Pages {
     confirm: Option<u8>,
     /// The picker of a cluster display reading.
     reading: Picker,
-    /// The Logging screens.
+    /// The Logs tab.
     log: Logging,
     /// The on-screen keyboard while it's up, and what it's typing.
     typing: Option<(crate::keyboard::Keyboard, crate::view::TypeFor)>,
@@ -91,11 +107,21 @@ impl Pages {
 
     /// `file` is where changes go; `None` keeps them in memory.
     pub fn new(saved: Saved, file: Option<PathBuf>) -> Self {
+        for (name, unit) in &saved.units {
+            crate::defs::learn_unit(name, unit);
+        }
         Self {
-            board: saved.board(),
+            panels: saved.panels(),
             saved,
             file,
-            editor: None,
+            panel: PanelScreen::View,
+            pick: Picker::default(),
+            mem: Default::default(),
+            dropping: false,
+            clear_all: false,
+            clearing: Vec::new(),
+            asked: None,
+            tab: DataTab::Panels,
             module: None,
             car: CarScreen::Root,
             car_root: CarScreen::Root,
@@ -331,8 +357,23 @@ impl Pages {
         }
     }
 
-    pub fn board(&self) -> &Board {
-        &self.board
+    pub fn panels(&self) -> &Panels {
+        &self.panels
+    }
+
+    /// Shows panel `i` (the last when past the end).
+    pub fn set_shown(&mut self, i: usize) {
+        self.panels.shown = i.min(self.panels.panels.len() - 1);
+    }
+
+    /// A log mark, for graphs.
+    pub fn mark(&mut self, n: u32, at: Instant) {
+        self.mem.get_mut().marks.push((n, at));
+    }
+
+    /// Replaces the panels, unsaved (for pictures and tests).
+    pub fn set_panels(&mut self, panels: Panels) {
+        self.panels = panels.fixed();
     }
 
     pub fn recent(&self) -> &[String] {
@@ -341,20 +382,12 @@ impl Pages {
 
     pub fn depth(&self, page: PageId) -> usize {
         match page {
-            PageId::Data => match &self.editor {
-                None => 0,
-                Some(Editor { picker: None, .. }) => 1,
-                Some(Editor {
-                    picker: Some(p), ..
-                }) => 2 + usize::from(p.cat.is_some()),
-            },
-            PageId::Diagnostics => usize::from(self.module.is_some()),
+            PageId::Data => self.data_depth(),
             PageId::Car => {
-                let picking = matches!(self.car, CarScreen::CellValue(..) | CarScreen::CellAdd(_))
-                    && self.reading.cat.is_some();
-                let channel = match (&self.log.editor.picker, self.car) {
-                    (Some(p), CarScreen::LogChannels) => 1 + usize::from(p.cat.is_some()),
-                    _ => 0,
+                let picking = if matches!(self.car, CarScreen::CellValue(..) | CarScreen::CellAdd(_)) {
+                    self.reading.level()
+                } else {
+                    0
                 };
                 // Under a screen Setup opened, Setup and the first screen are above it.
                 let base = match self.via_setup {
@@ -367,39 +400,21 @@ impl Pages {
                     }
                     _ => self.car.depth(),
                 };
-                base.saturating_sub(self.car_root.depth()) + usize::from(picking) + channel
+                base.saturating_sub(self.car_root.depth()) + picking
             }
         }
     }
 
-    /// Diag catalog names to keep subscribed, so carpid polls them: the shown module's on the
-    /// diagnostics page, the shown page's on the Data page.
+    /// Diag catalog names to keep subscribed, so carpid polls them: the shown panel's.
     pub fn watching(&self, page: PageId, snap: &Snapshot) -> Vec<String> {
+        let _ = snap;
         match page {
-            PageId::Data => self
-                .board
-                .page()
-                .shown()
-                .iter()
-                .flatten()
-                .filter(|n| polled(n))
-                .cloned()
-                .collect(),
-            PageId::Diagnostics => {
-                let Some(i) = self.module else {
-                    return Vec::new();
-                };
-                snap.diag
-                    .modules()
-                    .get(i)
-                    .map(|m| {
-                        diag::measured(m.module.tp2)
-                            .map(|v| v.0.to_string())
-                            .collect()
-                    })
-                    .unwrap_or_default()
+            PageId::Data if self.tab == DataTab::Panels => {
+                let mut out = self.panel_watch();
+                out.extend(self.picker_watch());
+                out
             }
-            PageId::Car => Vec::new(),
+            _ => self.picker_watch(),
         }
     }
 
@@ -412,18 +427,22 @@ impl Pages {
         }
     }
 
-    /// The page's first screen, or the screen `rest` names below it (`light` or `logging` on
-    /// the Car page).
+    /// The page's first screen, or the screen `rest` names below it: `light` on the Car page,
+    /// a tab (`logs`, `faults`) on the Data page.
     pub fn open(&mut self, page: PageId, rest: &str) {
         self.reset(page);
-        let screen = match rest.split('/').next() {
-            Some("light") => CarScreen::Lighting,
-            Some("logging") => CarScreen::Logging,
-            _ => return,
-        };
-        if page == PageId::Car {
-            self.car = screen;
-            self.trail = vec![0; screen.depth()];
+        let first = rest.split('/').next().unwrap_or("");
+        match page {
+            PageId::Data => {
+                if let Some(t) = DataTab::ALL.into_iter().find(|t| t.name() == first) {
+                    self.tab = t;
+                }
+            }
+            PageId::Car if first == "light" => {
+                self.car = CarScreen::Lighting;
+                self.trail = vec![0; CarScreen::Lighting.depth()];
+            }
+            PageId::Car => {}
         }
     }
 
@@ -457,16 +476,18 @@ impl Pages {
     /// Back to the page's first screen.
     pub fn reset(&mut self, page: PageId) {
         match page {
-            PageId::Data => self.editor = None,
-            PageId::Diagnostics => {
+            PageId::Data => {
+                self.panel = PanelScreen::View;
+                self.pick = Picker::default();
+                self.tab = DataTab::Panels;
                 self.module = None;
                 self.confirm = None;
+                self.log.reset();
             }
             PageId::Car => {
                 self.car = CarScreen::Root;
                 self.car_root = CarScreen::Root;
                 self.reading = Picker::default();
-                self.log.reset();
                 self.pin.clear();
                 self.removing = false;
                 self.via_setup = None;
@@ -481,25 +502,11 @@ impl Pages {
     /// One screen up. `None` on a page's first screen, where back leaves the page.
     pub fn back(&mut self, page: PageId) -> Option<Moved> {
         match page {
-            PageId::Data => {
-                let e = self.editor.as_mut()?;
-                if !e.back() {
-                    self.editor = None;
-                }
-                Some(Moved::Opened)
-            }
-            PageId::Diagnostics => {
-                self.module.take()?;
-                self.confirm = None;
-                Some(Moved::Closed(self.trail.pop().unwrap_or(0)))
-            }
+            PageId::Data => self.data_back(),
             PageId::Car => {
                 if matches!(self.car, CarScreen::CellValue(..) | CarScreen::CellAdd(_))
                     && self.reading.back()
                 {
-                    return Some(Moved::Opened);
-                }
-                if self.car == CarScreen::LogChannels && self.log.editor.back() {
                     return Some(Moved::Opened);
                 }
                 let up = self.car_parent()?;
@@ -510,11 +517,7 @@ impl Pages {
                 self.moving = false;
                 self.flashing = None;
                 self.flashing_sector = None;
-                self.log.removing = false;
                 self.removing = false;
-                if self.car == CarScreen::Logging {
-                    self.log.open = None;
-                }
                 self.reading = Picker::default();
                 if self.car != CarScreen::Pin {
                     self.pin.clear();
@@ -566,13 +569,15 @@ impl Pages {
         if let Some(moved) = self.tab_run(&act, client) {
             return moved;
         }
+        if page == PageId::Data
+            && let Some(moved) = self.data_run(&act, focus, client)
+        {
+            return moved;
+        }
         let opened = match act {
             Act::None => false,
             Act::Slots(a) => return self.slots(page, &a, client),
-            Act::Edit => {
-                self.editor = Some(Editor::default());
-                return Moved::Opened;
-            }
+            Act::Edit => false,
             Act::Module(i) => {
                 self.module = Some(i);
                 true
@@ -580,21 +585,7 @@ impl Pages {
             Act::Car(screen) => {
                 self.car = screen;
                 self.reading = Picker::default();
-                if screen == CarScreen::LogChannels {
-                    self.log.editor = Editor::default();
-                }
                 screen != CarScreen::Root
-            }
-            Act::Log(a) => {
-                let st = client.snapshot().datalog.clone();
-                match self.log.apply(&a, st.as_ref(), client) {
-                    logging::Done::Stay => false,
-                    logging::Done::Opened(screen) => {
-                        self.car = screen;
-                        true
-                    }
-                    logging::Done::Back => return self.back(page).unwrap_or(Moved::Stay),
-                }
             }
             Act::Capture => {
                 client.capture();
@@ -629,12 +620,13 @@ impl Pages {
                 self.confirm = Some(module);
                 false
             }
-            Act::ClearCancel => false,
+            Act::ClearCancel | Act::ClearAll => false,
             Act::Light(action) => {
                 client.light(action);
                 false
             }
             Act::Advanced => false,
+            Act::Log(_) | Act::Tab(_) | Act::LogPanel | Act::Panel(_) => false,
             Act::Dis(_)
             | Act::Zone(_)
             | Act::Update
@@ -667,7 +659,7 @@ impl Pages {
 
     /// The Data page's tabs and editor, and the cluster display's reading picker.
     fn slots(&mut self, page: PageId, a: &SlotAct, client: &Client) -> Moved {
-        if page == PageId::Car && self.car == CarScreen::LogChannels {
+        if page == PageId::Data && self.tab == DataTab::Logs {
             let before = self.saved.recent.clone();
             let (focus, _) = self.log.slots(a, &mut self.saved.recent, client);
             if self.saved.recent != before {
@@ -682,37 +674,11 @@ impl Pages {
         if page == PageId::Car {
             return self.cell_pick(a, client);
         }
-        let Some(e) = &mut self.editor else {
-            // The plain page: tabs and the D-pad.
-            let n = self.board.pages.len();
-            let moved = match a {
-                SlotAct::Page(i) => {
-                    self.board.shown = (*i).min(n - 1);
-                    Moved::Stay
-                }
-                SlotAct::PageStep(d) => {
-                    self.board.shown =
-                        (self.board.shown as i32 + d).clamp(0, n as i32 - 1) as usize;
-                    Moved::Focus(self.board.shown as i32)
-                }
-                _ => return Moved::Stay,
-            };
-            self.store();
-            return moved;
-        };
-        let (focus, save) = e.apply(a, &mut self.board, &mut self.saved.recent, &slots::DATA);
-        if save {
-            self.store();
-        }
-        match focus {
-            slots::Focus::Start => Moved::Opened,
-            slots::Focus::Stay => Moved::Stay,
-            slots::Focus::At(i) => Moved::Focus(i),
-        }
+        self.panel_slots(a)
     }
 
     fn store(&mut self) {
-        self.saved.data = Some(self.board.clone());
+        self.saved.panels = Some(self.panels.clone());
         let Some(file) = &self.file else { return };
         if let Err(e) = config::save(file, &self.saved) {
             eprintln!("[carpi-ui] can't save the pages: {e}");
@@ -721,59 +687,11 @@ impl Pages {
 
     pub fn view(&self, page: PageId, snap: &Snapshot, now: Instant) -> View {
         match page {
-            PageId::Data => match &self.editor {
-                Some(e) => {
-                    let mut v = e.view(&self.board, &self.saved.recent, snap, now, &slots::DATA);
-                    if !snap.connected {
-                        v.note = problem(snap);
-                    }
-                    v
-                }
-                None => self.grid(snap, now),
-            },
-            PageId::Diagnostics => match self.module {
-                Some(i) => module(snap, now, i, self.confirm),
-                None => modules(snap),
-            },
+            PageId::Data => self.data_view(snap, now),
             PageId::Car => tab::view(self, snap, now),
         }
     }
 
-    fn grid(&self, snap: &Snapshot, now: Instant) -> View {
-        let page = self.board.page();
-        let mut v = View::new(Layout::Grid, "Data", false);
-        for (i, p) in self.board.pages.iter().enumerate() {
-            v.pill(
-                p.name.clone(),
-                i == self.board.shown,
-                Act::Slots(SlotAct::Page(i)),
-            )
-            .side = Some(steps());
-        }
-        v.pill("Edit", false, Act::Edit).side = Some(steps());
-        v.side = Some(steps());
-        v.cols = slots::cols(page.size);
-        for slot in page.shown() {
-            v.cell(tile(slot.as_deref(), snap, now), false);
-        }
-        v.note = if !snap.connected {
-            problem(snap)
-        } else if page.shown().iter().all(Option::is_none) {
-            "Nothing on this page yet. Edit adds values.".into()
-        } else {
-            String::new()
-        };
-        v.start = self.board.shown as i32;
-        v.finish()
-    }
-}
-
-/// The D-pad on the Data page: the page before or after.
-fn steps() -> (Act, Act) {
-    (
-        Act::Slots(SlotAct::PageStep(-1)),
-        Act::Slots(SlotAct::PageStep(1)),
-    )
 }
 
 fn problem(snap: &Snapshot) -> String {
@@ -819,30 +737,42 @@ fn diag_note(snap: &Snapshot, module: Option<u8>) -> String {
     snap.diag.line(module).unwrap_or_default()
 }
 
-fn modules(snap: &Snapshot) -> View {
+/// The Faults tab's module list, into `v` (which has the tabs): faults first once read, then
+/// the rest in address order. Modules the install list says aren't coded are left out.
+fn modules(mut v: View, snap: &Snapshot, clear_all: bool, clearing: usize) -> View {
     let diag = &snap.diag;
-    let mut v = View::new(Layout::List, "Diagnostics", false).note(diag_note(snap, None));
-    if snap.connected && !diag.busy() {
-        let label = if diag.installed.is_some() {
-            "Scan again"
-        } else {
-            "Scan"
-        };
-        v.pill(label, false, Act::Diag(DiagAction::InstallList));
+    v.note = diag_note(snap, None);
+    let free = snap.connected && !diag.busy();
+    if free {
+        v.row(
+            Row::new(RowKind::Button, "Scan", "")
+                .button("Scan")
+                .act(Act::Diag(DiagAction::Scan)),
+        );
     }
-    v.section(if diag.installed.is_some() {
-        "Installed modules"
-    } else {
-        "Modules (not scanned yet)"
-    });
-    for (i, m) in diag.modules().iter().enumerate() {
+    let mut list: Vec<(usize, &crate::diag::Installed)> = Vec::new();
+    let all = diag.modules();
+    for (i, m) in all.iter().enumerate() {
+        if m.coded != Some(false) {
+            list.push((i, m));
+        }
+    }
+    let faults_of = |m: &crate::diag::Installed| diag.dtcs.get(&m.module.tp2).map_or(0, Vec::len);
+    list.sort_by_key(|(_, m)| std::cmp::Reverse(faults_of(m)));
+    for (i, m) in list {
         let faults = diag.dtcs.get(&m.module.tp2).map(Vec::len);
-        let value = match (faults, m.coded) {
-            (Some(0), _) => "OK".to_string(),
-            (Some(1), _) => "1 fault".to_string(),
-            (Some(n), _) => format!("{n} faults"),
-            (None, Some(false)) => "not coded".to_string(),
-            (None, _) => String::new(),
+        let failed = diag.failed.contains(&m.module.address);
+        let value = if diag.scanning == Some(m.module.address) {
+            "Scanning…".to_string()
+        } else if failed {
+            "No answer".to_string()
+        } else {
+            match faults {
+                Some(0) => "OK".to_string(),
+                Some(1) => "1 fault".to_string(),
+                Some(n) => format!("{n} faults"),
+                None => String::new(),
+            }
         };
         let mut row = Row::new(
             RowKind::Route,
@@ -850,7 +780,22 @@ fn modules(snap: &Snapshot) -> View {
             value,
         )
         .act(Act::Module(i));
-        row.alert = faults.is_some_and(|n| n > 0);
+        row.alert = faults.is_some_and(|n| n > 0) || failed;
+        row.dimmed = diag.scanning.is_some() && faults.is_none() && !failed;
+        v.row(row);
+    }
+    let any = diag.dtcs.values().any(|c| !c.is_empty());
+    if clearing > 0 {
+        v.row(Row::new(RowKind::Info, "Clear all", format!("{clearing} to go")).dimmed(true));
+    } else if any && free {
+        let mut row = Row::new(
+            RowKind::Button,
+            if clear_all { "Confirm clear all" } else { "Clear all" },
+            "",
+        )
+        .button("Clear")
+        .act(Act::ClearAll);
+        row.alert = clear_all;
         v.row(row);
     }
     v.finish()
@@ -869,110 +814,81 @@ fn module(snap: &Snapshot, now: Instant, i: usize, confirm: Option<u8>) -> View 
     let diag = &snap.diag;
     let list = diag.modules();
     let Some(m) = list.get(i) else {
-        return View::new(Layout::List, "Diagnostics", true).finish();
+        return View::new(Layout::List, "Faults", true).finish();
     };
     let (addr, tp2) = (m.module.address, m.module.tp2);
     let note = diag_note(snap, Some(tp2));
     let mut v = View::new(Layout::List, format!("{addr:02X}  {}", m.module.name), true).note(note);
     let free = snap.connected && !diag.busy();
 
-    v.section("Fault codes");
     match diag.dtcs.get(&tp2) {
         Some(codes) if codes.is_empty() => {
-            v.row(Row::new(RowKind::Info, "No fault codes", ""));
+            v.row(Row::new(RowKind::Info, "No faults", ""));
         }
         Some(codes) => {
             for c in codes {
-                let mut row = Row::new(
-                    RowKind::Info,
-                    c.code.clone(),
-                    format!("status {:02X}", c.status),
-                );
+                let mut row = Row::new(RowKind::Info, c.code.clone(), format!("Status {:02X}", c.status));
                 row.alert = true;
                 row.mono = true;
                 v.row(row);
             }
         }
         None => {
-            v.row(Row::new(RowKind::Info, "Not read yet", "").dimmed(true));
+            v.row(job_row(
+                "Read faults",
+                "Read",
+                free,
+                Act::Diag(DiagAction::ReadDtcs { module: tp2 }),
+            ));
         }
     }
-    v.row(job_row(
-        "Read fault codes",
-        "Read",
-        free,
-        Act::Diag(DiagAction::ReadDtcs { module: tp2 }),
-    ));
-    if confirm == Some(tp2) {
-        let mut sure = job_row(
-            "Clear all of this module's codes?",
+    if diag.dtcs.get(&tp2).is_some_and(|c| !c.is_empty()) {
+        let mut row = job_row(
+            if confirm == Some(tp2) { "Confirm clear" } else { "Clear faults" },
             "Clear",
             free,
-            Act::Diag(DiagAction::ClearDtcs {
-                module: tp2,
-                confirm: true,
-            }),
-        );
-        sure.alert = true;
-        v.row(sure);
-        v.row(
-            Row::new(RowKind::Button, "Keep them", "")
-                .button("Cancel")
-                .act(Act::ClearCancel),
-        );
-    } else {
-        v.row(job_row(
-            "Clear fault codes",
-            "Clear",
-            free,
-            Act::ClearAsk(tp2),
-        ));
-    }
-
-    v.section("Measuring values");
-    let mut any = false;
-    for &(name, _, group, field) in diag::measured(tp2) {
-        any = true;
-        let mut row = value_row(name, snap, now);
-        if snap.values.get(name).is_none() {
-            row.value = if snap.connected {
-                "polling…".into()
+            if confirm == Some(tp2) {
+                Act::Diag(DiagAction::ClearDtcs {
+                    module: tp2,
+                    confirm: true,
+                })
             } else {
-                String::new()
-            };
-        }
-        row.tag = format!("{group:03}.{field}");
+                Act::ClearAsk(tp2)
+            },
+        );
+        row.alert = confirm == Some(tp2);
         v.row(row);
     }
-    if !any {
-        let why = if tp2 == NO_POLL {
-            "Never polled: it upsets ESP and the Haldex"
-        } else {
-            "None in carpid's catalog"
-        };
-        v.row(Row::new(RowKind::Info, why, "").dimmed(true));
-    }
 
-    v.section("Module");
-    let mut id = Row::new(
-        RowKind::Info,
-        "Address",
-        format!("{addr:02X} (TP2 {tp2:02X})"),
-    );
-    id.mono = true;
-    v.row(id);
-    if let Some(coded) = m.coded {
-        v.row(Row::new(
-            RowKind::Info,
-            "Coded",
-            if coded { "yes" } else { "no" },
-        ));
+    let _ = now;
+    v.section("");
+    match diag.identity.get(&tp2) {
+        Some(id) => {
+            let mut text = |label: &str, value: &Option<String>, mono: bool| {
+                if let Some(x) = value.as_ref().filter(|x| !x.is_empty()) {
+                    let mut r = Row::new(RowKind::Info, label, x.trim().to_string());
+                    r.mono = mono;
+                    v.row(r);
+                }
+            };
+            text("Part no.", &id.part_no, false);
+            text("Component", &id.component, false);
+            text("Software", &id.sw_version, false);
+            text("Coding", &id.coding, true);
+            text("Workshop", &id.workshop, true);
+        }
+        None => {
+            v.row(job_row(
+                "Identity",
+                "Read",
+                free,
+                Act::Diag(DiagAction::Identify { module: tp2 }),
+            ));
+        }
     }
-    if let Some(s) = m.status {
-        let mut status = Row::new(RowKind::Info, "Install list status", format!("{s:02X}"));
-        status.mono = true;
-        v.row(status);
-    }
+    let mut a = Row::new(RowKind::Info, "Address", format!("{addr:02X} · TP2 {tp2:02X}"));
+    a.mono = true;
+    v.row(a);
     v.finish()
 }
 
@@ -1309,160 +1225,200 @@ mod tests {
     }
 
     #[test]
-    fn the_grid_shows_the_page_and_why_values_are_missing() {
-        let p = Pages::new(Saved::default(), None);
-        let s = snap(&[
-            ("engine.rpm", Some(Value::Num(900.0))),
-            ("engine.coolant_c", None),
-        ]);
-        let v = p.view(PageId::Data, &s, Instant::now());
-        assert_eq!(v.layout, Layout::Grid);
-        let tabs: Vec<&str> = v.pills.iter().map(|p| p.label.as_str()).collect();
-        assert_eq!(tabs, ["Engine", "Drivetrain", "Body", "Electrical", "Edit"]);
-        assert!(v.pills[0].active);
-        assert_eq!(v.start, 0);
-        assert_eq!((v.cols, v.cells.len()), (3, 9));
-        assert_eq!(v.cells[0].value, "900");
-        assert!(!v.cells[0].dim && v.cells[0].focus_at < 0);
-        assert_eq!(v.cells[2].why, "no value");
-        assert!(v.cells[2].dim);
-        assert_eq!(v.cells[3].why, "not seen");
-        assert!(v.cells[8].empty);
-        assert!(v.note.is_empty());
-    }
-
-    #[test]
-    fn the_dpad_steps_pages_and_tabs_pick_them() {
-        let client = Client::offline("test");
-        let mut p = Pages::new(Saved::default(), None);
-        let s = snap(&[]);
-        let now = Instant::now();
-        let v = p.view(PageId::Data, &s, now);
-        assert_eq!(
-            p.side(PageId::Data, &v, v.hit(4).as_ref(), 1, 4, &client),
-            Moved::Focus(1)
-        );
-        let v = p.view(PageId::Data, &s, now);
-        assert!(v.pills[1].active);
-        assert_eq!(v.cells.len(), 16);
-        p.press(PageId::Data, &v, &Hit::Pill(3), 3, &client);
-        assert_eq!(p.board().shown, 3);
-        p.side(PageId::Data, &v, None, 1, 3, &client);
-        assert_eq!(p.board().shown, 3);
-    }
-
-    #[test]
-    fn edit_picks_a_value_in_two_levels_and_comes_back() {
+    fn a_panel_takes_no_focus_and_the_knob_flips_panels() {
         let client = Client::offline("test");
         let mut p = Pages::new(Saved::default(), None);
         let s = snap(&[("engine.rpm", Some(Value::Num(900.0)))]);
         let now = Instant::now();
         let v = p.view(PageId::Data, &s, now);
+        assert_eq!(v.layout, Layout::Panel);
+        assert_eq!(v.title, "Engine");
+        let tabs: Vec<&str> = v.pills.iter().map(|p| p.label.as_str()).collect();
+        assert_eq!(tabs, ["Panels", "Logs", "Faults"]);
+        assert_eq!((v.start, v.flip), (3, 3));
+        let d = v.panel.as_ref().unwrap();
+        assert_eq!(d.widgets[0].value, "900");
+        assert_eq!(d.dots, p.panels().panels.len());
+        assert!(p.panels().panels.last().unwrap().scratch);
+
+        // The D-pad (and the knob, through livi-ui) on the panel flips panels.
+        let hit = v.hit(v.flip);
+        assert_eq!(p.side(PageId::Data, &v, hit.as_ref(), 1, 3, &client), Moved::Stay);
+        assert_eq!(p.panels().shown, 1);
+        let v = p.view(PageId::Data, &s, now);
+        assert_eq!(v.title, "Drivetrain");
+        // Push opens the menu; back comes to the panel.
         assert_eq!(
-            p.press(PageId::Data, &v, &Hit::Pill(4), 4, &client),
+            p.press(PageId::Data, &v, &v.hit(v.flip).unwrap(), 3, &client),
             Moved::Opened
         );
         assert_eq!(p.depth(PageId::Data), 1);
         let v = p.view(PageId::Data, &s, now);
-        assert!(v.back && v.outlined);
-        assert_eq!(v.title, "Edit");
-        let Some(Hit::Cell(0)) = v.hit(v.start) else {
-            panic!("starts on the first slot")
-        };
-        assert!(v.rows.iter().all(|r| !r.label.contains('.')));
-
-        // Push the last slot: level 1, then Engine, then a value.
-        p.press(PageId::Data, &v, &Hit::Cell(8), v.start, &client);
-        assert_eq!(p.depth(PageId::Data), 2);
-        let v = p.view(PageId::Data, &s, now);
-        assert_eq!(v.title, "Slot 9");
-        let engine = find(&v, "Engine");
-        p.press(PageId::Data, &v, &Hit::Row(engine), 0, &client);
-        assert_eq!(p.depth(PageId::Data), 3);
-        let v = p.view(PageId::Data, &s, now);
-        let boost = v
-            .rows
-            .iter()
-            .position(|r| r.act == Act::Slots(SlotAct::Pick("engine.boost.actual".into())))
-            .unwrap();
-        assert_eq!(v.rows[boost].tag, "diag");
-        assert_eq!(
-            p.press(PageId::Data, &v, &Hit::Row(boost), 0, &client),
-            Moved::Opened
-        );
-        assert_eq!(p.depth(PageId::Data), 1);
-        assert_eq!(
-            p.board().page().slots[8].as_deref(),
-            Some("engine.boost.actual")
-        );
-        assert_eq!(p.recent(), ["engine.boost.actual"]);
-        assert_eq!(
-            p.watching(PageId::Data, &s),
-            vec!["engine.boost.actual".to_string()]
-        );
-        let v = p.view(PageId::Data, &s, now);
-        assert_eq!(v.hit(v.start), Some(Hit::Cell(8)));
-        assert_eq!(v.cells[8].why, "polling…");
-
-        // Back leaves the editor.
-        assert_eq!(p.back(PageId::Data), Some(Moved::Opened));
-        assert_eq!(p.depth(PageId::Data), 0);
+        assert!(v.rows.iter().any(|r| r.label == "Edit panel"));
+        assert!(v.rows.iter().any(|r| r.label == "Log this panel"));
+        assert_eq!(p.back(PageId::Data), Some(Moved::Closed(3)));
         assert_eq!(p.back(PageId::Data), None);
     }
 
     #[test]
-    fn diagnostics_run_jobs_and_watch_the_module() {
+    fn tabs_switch_with_the_dpad_and_push() {
         let client = Client::offline("test");
         let mut p = Pages::new(Saved::default(), None);
-        let mut s = snap(&[("engine.maf_gs", Some(Value::Num(4.5)))]);
+        let s = snap(&[]);
         let now = Instant::now();
-        let v = p.view(PageId::Diagnostics, &s, now);
-        assert!(v.note.is_empty());
-        assert_eq!(v.pills[0].act, Act::Diag(DiagAction::InstallList));
-        assert_eq!(v.rows[0].label, "Modules (not scanned yet)");
-        assert_eq!(v.rows[1].label, "01  Engine");
-        assert!(p.watching(PageId::Diagnostics, &s).is_empty());
-        assert_eq!(
-            p.press(PageId::Diagnostics, &v, &Hit::Row(1), 1, &client),
-            Moved::Opened
-        );
-        let names = p.watching(PageId::Diagnostics, &s);
-        assert_eq!(names.len(), 21);
-        assert!(names.contains(&"engine.boost.actual".to_string()));
-        let v = p.view(PageId::Diagnostics, &s, now);
-        assert_eq!(v.title, "01  Engine");
-        let maf = &v.rows[find(&v, "Air mass")];
-        assert_eq!((maf.value.as_str(), maf.tag.as_str()), ("4.5 g/s", "003.2"));
-        assert_eq!(v.rows[find(&v, "Boost")].value, "polling…");
+        let v = p.view(PageId::Data, &s, now);
+        p.side(PageId::Data, &v, Some(&Hit::Pill(0)), 1, 0, &client);
+        let v = p.view(PageId::Data, &s, now);
+        assert!(v.pills[1].active);
+        assert_eq!(v.title, "Data");
+        p.press(PageId::Data, &v, &Hit::Pill(0), 0, &client);
+        let v = p.view(PageId::Data, &s, now);
+        assert!(v.pills[0].active);
+        assert_eq!(v.layout, Layout::Panel);
+    }
 
-        // Clear asks first, then sends confirm: true.
+    #[test]
+    fn editing_adds_a_widget_restyles_and_removes_it() {
+        use crate::panels::{PanelAct, Style};
+        let client = Client::offline("test");
+        let mut p = Pages::new(Saved::default(), None);
+        let s = snap(&[("engine.coolant_c", Some(Value::Num(91.0)))]);
+        let now = Instant::now();
+        p.panels.panels.insert(
+            0,
+            crate::panels::Panel::new("Daily", crate::panels::Grid::G2x1, Vec::new()),
+        );
+        p.panels.shown = 0;
+        let v = p.view(PageId::Data, &s, now);
+        p.press(PageId::Data, &v, &v.hit(v.flip).unwrap(), 3, &client);
+        let v = p.view(PageId::Data, &s, now);
+        p.press(PageId::Data, &v, &Hit::Row(find(&v, "Edit panel")), 0, &client);
+        let v = p.view(PageId::Data, &s, now);
+        assert_eq!(v.title, "Edit · Daily");
+        assert_eq!(v.pills[0].label, "Grid 2×1");
+        // Two free cells, the first focused.
+        let d = v.panel.as_ref().unwrap();
+        assert_eq!(d.empties.len(), 2);
+        assert_eq!(v.hit(v.start), Some(Hit::Panel(0)));
+
+        // Push the first: the picker, Engine, coolant.
+        p.press(PageId::Data, &v, &Hit::Panel(0), v.start, &client);
+        let v = p.view(PageId::Data, &s, now);
+        assert_eq!(v.title, "Add value");
+        p.press(PageId::Data, &v, &Hit::Row(find(&v, "Engine")), 0, &client);
+        assert_eq!(p.depth(PageId::Data), 3);
+        let v = p.view(PageId::Data, &s, now);
         let at = v
             .rows
             .iter()
-            .position(|r| r.act == Act::ClearAsk(1))
+            .position(|r| r.act == Act::Slots(SlotAct::Pick("engine.coolant_c".into())))
             .unwrap();
-        p.press(PageId::Diagnostics, &v, &Hit::Row(at), 9, &client);
-        let v = p.view(PageId::Diagnostics, &s, now);
-        let sure = &v.rows[find(&v, "Clear all of this module's codes?")];
-        assert_eq!(
-            sure.act,
-            Act::Diag(DiagAction::ClearDtcs {
-                module: 1,
-                confirm: true
-            })
-        );
-        let cancel = find(&v, "Keep them");
-        p.press(PageId::Diagnostics, &v, &Hit::Row(cancel), 9, &client);
-        let v = p.view(PageId::Diagnostics, &s, now);
-        assert!(!v.rows.iter().any(|r| r.button == "Cancel"));
-        let read = find(&v, "Read fault codes");
-        p.press(PageId::Diagnostics, &v, &Hit::Row(read), 9, &client);
-        assert_eq!(
-            client.snapshot().diag.line(Some(1)).as_deref(),
-            Some("Reading fault codes failed: not connected")
-        );
+        assert!(matches!(
+            p.press(PageId::Data, &v, &Hit::Row(at), 0, &client),
+            Moved::Closed(_)
+        ));
+        assert_eq!(p.depth(PageId::Data), 1);
+        assert_eq!(p.panels().panel().widgets[0].values, ["engine.coolant_c"]);
+        assert_eq!(p.recent(), ["engine.coolant_c"]);
 
-        s.diag.started(3, DiagAction::ReadDtcs { module: 1 });
+        // The widget: Style steps to Gauge, Size grows to 2×1.
+        let v = p.view(PageId::Data, &s, now);
+        assert_eq!(v.panel.as_ref().unwrap().widgets[0].value, "91");
+        p.press(PageId::Data, &v, &Hit::Panel(0), 0, &client);
+        let v = p.view(PageId::Data, &s, now);
+        assert!(v.panel.as_ref().unwrap().widgets[0].picked);
+        let style = find(&v, "Style");
+        p.side(PageId::Data, &v, Some(&Hit::Row(style)), 1, 0, &client);
+        assert_eq!(p.panels().panel().widgets[0].style, Style::Gauge);
+        let v = p.view(PageId::Data, &s, now);
+        assert!(v.rows.iter().any(|r| r.label == "Peak"));
+        let size = find(&v, "Size");
+        p.side(PageId::Data, &v, Some(&Hit::Row(size)), 1, 0, &client);
+        assert_eq!(p.panels().panel().widgets[0].w, 2);
+        // Remove asks first.
+        let v = p.view(PageId::Data, &s, now);
+        let rm = find(&v, "Remove");
+        assert_eq!(p.press(PageId::Data, &v, &Hit::Row(rm), 0, &client), Moved::Stay);
+        let v = p.view(PageId::Data, &s, now);
+        let rm = find(&v, "Confirm remove");
+        assert!(matches!(
+            p.press(PageId::Data, &v, &Hit::Row(rm), 0, &client),
+            Moved::Closed(_)
+        ));
+        assert!(p.panels().panel().widgets.is_empty());
+        let _ = PanelAct::Edit;
+    }
+
+    #[test]
+    fn scratch_adds_values_and_saves_as_a_panel() {
+        let client = Client::offline("test");
+        let mut p = Pages::new(Saved::default(), None);
+        let s = snap(&[("engine.rpm", Some(Value::Num(900.0)))]);
+        let now = Instant::now();
+        p.panels.shown = p.panels.scratch();
+        let v = p.view(PageId::Data, &s, now);
+        assert_eq!(v.title, "Scratch");
+        assert_eq!(v.panel.as_ref().unwrap().hint, "Push to add a value");
+        // Empty: push goes straight to the picker.
+        p.press(PageId::Data, &v, &v.hit(v.flip).unwrap(), 3, &client);
+        let v = p.view(PageId::Data, &s, now);
+        assert_eq!(v.title, "Add value");
+        p.press(PageId::Data, &v, &Hit::Row(find(&v, "Engine")), 0, &client);
+        let v = p.view(PageId::Data, &s, now);
+        let at = v
+            .rows
+            .iter()
+            .position(|r| r.act == Act::Slots(SlotAct::Pick("engine.rpm".into())))
+            .unwrap();
+        p.press(PageId::Data, &v, &Hit::Row(at), 0, &client);
+        assert_eq!(p.depth(PageId::Data), 0);
+        assert_eq!(p.panels().panel().widgets.len(), 1);
+        let v = p.view(PageId::Data, &s, now);
+        assert_eq!(v.panel.as_ref().unwrap().widgets[0].value, "900");
+        // Save as panel: Scratch empties, the new one is shown.
+        p.press(PageId::Data, &v, &v.hit(v.flip).unwrap(), 3, &client);
+        let v = p.view(PageId::Data, &s, now);
+        p.press(PageId::Data, &v, &Hit::Row(find(&v, "Save as panel")), 0, &client);
+        assert_eq!(p.panels().panel().name, "Daily");
+        assert_eq!(p.panels().panel().widgets.len(), 1);
+        assert!(p.panels().panels.last().unwrap().widgets.is_empty());
+    }
+
+    #[test]
+    fn faults_scan_on_open_and_clear_with_a_confirm() {
+        let client = Client::offline("test");
+        let mut p = Pages::new(Saved::default(), None);
+        let mut s = snap(&[]);
+        let now = Instant::now();
+        let v = p.view(PageId::Data, &s, now);
+        p.press(PageId::Data, &v, &Hit::Pill(2), 2, &client);
+        // Opening the tab scans (offline: it fails at once).
+        assert_eq!(
+            client.snapshot().diag.line(None).as_deref(),
+            Some("Scan failed: not connected")
+        );
+        let v = p.view(PageId::Data, &s, now);
+        assert!(v.pills[2].active);
+        assert_eq!(v.rows[0].act, Act::Diag(DiagAction::Scan));
+        assert_eq!(v.rows[1].label, "01  Engine");
+        assert!(!v.rows.iter().any(|r| r.label.contains("Clear all")));
+
+        // A scan in progress: the module it's on, one that didn't answer, faults first after.
+        s.diag.started(3, DiagAction::Scan);
+        s.diag.event(
+            3,
+            carpi_proto::JobEvent::Stage {
+                stage: "failed".into(),
+                message: "46 Central convenience".into(),
+            },
+        );
+        s.diag.event(
+            3,
+            carpi_proto::JobEvent::Stage {
+                stage: "module".into(),
+                message: "22 AWD".into(),
+            },
+        );
         s.diag.event(
             3,
             carpi_proto::JobEvent::Dtcs {
@@ -1473,16 +1429,67 @@ mod tests {
                 }],
             },
         );
-        let v = p.view(PageId::Diagnostics, &s, now);
-        assert!(v.note.starts_with("Reading fault codes"));
+        let v = p.view(PageId::Data, &s, now);
+        assert!(v.rows.iter().all(|r| r.label != "Scan"), "no scan while one runs");
+        assert_eq!(v.rows[0].label, "01  Engine");
+        assert_eq!(v.rows[0].value, "1 fault");
+        assert_eq!(v.rows[find(&v, "22  AWD")].value, "Scanning…");
+        let cc = &v.rows[find(&v, "46  Central convenience")];
+        assert!(cc.alert && cc.value == "No answer");
+        s.diag.event(
+            3,
+            carpi_proto::JobEvent::Finished {
+                ok: true,
+                message: "5 of 6 modules, 1 fault".into(),
+            },
+        );
+
+        // The module: its fault, Clear asks first.
+        let v = p.view(PageId::Data, &s, now);
+        assert_eq!(
+            p.press(PageId::Data, &v, &Hit::Row(1), 4, &client),
+            Moved::Opened
+        );
+        let v = p.view(PageId::Data, &s, now);
+        assert_eq!(v.title, "01  Engine");
         assert!(v.rows.iter().any(|r| r.label == "16684" && r.alert));
-        let read = &v.rows[find(&v, "Read fault codes")];
-        assert_eq!((read.value.as_str(), read.act.clone()), ("busy", Act::None));
-        assert_eq!(p.back(PageId::Diagnostics), Some(Moved::Closed(1)));
-        assert!(p.watching(PageId::Diagnostics, &s).is_empty());
-        let v = p.view(PageId::Diagnostics, &s, now);
-        assert!(v.pills.is_empty(), "no scan while a job runs");
-        assert_eq!(v.rows[1].value, "1 fault");
+        let clear = find(&v, "Clear faults");
+        p.press(PageId::Data, &v, &Hit::Row(clear), 9, &client);
+        let v = p.view(PageId::Data, &s, now);
+        assert_eq!(
+            v.rows[find(&v, "Confirm clear")].act,
+            Act::Diag(DiagAction::ClearDtcs {
+                module: 1,
+                confirm: true
+            })
+        );
+        assert_eq!(v.rows[find(&v, "Identity")].act, Act::Diag(DiagAction::Identify { module: 1 }));
+        s.diag.identity.insert(
+            1,
+            crate::diag::Identity {
+                part_no: Some("06F906056AK".into()),
+                coding: Some("0403010A1C0700".into()),
+                ..Default::default()
+            },
+        );
+        let v = p.view(PageId::Data, &s, now);
+        assert_eq!(v.rows[find(&v, "Part no.")].value, "06F906056AK");
+        assert!(v.rows[find(&v, "Coding")].mono);
+        assert_eq!(p.back(PageId::Data), Some(Moved::Closed(4)));
+
+        // Clear all asks, then works through the modules with faults (carpid's copy).
+        client.snapshot().diag.dtcs = s.diag.dtcs.clone();
+        let v = p.view(PageId::Data, &s, now);
+        let all = find(&v, "Clear all");
+        p.press(PageId::Data, &v, &Hit::Row(all), 9, &client);
+        let v = p.view(PageId::Data, &s, now);
+        let all = find(&v, "Confirm clear all");
+        p.press(PageId::Data, &v, &Hit::Row(all), 9, &client);
+        // Offline nothing goes; the queue waits for carpid.
+        assert_eq!(p.clearing, [1]);
+        let v = p.view(PageId::Data, &s, now);
+        assert_eq!(v.rows[find(&v, "Clear all")].value, "1 to go");
+        assert_eq!(p.back(PageId::Data), None);
     }
 
     #[test]
@@ -1604,7 +1611,7 @@ mod tests {
     }
 
     #[test]
-    fn logging_is_reached_from_the_tab_and_edits_with_the_knob() {
+    fn logs_tab_edits_profiles_with_the_knob() {
         let client = Client::offline("test");
         client.snapshot().datalog = Some(crate::logging::tests::status());
         let mut p = Pages::new(Saved::default(), None);
@@ -1613,67 +1620,56 @@ mod tests {
             ("vehicle.speed_kmh", Some(Value::Num(50.0))),
         ]);
         s.datalog = Some(crate::logging::tests::status());
-        s.settings = Some(crate::settings::sample());
         let now = Instant::now();
-        p.car = CarScreen::Logs;
-        p.trail = vec![0];
-        let v = p.view(PageId::Car, &s, now);
-        let at = find(&v, "Logging");
-        assert!(v.rows[at].value.is_empty());
+        p.open(PageId::Data, "logs");
+        let v = p.view(PageId::Data, &s, now);
+        assert!(v.pills[1].active);
+        assert_eq!(v.rows[find(&v, "Log this panel")].value, "Engine");
+        let at = find(&v, "Profiles");
         assert_eq!(
-            p.press(PageId::Car, &v, &Hit::Row(at), 4, &client),
+            p.press(PageId::Data, &v, &Hit::Row(at), 7, &client),
             Moved::Opened
         );
-        assert_eq!((p.car, p.depth(PageId::Car)), (CarScreen::Logging, 2));
-        let v = p.view(PageId::Car, &s, now);
-        assert_eq!(v.title, "Logging");
+        assert_eq!(p.depth(PageId::Data), 1);
+        let v = p.view(PageId::Data, &s, now);
+        assert_eq!(v.title, "Profiles");
 
         // Open Boost, then its channels, then the picker for a new one.
         let boost = find(&v, "Boost");
-        p.press(PageId::Car, &v, &Hit::Row(boost), boost as i32, &client);
-        assert_eq!((p.car, p.depth(PageId::Car)), (CarScreen::LogProfile, 3));
-        let v = p.view(PageId::Car, &s, now);
+        p.press(PageId::Data, &v, &Hit::Row(boost), boost as i32, &client);
+        assert_eq!(p.depth(PageId::Data), 2);
+        let v = p.view(PageId::Data, &s, now);
         assert_eq!(v.title, "Boost");
         let ch = find(&v, "Channels");
-        p.press(PageId::Car, &v, &Hit::Row(ch), ch as i32, &client);
-        let v = p.view(PageId::Car, &s, now);
+        p.press(PageId::Data, &v, &Hit::Row(ch), ch as i32, &client);
+        let v = p.view(PageId::Data, &s, now);
         assert_eq!(v.title, "Boost channels");
         let add = find(&v, "Add a channel");
-        p.press(PageId::Car, &v, &Hit::Row(add), 0, &client);
-        assert_eq!(p.depth(PageId::Car), 5);
-        let v = p.view(PageId::Car, &s, now);
-        assert_eq!(v.title, "New channel");
-        p.press(PageId::Car, &v, &Hit::Row(find(&v, "Driving")), 0, &client);
-        assert_eq!(p.depth(PageId::Car), 6);
-        let v = p.view(PageId::Car, &s, now);
+        p.press(PageId::Data, &v, &Hit::Row(add), 0, &client);
+        assert_eq!(p.depth(PageId::Data), 4);
+        let v = p.view(PageId::Data, &s, now);
+        p.press(PageId::Data, &v, &Hit::Row(find(&v, "Driving")), 0, &client);
+        assert_eq!(p.depth(PageId::Data), 5);
+        let v = p.view(PageId::Data, &s, now);
         let speed = v
             .rows
             .iter()
             .position(|r| r.act == Act::Slots(SlotAct::Pick("vehicle.speed_kmh".into())))
             .unwrap();
         assert_eq!(
-            p.press(PageId::Car, &v, &Hit::Row(speed), 0, &client),
+            p.press(PageId::Data, &v, &Hit::Row(speed), 0, &client),
             Moved::Opened
         );
-        assert_eq!(p.depth(PageId::Car), 4);
-        let v = p.view(PageId::Car, &s, now);
+        assert_eq!(p.depth(PageId::Data), 3);
+        let v = p.view(PageId::Data, &s, now);
         assert_eq!(v.rows[3].label, "Speed");
-        assert_eq!(v.hit(v.start), Some(Hit::Row(3)));
         assert_eq!(p.recent(), ["vehicle.speed_kmh"]);
-        // Sent to carpid (offline here).
-        assert_eq!(
-            client.snapshot().datalog_note.as_deref(),
-            Some("not connected")
-        );
 
-        // Back out: channels, profile, logging, logs, the tab.
-        assert_eq!(p.back(PageId::Car), Some(Moved::Closed(ch as i32)));
-        assert_eq!(p.back(PageId::Car), Some(Moved::Closed(boost as i32)));
-        assert_eq!(p.back(PageId::Car), Some(Moved::Closed(4)));
-        assert_eq!(p.back(PageId::Car), Some(Moved::Closed(0)));
-        assert_eq!(p.back(PageId::Car), None);
-        p.open(PageId::Car, "logging");
-        assert_eq!(p.car, CarScreen::Logging);
+        // Back out: channels, profile, profiles, the tab.
+        assert_eq!(p.back(PageId::Data), Some(Moved::Closed(ch as i32)));
+        assert_eq!(p.back(PageId::Data), Some(Moved::Closed(boost as i32)));
+        assert_eq!(p.back(PageId::Data), Some(Moved::Closed(7)));
+        assert_eq!(p.back(PageId::Data), None);
     }
 
     #[test]
@@ -1693,7 +1689,7 @@ mod tests {
         assert!(matches!(s.capture, Capture::Failed(_)));
         assert_eq!(
             s.toast.as_ref().unwrap().text,
-            "Capture failed: not connected"
+            "Debug logs failed: not connected"
         );
     }
 }

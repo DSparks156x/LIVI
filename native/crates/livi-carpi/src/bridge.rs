@@ -478,16 +478,16 @@ mod tests {
         let state = State::default();
         sent.updates(&state, "/settings");
         assert_eq!(
-            sent.updates(&state, "/carpi/diagnostics"),
+            sent.updates(&state, "/carpi/data/faults"),
             [BridgeUpdate::Focus {
-                focus: "page:diagnostics".into()
+                focus: "page:data".into()
             }]
         );
-        assert!(sent.updates(&state, "/carpi/diagnostics").is_empty());
+        assert!(sent.updates(&state, "/carpi/data/faults").is_empty());
         let mut shown = State::default();
         shown.front.main = Front::Projection;
         assert_eq!(
-            sent.updates(&shown, "/carpi/diagnostics"),
+            sent.updates(&shown, "/carpi/data/faults"),
             [BridgeUpdate::Focus {
                 focus: "projection".into()
             }]

@@ -467,6 +467,13 @@ pub struct Described {
 /// The definition of `name`, or one guessed from it: the last part, unit suffix dropped, as the
 /// label.
 pub fn describe(name: &str) -> Described {
+    if let Some((addr, group, field)) = module_group(name) {
+        return Described {
+            label: Cow::Owned(format!("{addr:02X} · {group} · {field}")),
+            unit: learned_unit(name).unwrap_or(""),
+            kind: Kind::Num(2),
+        };
+    }
     let entry = crate::catalog::entry(name);
     if let Some(d) = find(name) {
         return Described {
@@ -497,6 +504,47 @@ pub fn describe(name: &str) -> Described {
         unit,
         kind: Kind::Num(dp),
     }
+}
+
+/// A measuring-group value of any module: `diag.01.103.2` is VCDS address 01, group 103,
+/// field 2.
+pub fn module_group(name: &str) -> Option<(u8, u8, u8)> {
+    let mut it = name.strip_prefix("diag.")?.split('.');
+    let addr = u8::from_str_radix(it.next()?, 16).ok()?;
+    let group = it.next()?.parse().ok()?;
+    let field: u8 = it.next()?.parse().ok()?;
+    (it.next().is_none() && (1..=4).contains(&field)).then_some((addr, group, field))
+}
+
+/// The value name of a module group's field.
+pub fn module_group_name(addr: u8, group: u8, field: u8) -> String {
+    format!("diag.{addr:02X}.{group}.{field}")
+}
+
+fn units() -> &'static std::sync::Mutex<std::collections::BTreeMap<String, &'static str>> {
+    static UNITS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::BTreeMap<String, &'static str>>,
+    > = std::sync::OnceLock::new();
+    UNITS.get_or_init(Default::default)
+}
+
+/// Remembers the unit carpid gave a module-group value (its formula's), for labels and widgets.
+pub fn learn_unit(name: &str, unit: &str) {
+    let Ok(mut map) = units().lock() else { return };
+    if map.get(name).is_some_and(|u| *u == unit) {
+        return;
+    }
+    // Units are a handful of short strings: each distinct one is kept once.
+    let interned: &'static str = map
+        .values()
+        .copied()
+        .find(|u| *u == unit)
+        .unwrap_or_else(|| Box::leak(unit.to_string().into_boxed_str()));
+    map.insert(name.to_string(), interned);
+}
+
+pub fn learned_unit(name: &str) -> Option<&'static str> {
+    units().lock().ok()?.get(name).copied()
 }
 
 /// The selector position for `trans.selector`, per 0x359.

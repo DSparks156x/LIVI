@@ -4,7 +4,8 @@
 // Copies a `View` into the Slint `CarpiState`. `include!`d where `carpi.slint` is compiled
 // (livi-ui, and this crate's `shots` example), which each have their own generated types: the
 // includer brings `CarpiState`, `CarpiPill`, `CarpiRow`, `CarpiCell`, `CarpiSpot`, `CarpiPoint`,
-// `CarpiTick`, `CarpiLayout` and `CarpiKind` into scope.
+// `CarpiTick`, `CarpiLayout`, `CarpiKind` and the panel types (`CarpiWidget`, `CarpiLine`,
+// `CarpiItem`, `CarpiMark`, `CarpiEmpty`) into scope.
 
 /// The models `CarpiState` shows, kept so rows that didn't change keep their state.
 #[derive(Default)]
@@ -16,6 +17,8 @@ pub struct Models {
     learned: std::rc::Rc<slint::VecModel<CarpiPoint>>,
     manual: std::rc::Rc<slint::VecModel<CarpiPoint>>,
     ticks: std::rc::Rc<slint::VecModel<CarpiTick>>,
+    widgets: std::rc::Rc<slint::VecModel<CarpiWidget>>,
+    empties: std::rc::Rc<slint::VecModel<CarpiEmpty>>,
 }
 
 impl Models {
@@ -29,6 +32,8 @@ impl Models {
         st.set_plot_learned(ModelRc::from(self.learned.clone()));
         st.set_plot_manual(ModelRc::from(self.manual.clone()));
         st.set_plot_ticks(ModelRc::from(self.ticks.clone()));
+        st.set_panel_widgets(ModelRc::from(self.widgets.clone()));
+        st.set_panel_empties(ModelRc::from(self.empties.clone()));
     }
 
     pub fn fill(&self, st: &CarpiState<'_>, view: &livi_carpi_ui::view::View) {
@@ -36,6 +41,7 @@ impl Models {
         st.set_layout(match view.layout {
             Layout::List => CarpiLayout::List,
             Layout::Grid => CarpiLayout::Grid,
+            Layout::Panel => CarpiLayout::Panel,
         });
         st.set_title(view.title.as_str().into());
         st.set_hint(view.hint.as_str().into());
@@ -52,7 +58,7 @@ impl Models {
                     active: p.active,
                     tab: matches!(
                         p.act,
-                        Act::Slots(livi_carpi_ui::slots::SlotAct::Page(_))
+                        Act::Slots(livi_carpi_ui::slots::SlotAct::Page(_)) | Act::Tab(_)
                     ),
                     focus_at: p.focus_at,
                 })
@@ -121,9 +127,38 @@ impl Models {
                         rows,
                         sections,
                     },
+                    Spot::Panel => CarpiSpot {
+                        line: 0,
+                        rows: 0,
+                        sections: 0,
+                    },
                 })
                 .collect(),
         );
+        st.set_panel_shown(view.panel.is_some());
+        if let Some(p) = &view.panel {
+            st.set_panel_cols(i32::from(p.cols));
+            st.set_panel_rows(i32::from(p.rows));
+            st.set_panel_dots(p.dots as i32);
+            st.set_panel_at(p.at as i32);
+            st.set_panel_edit(p.edit);
+            st.set_panel_hint(p.hint.as_str().into());
+            sync(&self.widgets, p.widgets.iter().map(widget).collect());
+            sync(
+                &self.empties,
+                p.empties
+                    .iter()
+                    .map(|e| CarpiEmpty {
+                        col: i32::from(e.col),
+                        row: i32::from(e.row),
+                        focus_at: e.focus_at,
+                    })
+                    .collect(),
+            );
+        } else {
+            sync(&self.widgets, Vec::new());
+            sync(&self.empties, Vec::new());
+        }
         st.set_plot_shown(view.plot.is_some());
         if let Some(p) = &view.plot {
             let point = |(x, y): (f32, f32)| CarpiPoint { x, y };
@@ -144,6 +179,75 @@ impl Models {
                     .collect(),
             );
         }
+    }
+}
+
+/// A panel widget for Slint: labels upper case, the paths and lists as models.
+fn widget(w: &livi_carpi_ui::panels::WidgetDraw) -> CarpiWidget {
+    use slint::ModelRc;
+    let marks = |m: &[livi_carpi_ui::panels::Tick]| {
+        ModelRc::new(slint::VecModel::from(
+            m.iter()
+                .map(|t| CarpiMark {
+                    x: t.x,
+                    y: t.y,
+                    label: t.label.as_str().into(),
+                })
+                .collect::<Vec<_>>(),
+        ))
+    };
+    CarpiWidget {
+        col: i32::from(w.col),
+        row: i32::from(w.row),
+        w: i32::from(w.w),
+        h: i32::from(w.h),
+        style: w.style,
+        label: w.label.to_uppercase().into(),
+        value: w.value.as_str().into(),
+        unit: w.unit.as_str().into(),
+        sub: w.sub.as_str().into(),
+        sub_hi: w.sub_hi,
+        value2: w.value2.as_str().into(),
+        label2: w.label2.to_uppercase().into(),
+        state: w.state,
+        stale: w.stale,
+        frac: w.frac,
+        ticks_off: w.ticks_off.as_str().into(),
+        ticks_on: w.ticks_on.as_str().into(),
+        red_off: w.red_off.as_str().into(),
+        red_on: w.red_on.as_str().into(),
+        needle: w.needle.as_str().into(),
+        peak: w.peak.as_str().into(),
+        labels: marks(&w.labels),
+        segs: w.segs,
+        lit: w.lit,
+        warn_from: w.warn_from,
+        limit_from: w.limit_from,
+        lines: ModelRc::new(slint::VecModel::from(
+            w.lines
+                .iter()
+                .map(|l| CarpiLine {
+                    path: l.path.as_str().into(),
+                    color: l.color,
+                    label: l.label.as_str().into(),
+                })
+                .collect::<Vec<_>>(),
+        )),
+        marks: marks(&w.marks),
+        items: ModelRc::new(slint::VecModel::from(
+            w.items
+                .iter()
+                .map(|i| CarpiItem {
+                    label: i.label.as_str().into(),
+                    value: i.value.as_str().into(),
+                    frac: i.frac,
+                    on: i.on,
+                    state: i.state,
+                })
+                .collect::<Vec<_>>(),
+        )),
+        focus_at: w.focus_at,
+        picked: w.picked,
     }
 }
 

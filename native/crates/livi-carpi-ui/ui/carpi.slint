@@ -9,7 +9,7 @@
 import { Theme } from "../../livi-ui/ui/theme.slint";
 import { Focus, FocusZone } from "../../livi-ui/ui/focus.slint";
 
-export enum CarpiLayout { list, grid }
+export enum CarpiLayout { list, grid, panel }
 export enum CarpiKind { section, info, route, button, toggle, choice, step }
 
 export struct CarpiPill {
@@ -63,6 +63,67 @@ export struct CarpiTick {
     label: string,
 }
 
+// Data panels: see livi-carpi-ui's panels.rs `PanelDraw`.
+export struct CarpiMark {
+    x: float,
+    y: float,
+    label: string,
+}
+
+export struct CarpiLine {
+    path: string,
+    color: int,
+    label: string,
+}
+
+export struct CarpiItem {
+    label: string,
+    value: string,
+    frac: float,
+    on: bool,
+    state: int,
+}
+
+export struct CarpiWidget {
+    col: int,
+    row: int,
+    w: int,
+    h: int,
+    style: int,
+    label: string,
+    value: string,
+    unit: string,
+    sub: string,
+    sub-hi: bool,
+    value2: string,
+    label2: string,
+    state: int,
+    stale: bool,
+    frac: float,
+    ticks-off: string,
+    ticks-on: string,
+    red-off: string,
+    red-on: string,
+    needle: string,
+    peak: string,
+    labels: [CarpiMark],
+    segs: int,
+    lit: int,
+    warn-from: int,
+    limit-from: int,
+    lines: [CarpiLine],
+    marks: [CarpiMark],
+    items: [CarpiItem],
+    focus-at: int,
+    picked: bool,
+}
+
+export struct CarpiEmpty {
+    col: int,
+    row: int,
+    focus-at: int,
+}
+
 export global CarpiState {
     in property <bool> flashing-mode;
     in property <CarpiLayout> layout;
@@ -90,11 +151,22 @@ export global CarpiState {
     in property <CarpiPoint> plot-now;
     in property <[CarpiTick]> plot-ticks;
     in property <string> plot-caption;
+    // A Data panel: the page itself, or beside the rows.
+    in property <bool> panel-shown;
+    in property <int> panel-cols: 1;
+    in property <int> panel-rows: 1;
+    in property <[CarpiWidget]> panel-widgets;
+    in property <[CarpiEmpty]> panel-empties;
+    in property <int> panel-dots;
+    in property <int> panel-at;
+    in property <bool> panel-edit;
+    in property <string> panel-hint;
 
     callback back();
     callback pill(int);
     callback row(int);
     callback cell(int);
+    callback panel(int);
 }
 
 // 0 info, 1 warn, 2 error.
@@ -535,6 +607,469 @@ component Plot inherits Rectangle {
     }
 }
 
+
+// ---- Data panels (docs/PAGES.md 5c): LIVI's telemetry look, black space and hairlines ----
+
+global P {
+    out property <color> amber: #ffa726;
+    out property <color> red: #f44336;
+    out property <color> dim-tick: Theme.text.with-alpha(0.16);
+    out property <color> label: Theme.text.with-alpha(0.5);
+    out property <color> hair: Theme.text.with-alpha(0.09);
+}
+
+// The tiny spaced caption over a widget.
+component Caption inherits Text {
+    in property <length> u;
+    font-size: max(11px, 13 * root.u);
+    font-weight: 500;
+    letter-spacing: 1.6 * root.u;
+    color: P.label;
+    overflow: elide;
+}
+
+component WidgetView inherits Rectangle {
+    in property <CarpiWidget> w;
+    in property <bool> focused;
+    in property <bool> edit;
+    // 1 for a 200 px tall cell.
+    property <float> k: min(root.width / 1px / 200, root.height / 1px / 140);
+    property <length> u: clamp(root.k, 0.7, 2.2) * 1px;
+    property <color> ink: w.stale ? Theme.text-disabled : Theme.text;
+    property <color> state-ink: w.state == 2 ? P.red : (w.state == 1 ? P.amber : root.ink);
+    callback pushed();
+
+    border-radius: root.edit ? 10px : 0;
+    background: root.edit ? Theme.paper : transparent;
+    border-width: root.focused || w.picked ? 3px : 0;
+    border-color: Theme.primary;
+
+    // Number: label, big numeral and unit, a second line.
+    if w.style == 0: VerticalLayout {
+        padding: 12 * root.u;
+        alignment: center;
+        spacing: 6 * root.u;
+        Caption { u: root.u; text: w.label; }
+        HorizontalLayout {
+            spacing: 6 * root.u;
+            alignment: start;
+            num := Text {
+                text: w.value;
+                color: root.state-ink;
+                font-size: min(root.height * 0.5, (root.width - 40px) / max(2, w.value.character-count + w.unit.character-count * 0.45) * 1.6);
+                vertical-alignment: bottom;
+            }
+            Text {
+                text: w.unit;
+                color: P.label;
+                font-size: max(13px, num.font-size * 0.36);
+                vertical-alignment: bottom;
+                y: parent.height - self.height - num.font-size * 0.12;
+            }
+        }
+        if w.sub != "": Text {
+            text: w.sub;
+            color: w.sub-hi ? Theme.primary : P.label;
+            font-size: max(12px, 15 * root.u);
+            font-weight: 500;
+        }
+    }
+
+    // Gauge: the tick arc, the numeral in the middle.
+    if w.style == 1: Rectangle {
+        property <length> side: min(parent.width, parent.height) - 8px;
+        x: (parent.width - self.side) / 2;
+        y: (parent.height - self.side) / 2;
+        width: self.side;
+        height: self.side;
+        Path {
+            width: parent.width;
+            height: parent.height;
+            viewbox-width: 1000;
+            viewbox-height: 1000;
+            commands: w.ticks-off;
+            stroke: P.dim-tick;
+            stroke-width: max(1.5px, parent.width / 140);
+            stroke-line-cap: round;
+        }
+        Path {
+            width: parent.width;
+            height: parent.height;
+            viewbox-width: 1000;
+            viewbox-height: 1000;
+            commands: w.red-off;
+            stroke: P.red.with-alpha(0.35);
+            stroke-width: max(1.5px, parent.width / 140);
+            stroke-line-cap: round;
+        }
+        Path {
+            width: parent.width;
+            height: parent.height;
+            viewbox-width: 1000;
+            viewbox-height: 1000;
+            commands: w.ticks-on;
+            stroke: root.ink;
+            stroke-width: max(1.5px, parent.width / 140);
+            stroke-line-cap: round;
+        }
+        Path {
+            width: parent.width;
+            height: parent.height;
+            viewbox-width: 1000;
+            viewbox-height: 1000;
+            commands: w.red-on;
+            stroke: P.red;
+            stroke-width: max(1.5px, parent.width / 140);
+            stroke-line-cap: round;
+        }
+        Path {
+            width: parent.width;
+            height: parent.height;
+            viewbox-width: 1000;
+            viewbox-height: 1000;
+            commands: w.needle;
+            stroke: Theme.text;
+            stroke-width: max(3px, parent.width / 70);
+            stroke-line-cap: round;
+        }
+        Path {
+            width: parent.width;
+            height: parent.height;
+            viewbox-width: 1000;
+            viewbox-height: 1000;
+            commands: w.peak;
+            stroke: Theme.primary;
+            stroke-width: max(3px, parent.width / 70);
+            stroke-line-cap: round;
+        }
+        for t in w.labels: Text {
+            x: t.x * parent.width - 30px;
+            y: t.y * parent.height - self.height / 2;
+            width: 60px;
+            horizontal-alignment: center;
+            text: t.label;
+            color: Theme.text-secondary;
+            font-size: max(11px, parent.width / 22);
+        }
+        gv := Text {
+            y: parent.height * 0.52 - self.height * 0.62;
+            width: parent.width;
+            horizontal-alignment: center;
+            text: w.value;
+            color: root.state-ink;
+            font-size: min(parent.width * 0.19, parent.width * 0.62 / max(3, w.value.character-count) * 1.5);
+        }
+        Caption {
+            u: root.u;
+            y: gv.y + gv.height;
+            width: parent.width;
+            horizontal-alignment: center;
+            text: w.unit == "" ? w.label : w.label + " · " + w.unit;
+        }
+        if w.sub != "": Text {
+            y: parent.height * 0.84;
+            width: parent.width;
+            horizontal-alignment: center;
+            text: w.sub;
+            color: Theme.primary;
+            font-size: max(11px, parent.width / 20);
+            font-weight: 500;
+            letter-spacing: 1px;
+        }
+    }
+
+    // Bar: label and number, then LIVI's segmented bar.
+    if w.style == 2: VerticalLayout {
+        padding: 12 * root.u;
+        alignment: center;
+        spacing: 10 * root.u;
+        HorizontalLayout {
+            Caption { u: root.u; text: w.label; vertical-alignment: bottom; }
+            Rectangle { horizontal-stretch: 1; }
+            bn := Text {
+                text: w.value;
+                color: root.state-ink;
+                font-size: min(parent.width / 5, 36 * root.u);
+                vertical-alignment: bottom;
+            }
+            Text {
+                text: " " + w.unit;
+                color: P.label;
+                font-size: max(12px, bn.font-size * 0.4);
+                vertical-alignment: bottom;
+            }
+        }
+        HorizontalLayout {
+            height: max(8px, 10 * root.u);
+            spacing: max(3px, 5 * root.u);
+            for i in w.segs: Rectangle {
+                border-radius: 3px;
+                background: i >= w.lit ? P.dim-tick : (i >= w.limit-from ? P.red : (i >= w.warn-from ? P.amber : root.ink));
+            }
+        }
+    }
+
+    // Graph: legend, hairline grid, lines, marks.
+    if w.style == 3: VerticalLayout {
+        padding: 10 * root.u;
+        spacing: 6 * root.u;
+        HorizontalLayout {
+            spacing: 16 * root.u;
+            for l in w.lines: Text {
+                text: l.label;
+                color: l.color == 0 ? Theme.primary : (l.color == 1 ? Theme.text-secondary : P.amber);
+                font-size: max(12px, 14 * root.u);
+                overflow: elide;
+            }
+            Rectangle { horizontal-stretch: 1; }
+        }
+        area := Rectangle {
+            vertical-stretch: 1;
+            for f in [0.25, 0.5, 0.75]: Rectangle {
+                y: parent.height * f;
+                height: 1px;
+                background: P.hair;
+            }
+            for l in w.lines: Path {
+                width: parent.width;
+                height: parent.height;
+                viewbox-width: 1000;
+                viewbox-height: 1000;
+                fit: fill;
+                commands: l.path;
+                stroke: l.color == 0 ? Theme.primary : (l.color == 1 ? Theme.text-secondary : P.amber);
+                stroke-width: l.color == 0 ? 3px : 2px;
+                stroke-line-join: round;
+                fill: transparent;
+            }
+            for m in w.marks: Rectangle {
+                x: m.x * parent.width;
+                width: 1px;
+                background: Theme.text.with-alpha(0.45);
+                Rectangle {
+                    x: -10px;
+                    y: 0;
+                    width: 20px;
+                    height: 18px;
+                    border-radius: 9px;
+                    background: Theme.text.with-alpha(0.2);
+                    Text {
+                        text: m.label;
+                        color: Theme.text;
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+
+    // Pair: actual in teal, specified in white, the difference under.
+    if w.style == 4: VerticalLayout {
+        padding: 12 * root.u;
+        alignment: center;
+        spacing: 6 * root.u;
+        Caption { u: root.u; text: w.label + "  /  " + w.label2; }
+        HorizontalLayout {
+            spacing: 18 * root.u;
+            alignment: start;
+            Text {
+                text: w.value;
+                color: w.stale ? Theme.text-disabled : Theme.primary;
+                font-size: min(root.height * 0.42, (root.width - 60px) / max(4, w.value.character-count + w.value2.character-count) * 1.5);
+            }
+            Text {
+                text: w.value2;
+                color: root.ink;
+                font-size: min(root.height * 0.42, (root.width - 60px) / max(4, w.value.character-count + w.value2.character-count) * 1.5);
+            }
+            Text {
+                text: w.unit;
+                color: P.label;
+                font-size: max(13px, 16 * root.u);
+                vertical-alignment: bottom;
+            }
+        }
+        if w.sub != "": Text {
+            text: w.sub;
+            color: P.label;
+            font-size: max(12px, 15 * root.u);
+        }
+    }
+
+    // Set: wheels, cylinders, doors as small numbers with bars.
+    if w.style == 5: VerticalLayout {
+        padding: 12 * root.u;
+        spacing: 8 * root.u;
+        Caption { u: root.u; text: w.label; }
+        HorizontalLayout {
+            spacing: 12 * root.u;
+            for it in w.items: VerticalLayout {
+                spacing: 4 * root.u;
+                alignment: end;
+                Text {
+                    text: it.label;
+                    color: P.label;
+                    font-size: max(11px, 13 * root.u);
+                    horizontal-alignment: center;
+                }
+                Text {
+                    text: it.value;
+                    color: it.on ? P.amber : (it.state == 2 ? P.red : (it.state == 1 ? P.amber : root.ink));
+                    font-size: max(14px, 26 * root.u);
+                    horizontal-alignment: center;
+                }
+                if it.frac >= 0: Rectangle {
+                    height: max(6px, 8 * root.u);
+                    border-radius: 3px;
+                    background: P.dim-tick;
+                    Rectangle {
+                        x: 0;
+                        width: parent.width * it.frac;
+                        border-radius: 3px;
+                        background: it.state == 2 ? P.red : (it.state == 1 ? P.amber : root.ink);
+                    }
+                }
+            }
+        }
+    }
+
+    // Selector: P R N D S, the position lit; the big value for tiptronic gears.
+    if w.style == 6: VerticalLayout {
+        padding: 12 * root.u;
+        alignment: center;
+        spacing: 8 * root.u;
+        Caption { u: root.u; text: w.label; horizontal-alignment: center; }
+        HorizontalLayout {
+            alignment: center;
+            spacing: 14 * root.u;
+            for it in w.items: Rectangle {
+                width: sel.font-size * 1.25;
+                height: sel.font-size * 1.3;
+                border-radius: 8px;
+                background: it.on ? Theme.highlight : transparent;
+                sel := Text {
+                    text: it.label;
+                    color: it.on ? #ffffff : P.dim-tick.with-alpha(0.6);
+                    font-size: min(root.height * 0.32, root.width / 9);
+                    font-weight: it.on ? 700 : 400;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+        if w.value != "P" && w.value != "R" && w.value != "N" && w.value != "D" && w.value != "S": Text {
+            text: w.value;
+            color: root.ink;
+            horizontal-alignment: center;
+            font-size: max(14px, 24 * root.u);
+        }
+        Text {
+            text: w.sub;
+            color: Theme.primary;
+            horizontal-alignment: center;
+            font-size: max(11px, 13 * root.u);
+            letter-spacing: 1.5px;
+            font-weight: 500;
+        }
+    }
+
+    TouchArea {
+        clicked => { root.pushed(); }
+    }
+}
+
+component PanelView inherits Rectangle {
+    in property <int> focus-index;
+    property <bool> edit: CarpiState.panel-edit;
+    property <length> gap: root.edit ? 8px : 0;
+    property <int> cols: max(1, CarpiState.panel-cols);
+    property <int> rows: max(1, CarpiState.panel-rows);
+    property <length> foot: CarpiState.panel-dots > 1 ? 22px : 0;
+    property <length> cw: (root.width - (root.cols - 1) * root.gap) / root.cols;
+    property <length> ch: (root.height - root.foot - (root.rows - 1) * root.gap) / root.rows;
+
+    for e[i] in CarpiState.panel-empties: Rectangle {
+        x: e.col * (root.cw + root.gap);
+        y: e.row * (root.ch + root.gap);
+        width: root.cw;
+        height: root.ch;
+        border-radius: 10px;
+        border-width: root.focus-index == e.focus-at ? 3px : 1.5px;
+        border-color: root.focus-index == e.focus-at ? Theme.primary : Theme.divider;
+        Text {
+            text: "+";
+            color: root.focus-index == e.focus-at ? Theme.primary : Theme.text-disabled;
+            font-size: 34px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        TouchArea {
+            clicked => { CarpiState.panel(CarpiState.panel-widgets.length + i); }
+        }
+    }
+    for w[i] in CarpiState.panel-widgets: Rectangle {
+        x: w.col * (root.cw + root.gap);
+        y: w.row * (root.ch + root.gap);
+        width: w.w * root.cw + (w.w - 1) * root.gap;
+        height: w.h * root.ch + (w.h - 1) * root.gap;
+        // Hairlines between widgets while viewing.
+        if !root.edit && w.col > 0: Rectangle {
+            x: 0;
+            y: 10px;
+            width: 1px;
+            height: parent.height - 20px;
+            background: P.hair;
+        }
+        if !root.edit && w.row > 0: Rectangle {
+            x: 10px;
+            y: 0;
+            width: parent.width - 20px;
+            height: 1px;
+            background: P.hair;
+        }
+        WidgetView {
+            w: w;
+            edit: root.edit;
+            focused: w.focus-at >= 0 && root.focus-index == w.focus-at;
+            pushed => { CarpiState.panel(root.edit ? i : 0); }
+        }
+    }
+    if CarpiState.panel-hint != "": Text {
+        y: (root.height - root.foot - self.height) / 2;
+        width: root.width;
+        horizontal-alignment: center;
+        text: CarpiState.panel-hint;
+        color: Theme.text-disabled;
+        font-size: 22px;
+    }
+    if CarpiState.panel-hint != "" && !root.edit: TouchArea {
+        clicked => { CarpiState.panel(0); }
+    }
+    if root.foot > 0: Rectangle {
+        y: root.height - 16px;
+        x: (root.width - self.width) / 2;
+        height: 16px;
+        width: CarpiState.panel-dots * 15px + 14px;
+        border-radius: 8px;
+        background: Theme.text.with-alpha(0.08);
+        HorizontalLayout {
+            padding-left: 7px;
+            padding-right: 7px;
+            spacing: 7px;
+            alignment: center;
+            for d in CarpiState.panel-dots: Rectangle {
+                y: (parent.height - self.height) / 2;
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                background: d == CarpiState.panel-at ? Theme.primary : Theme.text.with-alpha(0.35);
+            }
+        }
+    }
+}
+
 export component CarpiView inherits Rectangle {
     background: Theme.background;
 
@@ -584,8 +1119,14 @@ export component CarpiView inherits Rectangle {
                 width: parent.width * 0.44;
                 height: parent.height;
             }
+            if CarpiState.panel-shown && CarpiState.layout == CarpiLayout.list: PanelView {
+                x: 0;
+                width: parent.width * 0.5;
+                height: parent.height;
+                focus-index: -1;
+            }
             flick := Flickable {
-                x: CarpiState.plot-shown ? parent.width * 0.44 + 10px : 0;
+                x: CarpiState.plot-shown ? parent.width * 0.44 + 10px : (CarpiState.panel-shown ? parent.width * 0.5 + 10px : 0);
                 width: parent.width - self.x;
                 height: parent.height;
                 visible: CarpiState.layout == CarpiLayout.list;
@@ -620,6 +1161,11 @@ export component CarpiView inherits Rectangle {
                 }
             }
             if CarpiState.layout == CarpiLayout.grid: Grid {
+                width: parent.width;
+                height: parent.height;
+                focus-index: root.focus-index;
+            }
+            if CarpiState.layout == CarpiLayout.panel: PanelView {
                 width: parent.width;
                 height: parent.height;
                 focus-index: root.focus-index;

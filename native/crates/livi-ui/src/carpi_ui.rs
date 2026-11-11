@@ -37,9 +37,9 @@ use livi_ui_model::settings::view::Screen;
 use slint::{ComponentHandle, Timer, TimerMode, Weak};
 
 use crate::{
-    AppWindow, CarpiCell, CarpiKey, CarpiKeyRow, CarpiKeyboard, CarpiKind, CarpiLayout, CarpiPill,
-    CarpiPoint, CarpiRow, CarpiSpot, CarpiState, CarpiTick, CarpiToast, Focus, FocusZone, Page,
-    ScreenKind, SettingsState,
+    AppWindow, CarpiCell, CarpiEmpty, CarpiItem, CarpiKey, CarpiKeyRow, CarpiKeyboard, CarpiKind,
+    CarpiLayout, CarpiLine, CarpiMark, CarpiPill, CarpiPoint, CarpiRow, CarpiSpot, CarpiState,
+    CarpiTick, CarpiToast, CarpiWidget, Focus, FocusZone, Page, ScreenKind, SettingsState,
 };
 
 include!("../../livi-carpi-ui/ui/glue.rs");
@@ -109,7 +109,6 @@ struct Field {
 pub fn page_of(id: PageId) -> Page {
     match id {
         PageId::Data => Page::CarpiData,
-        PageId::Diagnostics => Page::CarpiDiagnostics,
         PageId::Car => Page::Settings,
     }
 }
@@ -117,7 +116,6 @@ pub fn page_of(id: PageId) -> Page {
 fn id_of(page: Page) -> Option<PageId> {
     match page {
         Page::CarpiData => Some(PageId::Data),
-        Page::CarpiDiagnostics => Some(PageId::Diagnostics),
         _ => None,
     }
 }
@@ -127,7 +125,7 @@ pub fn ours(page: Page) -> bool {
     id_of(page).is_some() || (page == Page::Settings && OVER.get())
 }
 
-/// Our page for a UI path or `LIVI_UI_PAGE` value: `/carpi/data`, `carpi/diagnostics`. The
+/// Our page for a UI path or `LIVI_UI_PAGE` value: `/carpi/data`, `carpi/data/faults`. The
 /// rest of the path picks the screen when the page is reported next.
 pub fn named(path: &str) -> Option<Page> {
     let name = path.trim_start_matches('/').strip_prefix("carpi/")?;
@@ -210,6 +208,12 @@ pub fn wire(ui: &AppWindow) {
     st.on_cell(move |i| {
         if let Some(ui) = weak.upgrade() {
             press(&ui, Hit::Cell(i.max(0) as usize));
+        }
+    });
+    let weak = ui.as_weak();
+    st.on_panel(move |i| {
+        if let Some(ui) = weak.upgrade() {
+            press(&ui, Hit::Panel(i.max(0) as usize));
         }
     });
     let weak = ui.as_weak();
@@ -385,6 +389,36 @@ pub fn key(ui: &AppWindow, config: &serde_json::Value, code: &str) -> bool {
             return enter || back;
         }
         return distinct && d != 0 && tab_side(ui, d);
+    }
+    // A Data panel being viewed: the knob (and the D-pad) flip panels, Up goes to the tabs.
+    if !HOLD.get() {
+        let flip = with(|o| {
+            fresh(ui, o).map(|v| (v.flip, v.pills.iter().find(|p| p.active).map(|p| p.focus_at)))
+        })
+        .flatten();
+        let focus = ui.global::<Focus>();
+        if let Some((at, active)) = flip
+            && at >= 0
+            && focus.get_main_index() == at
+        {
+            let turn = if !knob_l.is_empty() && code == knob_l {
+                -1
+            } else if !knob_r.is_empty() && code == knob_r {
+                1
+            } else {
+                d
+            };
+            if turn != 0 {
+                side(ui, turn);
+                return true;
+            }
+            if code == or(bind("up"), "ArrowUp")
+                && let Some(a) = active
+            {
+                focus.set_main_index(a);
+                return true;
+            }
+        }
     }
     if HOLD.get() {
         let enter = code == "Enter" || code == "NumpadEnter" || code == bind("selectDown");
@@ -617,6 +651,7 @@ fn render(ui: &AppWindow, o: &mut Ours) {
     let Some(id) = id_of(ui.get_page()) else {
         return;
     };
+    o.pages.tick(&o.client);
     let (view, watch) = {
         let snap = o.client.snapshot();
         (

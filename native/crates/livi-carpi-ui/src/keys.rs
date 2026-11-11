@@ -96,7 +96,7 @@ pub fn action_label(a: &str) -> String {
         "toggle_dis_focus" => "Keys to the cluster".into(),
         "shutdown" => "Shut down".into(),
         "reboot" => "Restart the Pi".into(),
-        "save_capture" => "Capture".into(),
+        "save_capture" => "Collect debug logs".into(),
         "brightness_up" => "Brighter".into(),
         "brightness_down" => "Dimmer".into(),
         "toggle_logging" => "Start/stop logging".into(),

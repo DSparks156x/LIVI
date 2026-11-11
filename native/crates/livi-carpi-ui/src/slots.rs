@@ -34,6 +34,8 @@ pub struct Spec {
     pub max_pages: usize,
     /// One list that grows: the picker removes instead of emptying.
     pub list: bool,
+    /// Takes several values at once (Add all four).
+    pub many: bool,
 }
 
 impl Spec {
@@ -70,6 +72,7 @@ pub const DATA: Spec = Spec {
     // As many tabs as fit the header at 800 px.
     max_pages: 6,
     list: false,
+    many: true,
 };
 
 /// The cluster display's readings: one picker per slot, everything offered.
@@ -79,6 +82,7 @@ pub const DIS: Spec = Spec {
     without: &[],
     max_pages: 1,
     list: false,
+    many: false,
 };
 
 /// A data-log channel set: one list, no pages, no cap, everything offered.
@@ -88,6 +92,7 @@ pub const LOG: Spec = Spec {
     without: &[],
     max_pages: 1,
     list: true,
+    many: true,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -184,6 +189,10 @@ pub fn cols(size: usize) -> usize {
 pub enum Cat {
     Recent,
     Of(&'static str),
+    /// Module groups: the modules.
+    Modules,
+    /// One module's groups, by VCDS address.
+    Module(u8),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -210,6 +219,10 @@ pub enum SlotAct {
     /// Picker level 2: the category before or after.
     CatStep(i32),
     Pick(String),
+    /// Several values at once: a group's four fields.
+    PickAll(Vec<String>),
+    /// The module group shown, one up or down.
+    GroupStep(i32),
     ShowAll,
 }
 
@@ -219,6 +232,9 @@ fn act(a: SlotAct) -> Act {
 
 /// Values only diagnostics give, and carpid polls while something watches them.
 pub fn polled(name: &str) -> bool {
+    if crate::defs::module_group(name).is_some() {
+        return true;
+    }
     crate::catalog::diag(name)
         .unwrap_or_else(|| MEASURED.iter().any(|m| m.0 == name && m.1 != NO_POLL))
 }
@@ -284,6 +300,8 @@ pub fn members(cat: &str, snap: &Snapshot) -> Vec<(String, String)> {
 pub struct Picker {
     pub cat: Option<Cat>,
     pub all: bool,
+    /// The group on a module's screen.
+    pub group: u8,
 }
 
 /// What a picker act did.
@@ -294,6 +312,8 @@ pub enum Picked {
     Stay,
     /// Done: put this in the slot (`None` empties it).
     Chose(Option<String>),
+    /// Done: these, in order (a group's fields).
+    ChoseAll(Vec<String>),
 }
 
 impl Picker {
@@ -311,7 +331,16 @@ impl Picker {
         match a {
             SlotAct::Empty => Picked::Chose(None),
             SlotAct::Pick(name) => Picked::Chose(Some(name.clone())),
+            SlotAct::PickAll(names) => Picked::ChoseAll(names.clone()),
+            SlotAct::GroupStep(d) => {
+                let g = i32::from(self.group.max(1)) + d;
+                self.group = (g - 1).rem_euclid(255) as u8 + 1;
+                Picked::Stay
+            }
             SlotAct::Cat(c) => {
+                if matches!(c, Cat::Module(_)) && self.group == 0 {
+                    self.group = 1;
+                }
                 self.cat = Some(*c);
                 self.all = false;
                 Picked::Moved
@@ -337,7 +366,35 @@ impl Picker {
     /// One level up; false on level 1, where back leaves the picker.
     pub fn back(&mut self) -> bool {
         self.all = false;
+        if matches!(self.cat, Some(Cat::Module(_))) {
+            self.cat = Some(Cat::Modules);
+            return true;
+        }
         self.cat.take().is_some()
+    }
+
+    /// Levels below the first: 0, 1, or 2 on a module's groups.
+    pub fn level(&self) -> usize {
+        match self.cat {
+            None => 0,
+            Some(Cat::Module(_)) => 2,
+            Some(_) => 1,
+        }
+    }
+
+    /// The module and group a module's screen shows, and the four value names.
+    pub fn group_names(&self) -> Option<(u8, u8, Vec<String>)> {
+        let Some(Cat::Module(addr)) = self.cat else {
+            return None;
+        };
+        let g = self.group.max(1);
+        Some((
+            addr,
+            g,
+            (1..=4)
+                .map(|f| crate::defs::module_group_name(addr, g, f))
+                .collect(),
+        ))
     }
 
     /// The picker as a view: `title` names the slot, `current` is what's in it.
@@ -352,10 +409,72 @@ impl Picker {
     ) -> View {
         let mut v = match self.cat {
             None => level1(title, current, recent, snap, spec),
+            Some(Cat::Modules) => modules_view(snap),
+            Some(Cat::Module(addr)) => self.group_view(addr, current, snap, now, spec),
             Some(cat) => self.level2(cat, current, recent, snap, now, spec),
         };
         v.custom = true;
         v
+    }
+
+    /// One module's group: the number on the D-pad, its four fields live.
+    fn group_view(
+        &self,
+        addr: u8,
+        current: Option<&str>,
+        snap: &Snapshot,
+        now: Instant,
+        spec: &Spec,
+    ) -> View {
+        let g = self.group.max(1);
+        let module = snap
+            .diag
+            .modules()
+            .into_iter()
+            .find(|m| m.module.address == addr);
+        let title = module.as_ref().map_or_else(
+            || format!("{addr:02X}"),
+            |m| format!("{addr:02X}  {}", m.module.name),
+        );
+        let mut v = View::new(Layout::List, title, true);
+        let at = v.row(
+            Row::new(RowKind::Step, "Group", g.to_string())
+                .act(act(SlotAct::GroupStep(1)))
+                .side(act(SlotAct::GroupStep(-1)), act(SlotAct::GroupStep(1))),
+        );
+        v.start = at;
+        let tp2 = module.map(|m| m.module.tp2);
+        let read = tp2.and_then(|t| snap.diag.groups.get(&(t, g)));
+        let mut names = Vec::new();
+        for f in 1..=4u8 {
+            let name = crate::defs::module_group_name(addr, g, f);
+            let field = read.and_then(|r| r.get(usize::from(f) - 1));
+            let unit = field.map_or("", |x| x.unit.as_str());
+            let live = match snap.values.get(&name).and_then(|s| s.value.as_ref()) {
+                Some(carpi_proto::Value::Num(n)) => Some(crate::values::number(*n, 2)),
+                _ => None,
+            };
+            let value = match (live, field) {
+                (Some(x), _) => reading(&x, unit),
+                (None, Some(x)) => reading(&x.text, unit),
+                (None, None) => "…".to_string(),
+            };
+            let mut row = Row::new(RowKind::Info, format!("Field {f}"), value)
+                .act(act(SlotAct::Pick(name.clone())))
+                .checked(current == Some(name.as_str()));
+            row.dimmed = field.is_some_and(|x| x.value.is_none() && x.text.is_empty());
+            let _ = now;
+            v.row(row);
+            names.push(name);
+        }
+        if spec.many {
+            v.row(
+                Row::new(RowKind::Button, "Add all four", "")
+                    .button("Add")
+                    .act(act(SlotAct::PickAll(names))),
+            );
+        }
+        v.finish()
     }
 
     fn level2(
@@ -372,6 +491,7 @@ impl Picker {
         let n = order.len();
         let name_of = |c: Cat| match c {
             Cat::Recent => "Recent",
+            Cat::Modules | Cat::Module(_) => "Module groups",
             Cat::Of(id) => crate::defs::category(id).map_or(id, |c| c.label),
         };
         let mut v = View::new(Layout::List, name_of(cat), true);
@@ -385,6 +505,7 @@ impl Picker {
         v.side = Some((act(SlotAct::CatStep(-1)), act(SlotAct::CatStep(1))));
         let list: Vec<(String, String)> = match cat {
             Cat::Recent => recent.iter().map(|r| (String::new(), r.clone())).collect(),
+            Cat::Modules | Cat::Module(_) => Vec::new(),
             Cat::Of(id) => members(id, snap),
         };
         let mut sub = None;
@@ -423,6 +544,25 @@ impl Picker {
         v.start = start;
         v.finish()
     }
+}
+
+/// Module groups: the modules carpid can poll (never ABS).
+fn modules_view(snap: &Snapshot) -> View {
+    let mut v = View::new(Layout::List, "Module groups", true);
+    for m in snap.diag.modules() {
+        if m.coded == Some(false) || m.module.tp2 == NO_POLL {
+            continue;
+        }
+        v.row(
+            Row::new(
+                RowKind::Route,
+                format!("{:02X}  {}", m.module.address, m.module.name),
+                "",
+            )
+            .act(act(SlotAct::Cat(Cat::Module(m.module.address)))),
+        );
+    }
+    v.finish()
 }
 
 fn pick_row(name: &str, current: Option<&str>, snap: &Snapshot, now: Instant) -> Row {
@@ -515,6 +655,7 @@ fn level1(
             v.start = at;
         }
     }
+    v.row(Row::new(RowKind::Route, "Module groups", "").act(act(SlotAct::Cat(Cat::Modules))));
     v.finish()
 }
 
@@ -548,9 +689,13 @@ impl Editor {
         spec: &Spec,
     ) -> (Focus, bool) {
         if let Some(p) = &mut self.picker {
-            return match p.apply(a, spec, recent) {
+            let picked = match p.apply(a, spec, recent) {
+                Picked::ChoseAll(names) => Picked::Chose(names.into_iter().next()),
+                other => other,
+            };
+            return match picked {
                 Picked::Moved => (Focus::Start, false),
-                Picked::Stay => (Focus::Stay, false),
+                Picked::Stay | Picked::ChoseAll(_) => (Focus::Stay, false),
                 Picked::Chose(name) => {
                     let slot = self.slot;
                     if let Some(n) = &name {
@@ -796,6 +941,19 @@ impl Editor {
             return match p.apply(a, spec, recent) {
                 Picked::Moved => (Focus::Start, false),
                 Picked::Stay => (Focus::Stay, false),
+                Picked::ChoseAll(names) => {
+                    self.picker = None;
+                    let mut changed = false;
+                    for n in names {
+                        remember(recent, &n);
+                        if !list.contains(&n) {
+                            list.push(n);
+                            changed = true;
+                        }
+                    }
+                    self.slot = list.len().saturating_sub(1);
+                    (Focus::Start, changed)
+                }
                 Picked::Chose(name) => {
                     self.picker = None;
                     let slot = self.slot;
@@ -1081,6 +1239,7 @@ mod tests {
         let p = Picker {
             cat: Some(Cat::Of("haldex")),
             all: false,
+            group: 0,
         };
         let v = p.view("t", None, &[], &s, Instant::now(), &DATA);
         let oil = v.rows.iter().find(|r| r.label == "Haldex oil").unwrap();
@@ -1251,5 +1410,42 @@ mod tests {
         }
         remember(&mut r, "v.5");
         assert_eq!(r, ["v.5", "v.7", "v.6", "v.4", "v.3", "v.2"]);
+    }
+}
+
+#[cfg(test)]
+mod group_tests {
+    use super::*;
+
+    #[test]
+    fn module_groups_step_and_pick_fields() {
+        let s = Snapshot::default();
+        let mut p = Picker::default();
+        let v = p.view("Add value", None, &[], &s, Instant::now(), &DATA);
+        let at = v.rows.iter().position(|r| r.label == "Module groups").unwrap();
+        assert_eq!(v.rows[at].act, Act::Slots(SlotAct::Cat(Cat::Modules)));
+        p.apply(&SlotAct::Cat(Cat::Modules), &DATA, &[]);
+        let v = p.view("Add value", None, &[], &s, Instant::now(), &DATA);
+        assert!(v.rows.iter().all(|r| !r.label.starts_with("03")), "never ABS");
+        p.apply(&SlotAct::Cat(Cat::Module(0x01)), &DATA, &[]);
+        assert_eq!(p.level(), 2);
+        p.apply(&SlotAct::GroupStep(-1), &DATA, &[]);
+        assert_eq!(p.group, 255);
+        p.apply(&SlotAct::GroupStep(103), &DATA, &[]);
+        assert_eq!(p.group, 103);
+        let v = p.view("Add value", None, &[], &s, Instant::now(), &DATA);
+        assert_eq!(v.title, "01  Engine");
+        assert_eq!(v.rows[0].value, "103");
+        assert_eq!(
+            v.rows[2].act,
+            Act::Slots(SlotAct::Pick("diag.01.103.2".into()))
+        );
+        assert!(v.rows.iter().any(|r| r.label == "Add all four"));
+        assert!(polled("diag.01.103.2"));
+        assert_eq!(crate::defs::describe("diag.01.103.2").label, "01 · 103 · 2");
+        assert!(p.back());
+        assert_eq!(p.cat, Some(Cat::Modules));
+        assert!(p.back());
+        assert!(!p.back());
     }
 }

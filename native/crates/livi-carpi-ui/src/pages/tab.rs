@@ -21,7 +21,6 @@ use super::{
 use crate::client::{Capture, Client, Snapshot};
 use crate::keys::{self, KEYS};
 use crate::light::{self, STEP_AMBIENT, STEP_PCT};
-use crate::logging;
 use crate::settings::{self as cfg, DIS_CELLS, DIS_PAGES};
 use crate::slots::{self, Picked, Picker, SlotAct};
 use crate::values::{NONE, show};
@@ -59,9 +58,6 @@ pub(super) fn view(pages: &Pages, snap: &Snapshot, now: Instant) -> View {
         S::Key(k) => key(snap, k),
         S::Binding(k, i) => binding(snap, k, i),
         S::Logs => logs(snap, pages),
-        S::Logging => logging::root(&pages.log, snap),
-        S::LogProfile => logging::profile(&pages.log, snap),
-        S::LogChannels => logging::channels(&pages.log, pages.recent(), snap, now),
         S::Power => power(snap),
         S::Zones => zones(snap),
         S::Zone(r) => zone(snap, r),
@@ -204,7 +200,8 @@ fn root(_pages: &Pages, snap: &Snapshot) -> View {
     };
     v.row(route("Screen & lighting", light, S::Lighting).icon("Brightness6Outlined"));
     v.row(route("Controls", "", S::Controls).icon("KeyboardOutlined"));
-    v.row(route("Logging & captures", logging_now(snap), S::Logs).icon("ArticleOutlined"));
+    let debug = if snap.capture == Capture::Saving { "Collecting…" } else { "" };
+    v.row(route("Debug logs", debug, S::Logs).icon("ArticleOutlined"));
     v.row(route("Power & clock", "", S::Power).icon("PowerSettingsNewOutlined"));
     let avsd = match s {
         Some(s) if !s.avsd.found && !s.avsd.ranges.is_empty() => "Not set up",
@@ -222,13 +219,6 @@ fn root(_pages: &Pages, snap: &Snapshot) -> View {
 }
 
 /// The data log running now, if one is.
-fn logging_now(snap: &Snapshot) -> String {
-    match snap.datalog.as_ref().and_then(|d| d.running.as_ref()) {
-        Some(r) => format!("Logging {}", r.label),
-        None => String::new(),
-    }
-}
-
 /// carpid offers newer bundled firmware for the RNS-E or the Teensy.
 fn firmware_update(snap: &Snapshot) -> bool {
     let f = &snap.firmware;
@@ -1418,7 +1408,7 @@ fn binding(snap: &Snapshot, _k: usize, at: usize) -> View {
     v
 }
 
-// ---- Logging & captures ----
+// ---- Debug logs ----
 
 fn logs_patch(p: LogsPatch) -> Act {
     set(SettingsPatch {
@@ -1429,29 +1419,28 @@ fn logs_patch(p: LogsPatch) -> Act {
 
 fn logs(snap: &Snapshot, pages: &Pages) -> View {
     let _ = pages;
-    with_settings(snap, "Logging & captures", |v, s| {
-        v.row(route("Logging", logging_now(snap), S::Logging));
+    with_settings(snap, "Debug logs", |v, s| {
         if snap.capture == Capture::Saving {
-            v.row(info("Capture now", "Saving…").dimmed(true));
+            v.row(info("Collect debug logs", "Collecting…").dimmed(true));
         } else if snap.connected {
             v.row(
-                Row::new(RowKind::Button, "Capture now", "")
-                    .button("Capture")
+                Row::new(RowKind::Button, "Collect debug logs", "")
+                    .button("Collect")
                     .act(Act::Capture),
             );
         }
         match &snap.capture {
             Capture::Saved { label, .. } => {
-                v.row(info("Last capture", label.clone()));
+                v.row(info("Last", label.clone()));
             }
             Capture::Failed(why) => {
-                v.row(info("Last capture failed", why.clone()).alert(true));
+                v.row(info("Last failed", why.clone()).alert(true));
             }
             _ => {}
         }
         const MINUTES: [u32; 8] = [1, 2, 3, 5, 10, 15, 20, 30];
         v.row(step(
-            "Capture length",
+            "Length",
             format!("{} min", s.logs.capture_minutes),
             &MINUTES,
             s.logs.capture_minutes,
@@ -2339,6 +2328,7 @@ impl Pages {
             Picked::Moved => return Moved::Opened,
             Picked::Stay => return Moved::Stay,
             Picked::Chose(name) => name,
+            Picked::ChoseAll(names) => names.into_iter().next(),
         };
         let Some(s) = client.snapshot().settings.clone() else {
             return Moved::Stay;
@@ -2611,7 +2601,7 @@ mod tests {
             S::Key(keys::key_at("enter").unwrap()).parent(),
             Some(S::Faceplate)
         );
-        assert_eq!(S::LogChannels.depth(), 4);
+        assert_eq!(S::Picture.depth(), 2);
         assert!(S::Night.light() && !S::Cluster.light());
     }
 

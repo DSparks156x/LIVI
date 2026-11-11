@@ -441,11 +441,11 @@ impl Snapshot {
     fn captured(&mut self, result: Result<(String, String), String>) {
         match result {
             Ok((label, summary)) => {
-                self.toast(format!("Capture {label}"), ToastLevel::Info);
+                self.toast(format!("Debug logs {label}"), ToastLevel::Info);
                 self.capture = Capture::Saved { label, summary };
             }
             Err(why) => {
-                self.toast(format!("Capture failed: {why}"), ToastLevel::Error);
+                self.toast(format!("Debug logs failed: {why}"), ToastLevel::Error);
                 self.capture = Capture::Failed(why);
             }
         }
@@ -603,7 +603,7 @@ impl Client {
     /// Starts a diag job; its events land in [`Snapshot::diag`].
     pub fn diag(&self, action: DiagAction) {
         if self.asks.is_none() {
-            self.snapshot().diag.refused(action, "not connected".into());
+            self.snapshot().diag.refused(action.clone(), "not connected".into());
         }
         self.ask(Ask::Diag(action));
     }
@@ -2229,7 +2229,7 @@ mod tests {
             Capture::Saved { .. }
         )));
         let toast = client.snapshot().toast.clone().unwrap();
-        assert_eq!(toast.text, "Capture 2026-11-08 #01");
+        assert_eq!(toast.text, "Debug logs 2026-11-08 #01");
     }
 
     #[cfg(unix)]

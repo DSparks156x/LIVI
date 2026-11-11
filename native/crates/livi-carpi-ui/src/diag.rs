@@ -6,9 +6,9 @@
 //! catalog's names (`carpi-diag/src/catalog.rs`), which makes carpid poll them while the page
 //! shows them.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use carpi_proto::{DiagAction, InstalledModule, JobEvent};
+use carpi_proto::{DiagAction, GroupField, InstalledModule, JobEvent};
 
 /// A module the page lists: VCDS address and TP2 ID.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -125,29 +125,64 @@ pub enum Job {
     },
 }
 
-/// What carpid told about diagnostics.
+/// A module's identification (`1A 9B`, coding from `22 06 00`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Identity {
+    pub part_no: Option<String>,
+    pub component: Option<String>,
+    pub sw_version: Option<String>,
+    /// Upper-case hex.
+    pub coding: Option<String>,
+    pub workshop: Option<String>,
+}
+
+/// What carpid told about diagnostics.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Diag {
     pub installed: Option<Vec<Installed>>,
     /// Fault codes per TP2 module, after a read or a clear.
     pub dtcs: BTreeMap<u8, Vec<Dtc>>,
+    pub identity: BTreeMap<u8, Identity>,
+    /// The last read of a measuring group: (TP2 module, group) to its fields.
+    pub groups: BTreeMap<(u8, u8), Vec<GroupField>>,
+    /// VCDS addresses that didn't answer the last scan.
+    pub failed: BTreeSet<u8>,
+    /// The module a scan is on now (VCDS address).
+    pub scanning: Option<u8>,
     pub job: Option<Job>,
 }
 
-fn module_of(action: DiagAction) -> Option<u8> {
+fn module_of(action: &DiagAction) -> Option<u8> {
     match action {
-        DiagAction::ReadDtcs { module } | DiagAction::ClearDtcs { module, .. } => Some(module),
-        DiagAction::InstallList | DiagAction::Status => None,
+        DiagAction::ReadDtcs { module }
+        | DiagAction::ClearDtcs { module, .. }
+        | DiagAction::Identify { module }
+        | DiagAction::ReadGroup { module, .. }
+        | DiagAction::ReadAdaptation { module, .. }
+        | DiagAction::WriteCoding { module, .. }
+        | DiagAction::WriteAdaptation { module, .. } => Some(*module),
+        DiagAction::InstallList | DiagAction::Status | DiagAction::Scan => None,
     }
 }
 
-fn doing(action: DiagAction) -> &'static str {
+fn doing(action: &DiagAction) -> &'static str {
     match action {
         DiagAction::InstallList => "Reading the install list",
         DiagAction::ReadDtcs { .. } => "Reading fault codes",
         DiagAction::ClearDtcs { .. } => "Clearing fault codes",
         DiagAction::Status => "Reading the diag status",
+        DiagAction::Scan => "Scan",
+        DiagAction::Identify { .. } => "Reading identity",
+        DiagAction::ReadGroup { .. } => "Reading group",
+        DiagAction::ReadAdaptation { .. } => "Reading adaptation",
+        DiagAction::WriteCoding { .. } => "Writing coding",
+        DiagAction::WriteAdaptation { .. } => "Writing adaptation",
     }
+}
+
+/// The VCDS address a scan stage names: `01 Engine` -> 0x01.
+fn address_in(message: &str) -> Option<u8> {
+    u8::from_str_radix(message.split_whitespace().next()?, 16).ok()
 }
 
 impl Diag {
@@ -157,6 +192,11 @@ impl Diag {
     }
 
     pub fn started(&mut self, job: u32, action: DiagAction) {
+        if action == DiagAction::Scan {
+            self.failed.clear();
+            self.dtcs.clear();
+            self.scanning = None;
+        }
         self.job = Some(Job::Running {
             job,
             action,
@@ -187,7 +227,46 @@ impl Diag {
             return;
         }
         match event {
+            JobEvent::Stage { stage: s, message } if *action == DiagAction::Scan => {
+                let at = address_in(&message);
+                match s.as_str() {
+                    "failed" => {
+                        if let Some(a) = at {
+                            self.failed.insert(a);
+                        }
+                    }
+                    _ => self.scanning = at,
+                }
+                *stage = message;
+            }
             JobEvent::Stage { stage: s, .. } => *stage = s,
+            JobEvent::Identity {
+                module,
+                part_no,
+                component,
+                sw_version,
+                coding,
+                workshop,
+            } => {
+                self.identity.insert(
+                    module,
+                    Identity {
+                        part_no,
+                        component,
+                        sw_version,
+                        coding,
+                        workshop,
+                    },
+                );
+            }
+            JobEvent::Group {
+                module,
+                group,
+                fields,
+            } => {
+                self.groups
+                    .insert((module, group), fields.into_iter().take(4).collect());
+            }
             JobEvent::InstallList { modules } => {
                 self.installed = Some(modules.iter().map(installed).collect());
             }
@@ -202,7 +281,8 @@ impl Diag {
                 self.dtcs.insert(module, codes);
             }
             JobEvent::Finished { ok, message } => {
-                let action = *action;
+                let action = action.clone();
+                self.scanning = None;
                 self.job = Some(Job::Done {
                     action,
                     ok,
@@ -217,24 +297,24 @@ impl Diag {
     pub fn line(&self, module: Option<u8>) -> Option<String> {
         let (action, text) = match self.job.as_ref()? {
             Job::Running { action, stage, .. } if stage.is_empty() => {
-                (*action, format!("{}…", doing(*action)))
+                (action, format!("{}…", doing(action)))
             }
             Job::Running { action, stage, .. } => {
-                (*action, format!("{}: {stage}…", doing(*action)))
+                (action, format!("{}: {stage}…", doing(action)))
             }
             Job::Done {
                 action,
                 ok: true,
                 message,
-            } if message.is_empty() => (*action, format!("{}: done.", doing(*action))),
+            } if message.is_empty() => (action, format!("{}: done.", doing(action))),
             Job::Done {
                 action,
                 ok: true,
                 message,
-            } => (*action, format!("{}: {message}", doing(*action))),
+            } => (action, format!("{}: {message}", doing(action))),
             Job::Done {
                 action, message, ..
-            } => (*action, format!("{} failed: {message}", doing(*action))),
+            } => (action, format!("{} failed: {message}", doing(action))),
         };
         let mine = match (module, module_of(action)) {
             (Some(m), Some(a)) => m == a,
@@ -354,5 +434,57 @@ mod tests {
         for (i, m) in MEASURED.iter().enumerate() {
             assert!(MEASURED[i + 1..].iter().all(|n| n.0 != m.0), "{}", m.0);
         }
+    }
+}
+
+#[cfg(test)]
+mod scan_tests {
+    use super::*;
+
+    #[test]
+    fn a_scan_tracks_the_module_failures_and_identity() {
+        let mut d = Diag::default();
+        d.started(7, DiagAction::Scan);
+        d.event(
+            7,
+            JobEvent::Stage {
+                stage: "module".into(),
+                message: "01 Engine".into(),
+            },
+        );
+        assert_eq!(d.scanning, Some(0x01));
+        assert_eq!(d.line(None).as_deref(), Some("Scan: 01 Engine…"));
+        d.event(
+            7,
+            JobEvent::Identity {
+                module: 1,
+                part_no: Some("06F906056AK".into()),
+                component: Some("2.0l R4/4V TFSI".into()),
+                sw_version: Some("0030".into()),
+                coding: None,
+                workshop: None,
+            },
+        );
+        d.event(
+            7,
+            JobEvent::Stage {
+                stage: "failed".into(),
+                message: "46 Central convenience".into(),
+            },
+        );
+        assert!(d.failed.contains(&0x46));
+        d.event(
+            7,
+            JobEvent::Finished {
+                ok: true,
+                message: "5 of 6 modules, 2 faults, 2026-11-11 #04".into(),
+            },
+        );
+        assert_eq!(d.scanning, None);
+        assert_eq!(d.identity[&1].part_no.as_deref(), Some("06F906056AK"));
+        assert_eq!(
+            d.line(None).as_deref(),
+            Some("Scan: 5 of 6 modules, 2 faults, 2026-11-11 #04")
+        );
     }
 }

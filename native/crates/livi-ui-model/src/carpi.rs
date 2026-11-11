@@ -3,7 +3,7 @@
 
 //! carpi fork: carpid's pages in the tab bar, Setup and Car Integration in Settings.
 //!
-//! Data takes the dashboard's place and Diagnostics goes before Settings. The tab is the last
+//! Data takes the dashboard's place. The tab is the last
 //! route of Settings' root; its screens come from livi-carpi-ui as views, drawn as LIVI's own
 //! rows ([`native`]) or, for the plot and the picker, by our own page over Settings
 //! ([`overlay`]).
@@ -19,11 +19,6 @@ pub fn tabs(mut tabs: Vec<Tab>) -> Vec<Tab> {
     let data = tabs.iter().position(|t| *t == Tab::Telemetry);
     tabs.retain(|t| *t != Tab::Telemetry);
     tabs.insert(data.unwrap_or(1).min(tabs.len()), Tab::Carpi(PageId::Data));
-    let at = tabs
-        .iter()
-        .position(|t| *t == Tab::Settings)
-        .unwrap_or(tabs.len());
-    tabs.insert(at, Tab::Carpi(PageId::Diagnostics));
     tabs
 }
 
@@ -602,7 +597,6 @@ mod tests {
                 Tab::Carpi(PageId::Data),
                 Tab::Media,
                 Tab::Camera,
-                Tab::Carpi(PageId::Diagnostics),
                 Tab::Settings,
             ]
         );
@@ -611,7 +605,6 @@ mod tests {
             vec![
                 Tab::Projection,
                 Tab::Carpi(PageId::Data),
-                Tab::Carpi(PageId::Diagnostics),
                 Tab::Settings,
             ]
         );
@@ -715,7 +708,7 @@ mod tests {
         let loaded = config::load(&file);
         assert!(loaded.setup_done);
         assert_eq!(loaded.recent, saved.recent);
-        assert_eq!(loaded.data, saved.data);
+        assert_eq!(loaded.panels(), saved.panels());
         assert_eq!(loaded.keyboard, saved.keyboard);
         pages = Pages::new(loaded, Some(file.clone()));
         assert!(

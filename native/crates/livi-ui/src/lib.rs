@@ -292,7 +292,7 @@ fn reported(ui: &AppWindow, client: &Client, page: Page) {
         Page::Media => (Front::Livi, media_ui::path(ui)),
         Page::Camera => (Front::Camera, "/camera"),
         Page::Settings => (Front::Livi, carpi_ui::settings_path().unwrap_or("/settings")),
-        Page::CarpiData | Page::CarpiDiagnostics => carpi_ui::reported(ui, page),
+        Page::CarpiData => carpi_ui::reported(ui, page),
     };
     client.show(Screen::Main, front);
     client.path(path);

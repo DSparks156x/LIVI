@@ -411,8 +411,8 @@ mod tests {
         assert_eq!(given.try_recv(), Ok(InputAction::OpenNav));
 
         let page = |p: &str| InputAction::OpenPage { page: p.into() };
-        act(&out, &State::default(), page("diagnostics")).unwrap();
-        assert_eq!(pages.try_recv().as_deref(), Ok("/carpi/diagnostics"));
+        act(&out, &State::default(), page("faults")).unwrap();
+        assert_eq!(pages.try_recv().as_deref(), Ok("/carpi/data/faults"));
         assert!(act(&out, &state, page("nope")).is_err());
         assert!(given.try_recv().is_err());
     }

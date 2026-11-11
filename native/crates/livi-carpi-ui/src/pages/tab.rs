@@ -1974,7 +1974,14 @@ fn updates(snap: &Snapshot) -> View {
             .and_then(|s| s.current.clone())
             .unwrap_or(version);
         v.row(info("This version", version));
-        if let Some(status) = &snap.update_status
+        // One row for how the last update went: this session's attempt if there was one, else
+        // what carpi-update recorded.
+        let job = &snap.update;
+        let last = if let Some((ok, m)) = &job.finished {
+            Some((if *ok { capital(m) } else { format!("Failed: {m}") }, !ok))
+        } else if let Some(n) = &snap.update_note {
+            Some((n.clone(), false))
+        } else if let Some(status) = &snap.update_status
             && let Some(last) = status.last_apply.as_deref()
         {
             let history = match (last, status.update_running) {
@@ -1986,10 +1993,16 @@ fn updates(snap: &Snapshot) -> View {
                 ("applying", Some(false)) => "Interrupted",
                 _ => "Unknown",
             };
-            v.row(info("Last apply", history).alert(matches!(
+            let alert = matches!(
                 (last, status.update_running),
                 ("failed" | "rolled_back", _) | ("applying", Some(false))
-            )));
+            );
+            Some((history.to_string(), alert))
+        } else {
+            None
+        };
+        if let Some((value, alert)) = last {
+            v.row(info("Last update", value).alert(alert));
         }
         const CHANNELS: [(UpdateChannel, &str); 2] = [
             (UpdateChannel::Stable, "Stable"),
@@ -2001,7 +2014,6 @@ fn updates(snap: &Snapshot) -> View {
                 ..Default::default()
             })
         }));
-        let job = &snap.update;
         if job.running() {
             let pct = match job.progress {
                 Some((done, Some(total))) if total > 0 => {
@@ -2018,15 +2030,7 @@ fn updates(snap: &Snapshot) -> View {
         } else if snap.update_recovering {
             v.row(info("Update status", "Checking update status"));
         } else {
-            let last = match &job.finished {
-                Some((true, m)) => m.clone(),
-                Some((false, m)) => format!("Failed: {m}"),
-                None => snap.update_note.clone().unwrap_or_default(),
-            };
-            v.row(
-                route("Check and install", last, S::UpdateConfirm)
-                    .alert(matches!(job.finished, Some((false, _)))),
-            );
+            v.row(route("Check and install", "", S::UpdateConfirm));
         }
         let nets = match &snap.wifi.networks {
             Some(n) => count(n.len(), "saved", "saved"),
@@ -2563,7 +2567,7 @@ mod tests {
     }
 
     #[test]
-    fn updates_shows_apply_history_separately_from_a_current_job_result() {
+    fn last_update_is_one_row_and_a_new_failure_replaces_old_history() {
         let mut s = snap();
         s.update_status = Some(carpi_proto::Installed {
             current: Some("beta-20261109-5e0cf2c".into()),
@@ -2577,11 +2581,17 @@ mod tests {
             v.rows[find(&v, "This version")].value,
             "beta-20261109-5e0cf2c"
         );
-        assert_eq!(v.rows[find(&v, "Last apply")].value, "Succeeded");
+        assert_eq!(v.rows[find(&v, "Last update")].value, "Succeeded");
+        assert!(!v.rows[find(&v, "Last update")].alert);
         assert!(v.rows[find(&v, "Check and install")].value.is_empty());
-        assert!(s.update.finished.is_none());
-        assert!(!v.rows[find(&v, "Last apply")].alert);
-        assert!(!v.rows[find(&v, "Check and install")].alert);
+        // A refused update doesn't sit beside an old "Succeeded".
+        s.update.finished = Some((false, "needs OS profile 2, Pi has 1".into()));
+        let v = updates(&s);
+        let row = &v.rows[find(&v, "Last update")];
+        assert_eq!(row.value, "Failed: needs OS profile 2, Pi has 1");
+        assert!(row.alert);
+        assert_eq!(v.rows.iter().filter(|r| r.value.contains("ucceeded")).count(), 0);
+        assert!(v.rows[find(&v, "Check and install")].value.is_empty());
     }
 
     #[test]
@@ -2603,7 +2613,7 @@ mod tests {
         let mut s = snap();
         s.update_note = Some("Update outcome unknown; running 8f2a408".into());
         let v = updates(&s);
-        let row = &v.rows[find(&v, "Check and install")];
+        let row = &v.rows[find(&v, "Last update")];
         assert_eq!(row.value, "Update outcome unknown; running 8f2a408");
         assert!(!row.alert);
         for (outcome, history, message) in [
@@ -2622,13 +2632,13 @@ mod tests {
             });
             // A fresh UI still warns about authoritative failure history.
             let v = updates(&s);
-            let row = &v.rows[find(&v, "Last apply")];
+            let row = &v.rows[find(&v, "Last update")];
             assert_eq!(row.value, history);
             assert!(row.alert);
             // The same outcome for a locally observed attempt remains an alert too.
             s.update.finished = Some((false, message.into()));
             let v = updates(&s);
-            let row = &v.rows[find(&v, "Check and install")];
+            let row = &v.rows[find(&v, "Last update")];
             assert_eq!(row.value, format!("Failed: {message}"));
             assert!(row.alert);
             s.update.finished = None;

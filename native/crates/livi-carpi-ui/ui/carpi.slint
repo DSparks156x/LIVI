@@ -308,6 +308,8 @@ component RowView inherits Rectangle {
             font-family: r.mono ? "monospace" : "Roboto";
             vertical-alignment: center;
             horizontal-alignment: right;
+            // Two lines fit the row: a long value (an update error) wraps instead of cutting off.
+            wrap: word-wrap;
             overflow: elide;
         }
         if root.sided: Chevron {

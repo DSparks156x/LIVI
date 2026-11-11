@@ -120,8 +120,9 @@ impl FirmwareJob {
         if !self.job.running() {
             return None;
         }
-        match self.action? {
-            A::InstallRnse { .. } => Some(crate::firmware::Unit::Rnse),
+        match self.action.as_ref()? {
+            // A sector flash restarts the RNS-E just like the install.
+            A::InstallRnse { .. } | A::FlashSector { .. } => Some(crate::firmware::Unit::Rnse),
             A::InstallTeensy { .. } => Some(crate::firmware::Unit::Teensy),
             A::Status | A::Probe => None,
         }
@@ -693,7 +694,7 @@ impl Client {
                     return;
                 }
                 s.firmware_job = FirmwareJob {
-                    action: Some(action),
+                    action: Some(action.clone()),
                     job: UpdateJob {
                         asked: true,
                         ..Default::default()

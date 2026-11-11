@@ -71,9 +71,12 @@ pub(super) fn view(pages: &Pages, snap: &Snapshot, now: Instant) -> View {
         S::Remote => remote(snap),
         S::Pin => pin_entry(snap, &pages.pin),
         S::Updates => updates(snap),
-        S::Firmware | S::AvsdFirmware => {
-            crate::firmware::view(&snap.firmware, &snap.firmware_job, pages.flashing())
-        }
+        S::Firmware | S::AvsdFirmware => crate::firmware::view_dev(
+            &snap.firmware,
+            &snap.firmware_job,
+            pages.flashing(),
+            pages.flashing_sector(),
+        ),
         S::UpdateConfirm => update_confirm(snap),
         S::Wifi => wifi(snap),
         S::WifiNet(i) => wifi_net(snap, i, pages.forgetting()),
@@ -1978,7 +1981,14 @@ fn updates(snap: &Snapshot) -> View {
         // what carpi-update recorded.
         let job = &snap.update;
         let last = if let Some((ok, m)) = &job.finished {
-            Some((if *ok { capital(m) } else { format!("Failed: {m}") }, !ok))
+            Some((
+                if *ok {
+                    capital(m)
+                } else {
+                    format!("Failed: {m}")
+                },
+                !ok,
+            ))
         } else if let Some(n) = &snap.update_note {
             Some((n.clone(), false))
         } else if let Some(status) = &snap.update_status
@@ -2246,6 +2256,9 @@ impl Pages {
         if !matches!(act, Act::FirmwareInstall(_)) {
             self.flashing = None;
         }
+        if !matches!(act, Act::FlashSector(_)) {
+            self.flashing_sector = None;
+        }
         // A screen Setup opens comes back to Setup.
         if let (S::Setup, Act::Car(to)) = (self.car, act) {
             self.via_setup = Some(*to);
@@ -2305,6 +2318,18 @@ impl Pages {
                 }
                 self.flashing = None;
                 client.firmware(unit.install());
+                Moved::Stay
+            }
+            Act::FlashSector(name) => {
+                if self.flashing_sector.as_deref() != Some(name.as_str()) {
+                    self.flashing_sector = Some(name.clone());
+                    return Some(Moved::Stay);
+                }
+                self.flashing_sector = None;
+                client.firmware(carpi_proto::FirmwareAction::FlashSector {
+                    name: name.clone(),
+                    confirm: true,
+                });
                 Moved::Stay
             }
             Act::MoveNvme => {
@@ -2590,7 +2615,13 @@ mod tests {
         let row = &v.rows[find(&v, "Last update")];
         assert_eq!(row.value, "Failed: needs OS profile 2, Pi has 1");
         assert!(row.alert);
-        assert_eq!(v.rows.iter().filter(|r| r.value.contains("ucceeded")).count(), 0);
+        assert_eq!(
+            v.rows
+                .iter()
+                .filter(|r| r.value.contains("ucceeded"))
+                .count(),
+            0
+        );
         assert!(v.rows[find(&v, "Check and install")].value.is_empty());
     }
 

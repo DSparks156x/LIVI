@@ -73,6 +73,16 @@ While a job runs the screen shows its stage, message and percent (and, for an in
 same warnings); after it ends, the final message, marked as an alert when it failed. Firmware
 installs are separate from the system-image updater; do not route them through it.
 
+## Advanced: Flash Sector
+
+- Source: `Status::uploads`, the portal's `[prefix]sector_<N>.bin` files (carpid: sector,
+  size, CRC, `problem`).
+- Section shown only when there are uploads. First row: **Raw Write**, "No content checks".
+- One row per upload: name, "Sector N · CRC X". With a `problem`: alert row, no button.
+- **Flash**: two pushes like an install. First shows the RNS-E warnings and relabels to
+  "Push again to flash sector N"; second sends `flash_sector { name, confirm: true }`.
+- Job title **Flash Sector**, with the RNS-E warnings while running. No buttons while busy.
+
 ## Fixtures
 
 `fixtures/firmware-newer.json` and `fixtures/firmware-legacy.json` contain synthetic

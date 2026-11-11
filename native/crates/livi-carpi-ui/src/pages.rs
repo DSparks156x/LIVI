@@ -77,6 +77,8 @@ pub struct Pages {
     moving: bool,
     /// A firmware install waits for a second push.
     flashing: Option<crate::firmware::Unit>,
+    /// Flash Sector armed (upload name), waiting for the second push.
+    flashing_sector: Option<String>,
 }
 
 impl Pages {
@@ -110,6 +112,7 @@ impl Pages {
             via_setup: None,
             moving: false,
             flashing: None,
+            flashing_sector: None,
         }
     }
 
@@ -190,6 +193,10 @@ impl Pages {
 
     pub(crate) fn flashing(&self) -> Option<crate::firmware::Unit> {
         self.flashing
+    }
+
+    pub(crate) fn flashing_sector(&self) -> Option<&str> {
+        self.flashing_sector.as_deref()
     }
 
     /// Where back goes from the Car tab's screen now.
@@ -465,6 +472,7 @@ impl Pages {
                 self.via_setup = None;
                 self.moving = false;
                 self.flashing = None;
+                self.flashing_sector = None;
             }
         }
         self.trail.clear();
@@ -501,6 +509,7 @@ impl Pages {
                 self.car = up;
                 self.moving = false;
                 self.flashing = None;
+                self.flashing_sector = None;
                 self.log.removing = false;
                 self.removing = false;
                 if self.car == CarScreen::Logging {
@@ -637,7 +646,8 @@ impl Pages {
             | Act::PhoneSettings
             | Act::MoveNvme
             | Act::FirmwareProbe
-            | Act::FirmwareInstall(_) => false,
+            | Act::FirmwareInstall(_)
+            | Act::FlashSector(_) => false,
             Act::PinSave => {
                 let pin = std::mem::take(&mut self.pin);
                 client.set(SettingsPatch {

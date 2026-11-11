@@ -55,6 +55,8 @@ pub enum Act {
     FirmwareProbe,
     /// Asks, then installs the bundled firmware on this unit.
     FirmwareInstall(crate::firmware::Unit),
+    /// Advanced: Flash Sector. Arms, then flashes this upload to its RNS-E sector.
+    FlashSector(String),
     /// Asks to confirm clearing a module's fault codes, or doesn't.
     ClearAsk(u8),
     ClearCancel,

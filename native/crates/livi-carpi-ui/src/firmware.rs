@@ -138,6 +138,18 @@ impl Protocol {
     }
 }
 
+/// An uploaded `[prefix]sector_<N>.bin` for Advanced: Flash Sector.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct Upload {
+    pub name: String,
+    pub sector: u16,
+    pub size: u64,
+    pub crc: String,
+    /// `None`: carpid would flash it. Otherwise why not.
+    pub problem: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Status {
@@ -146,6 +158,8 @@ pub struct Status {
     pub protocol: Protocol,
     /// carpid is running a firmware job (maybe one another client started).
     pub busy: bool,
+    /// Sector images uploaded through the portal.
+    pub uploads: Vec<Upload>,
 }
 
 // carpid's types, field for field.
@@ -206,6 +220,18 @@ impl From<carpi_proto::FirmwareProtocol> for Protocol {
     }
 }
 
+impl From<carpi_proto::SectorUpload> for Upload {
+    fn from(u: carpi_proto::SectorUpload) -> Self {
+        Self {
+            name: u.name,
+            sector: u.sector,
+            size: u.size,
+            crc: u.crc,
+            problem: u.problem,
+        }
+    }
+}
+
 impl From<carpi_proto::FirmwareStatus> for Status {
     fn from(s: carpi_proto::FirmwareStatus) -> Self {
         Self {
@@ -213,6 +239,7 @@ impl From<carpi_proto::FirmwareStatus> for Status {
             teensy: s.teensy.into(),
             protocol: s.protocol.into(),
             busy: s.busy,
+            uploads: s.uploads.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -262,11 +289,12 @@ impl Unit {
 }
 
 /// What a firmware job did, in words.
-fn job_title(action: Option<carpi_proto::FirmwareAction>) -> &'static str {
+fn job_title(action: Option<&carpi_proto::FirmwareAction>) -> &'static str {
     use carpi_proto::FirmwareAction as A;
     match action {
         Some(A::InstallRnse { .. }) => "RNS-E install",
         Some(A::InstallTeensy { .. }) => "Teensy install",
+        Some(A::FlashSector { .. }) => "Flash Sector",
         _ => "Version check",
     }
 }
@@ -280,6 +308,16 @@ fn capital(s: &str) -> String {
 
 /// The screen. `armed` is the install waiting for its second push.
 pub fn view(status: &Status, job: &FirmwareJob, armed: Option<Unit>) -> View {
+    view_dev(status, job, armed, None)
+}
+
+/// The screen, with `sector` the Flash Sector upload armed for its second push.
+pub fn view_dev(
+    status: &Status,
+    job: &FirmwareJob,
+    armed: Option<Unit>,
+    sector: Option<&str>,
+) -> View {
     let note = job
         .note
         .clone()
@@ -299,7 +337,7 @@ pub fn view(status: &Status, job: &FirmwareJob, armed: Option<Unit>) -> View {
         .act(if busy { Act::None } else { Act::FirmwareProbe })
         .dimmed(busy),
     );
-    let title = job_title(job.action);
+    let title = job_title(job.action.as_ref());
     if running {
         let pct = match job.job.progress {
             Some((done, Some(total))) if total > 0 => format!(" {} %", done * 100 / total),
@@ -378,8 +416,58 @@ pub fn view(status: &Status, job: &FirmwareJob, armed: Option<Unit>) -> View {
             start = at;
         }
     }
+    if let Some(at) = flash_sector(&mut v, &status.uploads, busy, sector) {
+        start = at;
+    }
     v.start = start;
     v.finish()
+}
+
+/// Advanced: Flash Sector. Uploaded `[prefix]sector_<N>.bin` files; shown only when there
+/// are some. Returns the armed button's focus.
+fn flash_sector(v: &mut View, uploads: &[Upload], busy: bool, armed: Option<&str>) -> Option<i32> {
+    if uploads.is_empty() {
+        return None;
+    }
+    v.section("Advanced: Flash Sector");
+    v.row(Row::new(RowKind::Info, "Raw Write", "No content checks").alert(true));
+    let mut start = None;
+    for u in uploads {
+        let asking = armed == Some(u.name.as_str());
+        if let Some(why) = &u.problem {
+            v.row(Row::new(RowKind::Info, &u.name, why.clone()).alert(true));
+            continue;
+        }
+        if asking {
+            for (label, value, alert) in Unit::Rnse.warnings() {
+                v.row(Row::new(RowKind::Info, *label, *value).alert(*alert));
+            }
+        }
+        let label = if asking {
+            format!("Push again to flash sector {}", u.sector)
+        } else {
+            u.name.clone()
+        };
+        let at = v.row(
+            Row::new(
+                RowKind::Button,
+                &label,
+                format!("Sector {} · CRC {}", u.sector, u.crc),
+            )
+            .button("Flash")
+            .act(if busy {
+                Act::None
+            } else {
+                Act::FlashSector(u.name.clone())
+            })
+            .dimmed(busy)
+            .alert(asking),
+        );
+        if asking {
+            start = Some(at);
+        }
+    }
+    start
 }
 
 #[cfg(test)]
@@ -572,6 +660,79 @@ mod tests {
         assert_eq!(row.value, "RNS-E did not reply");
     }
 
+    fn upload(name: &str, sector: u16, problem: Option<&str>) -> Upload {
+        Upload {
+            name: name.into(),
+            sector,
+            size: 0x20000,
+            crc: "1A2B3C4D".into(),
+            problem: problem.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn flash_sector_lists_uploads_and_arms_one() {
+        let v = view(&Status::default(), &FirmwareJob::default(), None);
+        assert!(!v.rows.iter().any(|r| matches!(r.act, Act::FlashSector(_))));
+        let status = Status {
+            uploads: vec![
+                upload("sector_7.bin", 7, Some("outside 32-511")),
+                upload("sector_96.bin", 96, None),
+            ],
+            ..Status::default()
+        };
+        let v = view(&status, &FirmwareJob::default(), None);
+        let bad = v.rows.iter().find(|r| r.label == "sector_7.bin").unwrap();
+        assert!(bad.alert && bad.act == Act::None);
+        let ok = v.rows.iter().find(|r| r.label == "sector_96.bin").unwrap();
+        assert_eq!(ok.act, Act::FlashSector("sector_96.bin".into()));
+        assert_eq!(ok.value, "Sector 96 · CRC 1A2B3C4D");
+        assert!(!v.rows.iter().any(|r| r.label == "Ignition on, engine off"));
+
+        let v = view_dev(
+            &status,
+            &FirmwareJob::default(),
+            None,
+            Some("sector_96.bin"),
+        );
+        let armed = v
+            .rows
+            .iter()
+            .find(|r| r.label == "Push again to flash sector 96")
+            .unwrap();
+        assert!(armed.alert);
+        assert_eq!(v.start, armed.focus_at);
+        assert!(v.rows.iter().any(|r| r.label == "Ignition on, engine off"));
+
+        let busy = Status {
+            busy: true,
+            ..status
+        };
+        let v = view(&busy, &FirmwareJob::default(), None);
+        let row = v.rows.iter().find(|r| r.label == "sector_96.bin").unwrap();
+        assert_eq!(row.act, Act::None);
+    }
+
+    #[test]
+    fn sector_flash_job_is_titled_and_warns() {
+        let job = FirmwareJob {
+            action: Some(carpi_proto::FirmwareAction::FlashSector {
+                name: "sector_96.bin".into(),
+                confirm: true,
+            }),
+            job: UpdateJob {
+                job: Some(5),
+                message: "writing sector 96".into(),
+                ..UpdateJob::default()
+            },
+            ..FirmwareJob::default()
+        };
+        let v = view(&Status::default(), &job, None);
+        let row = v.rows.iter().find(|r| r.label == "Flash Sector").unwrap();
+        assert_eq!(row.value, "Writing sector 96");
+        assert!(v.rows.iter().any(|r| r.label == "Ignition on, engine off"));
+    }
+
     #[test]
     fn empty_status_does_not_claim_legacy_or_an_update() {
         let v = view(&Status::default(), &FirmwareJob::default(), None);
@@ -604,6 +765,11 @@ mod tests {
             },
             protocol: carpi_proto::FirmwareProtocol::Negotiated("1".into()),
             busy: true,
+            uploads: vec![carpi_proto::SectorUpload {
+                name: "sector_96.bin".into(),
+                sector: 96,
+                ..Default::default()
+            }],
         };
         let json = serde_json::to_string(&proto).unwrap();
         let ours: Status = proto.into();
@@ -615,6 +781,7 @@ mod tests {
         assert_eq!(ours.teensy.blocked.as_deref(), Some("chain running"));
         assert_eq!(ours.protocol, Protocol::Negotiated("1".into()));
         assert!(ours.busy);
+        assert_eq!(ours.uploads[0].sector, 96);
     }
 
     #[test]

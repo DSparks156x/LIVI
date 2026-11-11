@@ -85,24 +85,29 @@ pub struct Target {
 impl Target {
     pub fn update_label(&self) -> &'static str {
         let Some(bundle) = &self.bundled else {
-            return "No bundled image available";
+            return "No bundle";
         };
         if !bundle.known() {
-            return "Bundled image identity unavailable";
+            return "Bundle unknown";
         }
         // A partial or stale status must not create an update offer.
         if matches!(&self.installed, Installed::Unknown)
             || matches!(&self.installed, Installed::Reported(id) if !id.known())
         {
-            return "Installed version unavailable; comparison pending";
+            return "Installed unknown";
         }
         match self.comparison {
-            Comparison::Unknown => "Version comparison unavailable",
+            Comparison::Unknown => "Unknown",
             Comparison::Newer => "Update available",
-            Comparison::Same => "Matches bundled firmware",
-            Comparison::Older => "Installed firmware is newer than bundle",
-            Comparison::Incompatible => "Bundled image is incompatible",
+            Comparison::Same => "Up to date",
+            Comparison::Older => "Newer than bundle",
+            Comparison::Incompatible => "Bundle incompatible",
         }
+    }
+
+    /// The bundle is a known newer build of a known installed one.
+    pub fn update_available(&self) -> bool {
+        self.update_label() == "Update available"
     }
 
     /// An install button is offered: a bundled image, carpid not blocking, no firmware job
@@ -271,19 +276,11 @@ impl Unit {
     fn warnings(self) -> &'static [(&'static str, &'static str, bool)] {
         match self {
             Self::Rnse => &[
-                (
-                    "Ignition on, engine off",
-                    "Don't turn the car off or cut power",
-                    true,
-                ),
-                (
-                    "The RNS-E screen goes dark",
-                    "It restarts when the install is done",
-                    false,
-                ),
+                ("Ignition on, engine off", "Keep power on", true),
+                ("RNS-E screen goes dark", "Restarts when done", false),
                 ("Takes several minutes", "", false),
             ],
-            Self::Teensy => &[("Video stops briefly", "While the Teensy reflashes", false)],
+            Self::Teensy => &[("Video stops briefly", "", false)],
         }
     }
 }
@@ -318,11 +315,10 @@ pub fn view_dev(
     armed: Option<Unit>,
     sector: Option<&str>,
 ) -> View {
-    let note = job
-        .note
-        .clone()
-        .unwrap_or_else(|| "Installs the firmware bundled with this release.".into());
-    let mut v = View::new(Layout::List, "SDLink firmware", true).note(note);
+    let mut v = View::new(Layout::List, "SDLink firmware", true);
+    if let Some(note) = &job.note {
+        v = v.note(note.clone());
+    }
     let info = |label: &str, value: String| Row::new(RowKind::Info, label, value);
     let running = job.job.running();
     let busy = status.busy || running;
@@ -331,7 +327,7 @@ pub fn view_dev(
         Row::new(
             RowKind::Button,
             "Check versions",
-            if busy { "Firmware job running" } else { "" },
+            if busy { "Busy" } else { "" },
         )
         .button("Check")
         .act(if busy { Act::None } else { Act::FirmwareProbe })
@@ -355,7 +351,7 @@ pub fn view_dev(
             }
         }
     } else if let Some((ok, m)) = &job.job.finished {
-        let label = format!("{title}: {}", if *ok { "done" } else { "didn't finish" });
+        let label = format!("{title}: {}", if *ok { "Done" } else { "Failed" });
         v.row(info(&label, capital(m)).alert(!ok));
     }
     let mut start = -1;
@@ -390,21 +386,19 @@ pub fn view_dev(
         let label = match (asking, update) {
             (false, true) => "Install update",
             (false, false) => "Replace with bundled",
-            (true, true) => "Push again to install",
-            (true, false) => "Push again to replace",
+            (true, true) => "Confirm install",
+            (true, false) => "Confirm replace",
         };
-        let value = match (&target.installed, update) {
-            (_, true) => format!(
+        let value = if update {
+            format!(
                 "{name} → {}",
                 target
                     .bundled
                     .as_ref()
                     .map_or_else(String::new, Identity::label)
-            ),
-            (Installed::Unknown, false) => {
-                format!("Overwrites whatever {name} firmware is installed")
-            }
-            _ => format!("Overwrites the installed {name} firmware"),
+            )
+        } else {
+            String::new()
         };
         let at = v.row(
             Row::new(RowKind::Button, label, value)
@@ -444,7 +438,7 @@ fn flash_sector(v: &mut View, uploads: &[Upload], busy: bool, armed: Option<&str
             }
         }
         let label = if asking {
-            format!("Push again to flash sector {}", u.sector)
+            format!("Confirm flash sector {}", u.sector)
         } else {
             u.name.clone()
         };
@@ -501,14 +495,14 @@ mod tests {
     #[test]
     fn comparison_comes_from_backend_and_requires_both_identities() {
         let mut target = target(Comparison::Unknown);
-        assert_eq!(target.update_label(), "Version comparison unavailable");
+        assert_eq!(target.update_label(), "Unknown");
         target.comparison = Comparison::Newer;
         assert_eq!(target.update_label(), "Update available");
         // Lexicographical and numerical guesses must not override backend evidence.
         target.comparison = Comparison::Older;
         assert_eq!(
             target.update_label(),
-            "Installed firmware is newer than bundle"
+            "Newer than bundle"
         );
         target.installed = Installed::Legacy;
         target.comparison = Comparison::Newer;
@@ -516,10 +510,10 @@ mod tests {
         target.installed = Installed::Unknown;
         assert_eq!(
             target.update_label(),
-            "Installed version unavailable; comparison pending"
+            "Installed unknown"
         );
         target.bundled = None;
-        assert_eq!(target.update_label(), "No bundled image available");
+        assert_eq!(target.update_label(), "No bundle");
     }
 
     #[test]
@@ -556,7 +550,7 @@ mod tests {
         assert_eq!(rows[0].label, "Install update");
         assert_eq!(rows[0].act, Act::FirmwareInstall(Unit::Rnse));
         assert_eq!(rows[1].label, "Replace with bundled");
-        assert!(rows[1].value.contains("Overwrites"));
+        assert!(rows[1].value.is_empty());
         assert_eq!(rows[1].act, Act::FirmwareInstall(Unit::Teensy));
 
         // carpid busy (another client's job), or our own job running: no installs, no probe.
@@ -611,7 +605,7 @@ mod tests {
         let v = view(&status, &FirmwareJob::default(), Some(Unit::Rnse));
         for label in [
             "Ignition on, engine off",
-            "The RNS-E screen goes dark",
+            "RNS-E screen goes dark",
             "Takes several minutes",
         ] {
             assert!(v.rows.iter().any(|r| r.label == label), "{label}");
@@ -619,17 +613,17 @@ mod tests {
         assert!(
             v.rows
                 .iter()
-                .any(|r| r.value.contains("Don't turn the car off"))
+                .any(|r| r.value.contains("Keep power on"))
         );
         assert!(!v.rows.iter().any(|r| r.label == "Video stops briefly"));
         let rows = installs(&v);
-        assert_eq!(rows[0].label, "Push again to install");
+        assert_eq!(rows[0].label, "Confirm install");
         assert!(rows[0].alert);
         assert_eq!(rows[1].label, "Replace with bundled");
         assert_eq!(v.start, rows[0].focus_at, "focus stays on the armed button");
         let v = view(&status, &FirmwareJob::default(), Some(Unit::Teensy));
         assert!(v.rows.iter().any(|r| r.label == "Video stops briefly"));
-        assert_eq!(installs(&v)[1].label, "Push again to replace");
+        assert_eq!(installs(&v)[1].label, "Confirm replace");
     }
 
     #[test]
@@ -654,7 +648,7 @@ mod tests {
         let row = v
             .rows
             .iter()
-            .find(|r| r.label == "RNS-E install: didn't finish")
+            .find(|r| r.label == "RNS-E install: Failed")
             .unwrap();
         assert!(row.alert);
         assert_eq!(row.value, "RNS-E did not reply");
@@ -698,7 +692,7 @@ mod tests {
         let armed = v
             .rows
             .iter()
-            .find(|r| r.label == "Push again to flash sector 96")
+            .find(|r| r.label == "Confirm flash sector 96")
             .unwrap();
         assert!(armed.alert);
         assert_eq!(v.start, armed.focus_at);
@@ -740,7 +734,7 @@ mod tests {
         let installed = v.rows.iter().find(|r| r.label == "Installed").unwrap();
         assert_eq!(installed.value, "Unknown");
         let status = v.rows.iter().find(|r| r.label == "Status").unwrap();
-        assert_eq!(status.value, "No bundled image available");
+        assert_eq!(status.value, "No bundle");
         assert!(installs(&v).is_empty());
         assert_eq!(Protocol::Legacy.label(), "Legacy protocol");
         assert_eq!(Protocol::Negotiated(String::new()).label(), "Unavailable");
@@ -801,7 +795,7 @@ mod tests {
         assert_eq!(legacy.firmware.rnse.installed, Installed::Legacy);
         assert_eq!(
             legacy.firmware.rnse.update_label(),
-            "Version comparison unavailable"
+            "Unknown"
         );
         assert!(legacy.firmware.teensy.blocked.is_some());
         let v = view(&legacy.firmware, &FirmwareJob::default(), None);

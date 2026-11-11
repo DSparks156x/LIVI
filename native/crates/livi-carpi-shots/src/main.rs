@@ -507,7 +507,6 @@ fn main() {
         ("zone", S::Zone(1)),
         ("avsd", S::Avsd),
         ("picture", S::Picture),
-        ("portal", S::Portal),
         ("pin", S::Pin),
         ("updates", S::Updates),
         ("update-confirm", S::UpdateConfirm),
@@ -554,7 +553,7 @@ fn main() {
             true,
             "Password for Stadium Walk-UF104",
         ),
-        ("keyboard-line", Style::Knob, false, "Accel test line 2"),
+        ("keyboard-line", Style::Knob, false, "Accel line 2"),
     ];
     for (name, style, secret, title) in boards {
         if !only.is_empty() && !only.iter().any(|o| o == name) {

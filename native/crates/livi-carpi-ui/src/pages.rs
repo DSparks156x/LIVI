@@ -218,7 +218,7 @@ impl Pages {
             T::WifiName => ("Network name".to_string(), String::new(), false, "Next"),
             T::WifiPassword(ssid) => (format!("Password for {ssid}"), String::new(), true, "Join"),
             T::Accel(i) => (
-                format!("Accel test line {}", i + 1),
+                format!("Accel line {}", i + 1),
                 s.as_ref()
                     .and_then(|s| s.dis.accel.get(*i).cloned())
                     .unwrap_or_default(),
@@ -1155,14 +1155,14 @@ mod tests {
         );
         let v = p.view(PageId::Car, &s, now);
         assert_eq!(v.title, "Garage");
-        assert!(v.rows.iter().any(|r| r.label == "New password"));
+        assert!(v.rows.iter().any(|r| r.label == "Change password"));
         assert_eq!(p.path(PageId::Car), UPDATES_PATH);
         assert_eq!(p.back(PageId::Car), Some(Moved::Closed(2)));
         let v = p.view(PageId::Car, &s, now);
         p.press(
             PageId::Car,
             &v,
-            &Hit::Row(find(&v, "Add a network")),
+            &Hit::Row(find(&v, "Add network")),
             3,
             &client,
         );
@@ -1173,7 +1173,7 @@ mod tests {
         p.press(
             PageId::Car,
             &v,
-            &Hit::Row(find(&v, "Check and install")),
+            &Hit::Row(find(&v, "Install")),
             4,
             &client,
         );
@@ -1183,7 +1183,7 @@ mod tests {
         );
         let v = p.view(PageId::Car, &s, now);
         assert_eq!(
-            p.press(PageId::Car, &v, &Hit::Row(find(&v, "Not now")), 1, &client),
+            p.press(PageId::Car, &v, &Hit::Row(find(&v, "Cancel")), 1, &client),
             Moved::Closed(4)
         );
         assert_eq!(p.screen(), CarScreen::Updates);
@@ -1256,8 +1256,8 @@ mod tests {
         s.update_recovering = true;
         let v = p.view(PageId::Car, &s, Instant::now());
         assert_eq!(
-            v.rows[find(&v, "Update status")].value,
-            "Checking update status"
+            v.rows[find(&v, "Status")].value,
+            "Checking"
         );
         assert!(
             !v.rows
@@ -1554,7 +1554,7 @@ mod tests {
 
         p.car = CarScreen::Night;
         let v = p.view(PageId::Car, &s, now);
-        let by = find(&v, "Decided by");
+        let by = find(&v, "Source");
         assert_eq!(v.rows[by].value, "Headlights");
         let Some(Act::Patch(patch, false)) = v.side_act(Some(&Hit::Row(by)), -1) else {
             panic!()
@@ -1572,7 +1572,7 @@ mod tests {
         let mut s = snap(&[]);
         s.settings = Some(crate::settings::sample());
         let now = Instant::now();
-        p.car = CarScreen::Portal;
+        p.car = CarScreen::Remote;
         p.trail = vec![0];
         let v = p.view(PageId::Car, &s, now);
         p.press(PageId::Car, &v, &Hit::Row(find(&v, "PIN")), 2, &client);
@@ -1590,16 +1590,16 @@ mod tests {
         let v = p.view(PageId::Car, &s, now);
         assert!(v.rows.iter().any(|r| r.value == "••••"));
         assert!(!v.rows.iter().any(|r| r.value.contains("4711")));
-        let del = find(&v, "Delete the last digit");
+        let del = find(&v, "Delete digit");
         p.press(PageId::Car, &v, &Hit::Row(del), 0, &client);
         let v = p.view(PageId::Car, &s, now);
         assert!(v.rows.iter().any(|r| r.value == "•••"));
-        let save = find(&v, "Save this PIN");
+        let save = find(&v, "Save PIN");
         assert_eq!(
             p.press(PageId::Car, &v, &Hit::Row(save), 0, &client),
             Moved::Closed(2)
         );
-        assert_eq!(p.car, CarScreen::Portal);
+        assert_eq!(p.car, CarScreen::Remote);
         assert!(p.pin.is_empty());
     }
 
@@ -1619,7 +1619,7 @@ mod tests {
         p.trail = vec![0];
         let v = p.view(PageId::Car, &s, now);
         let at = find(&v, "Logging");
-        assert_eq!(v.rows[at].value, "2 profiles");
+        assert!(v.rows[at].value.is_empty());
         assert_eq!(
             p.press(PageId::Car, &v, &Hit::Row(at), 4, &client),
             Moved::Opened

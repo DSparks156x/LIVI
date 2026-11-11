@@ -67,7 +67,6 @@ pub(super) fn view(pages: &Pages, snap: &Snapshot, now: Instant) -> View {
         S::Zone(r) => zone(snap, r),
         S::Avsd => avsd(snap, now),
         S::Picture => picture(snap),
-        S::Portal => portal(snap),
         S::Remote => remote(snap),
         S::Pin => pin_entry(snap, &pages.pin),
         S::Updates => updates(snap),
@@ -142,14 +141,6 @@ fn step<T: Copy + PartialOrd>(
         )
 }
 
-fn count(n: usize, one: &str, many: &str) -> String {
-    match n {
-        0 => format!("No {many}"),
-        1 => format!("1 {one}"),
-        n => format!("{n} {many}"),
-    }
-}
-
 fn waiting(v: &mut View) {
     v.row(info("Waiting for carpid's settings", "").dimmed(true));
 }
@@ -190,7 +181,7 @@ fn root(_pages: &Pages, snap: &Snapshot) -> View {
             .tag(if s.flashing_mode {
                 "CAN sends blocked"
             } else {
-                "Persists until turned off"
+                ""
             }),
         );
     }
@@ -213,54 +204,56 @@ fn root(_pages: &Pages, snap: &Snapshot) -> View {
     };
     v.row(route("Screen & lighting", light, S::Lighting).icon("Brightness6Outlined"));
     v.row(route("Controls", "", S::Controls).icon("KeyboardOutlined"));
-    let logging = match snap.datalog.as_ref().and_then(|d| d.running.as_ref()) {
-        Some(r) => format!("Logging {}", r.label),
-        None => String::new(),
-    };
-    v.row(route("Logging & captures", logging, S::Logs).icon("ArticleOutlined"));
-    let power = match s {
-        Some(s) if s.power.shutdown => "Shuts down",
-        Some(_) => "Stays on",
-        None => "",
-    };
-    v.row(route("Power & clock", power, S::Power).icon("PowerSettingsNewOutlined"));
+    v.row(route("Logging & captures", logging_now(snap), S::Logs).icon("ArticleOutlined"));
+    v.row(route("Power & clock", "", S::Power).icon("PowerSettingsNewOutlined"));
     let avsd = match s {
-        Some(s) if s.avsd.found => "",
-        Some(s) if !s.avsd.ranges.is_empty() => "Not set up",
+        Some(s) if !s.avsd.found && !s.avsd.ranges.is_empty() => "Not set up",
+        _ if firmware_update(snap) => "Update available",
         _ => "",
     };
     v.row(route("A/V over SD", avsd, S::Avsd).icon("TvOutlined"));
-    let portal = match s.map(|s| s.portal.address.as_deref()) {
-        Some(Some(a)) => a.trim_start_matches("http://").to_string(),
-        Some(None) => "Off".into(),
-        None => String::new(),
-    };
-    v.row(route("Phone portal", portal, S::Portal).icon("SmartphoneOutlined"));
-    let vnc = match &snap.settings {
+    let vnc = match s {
         Some(s) if s.remote.vnc_running => "VNC on",
-        Some(s) if s.remote.vnc_installed => "VNC off",
         _ => "",
     };
     v.row(route("Remote access", vnc, S::Remote).icon("LanOutlined"));
-    let tx = match s {
-        Some(s) if !s.tx_enabled => "Log only",
-        _ => "",
-    };
-    v.row(route("Advanced", tx, S::Advanced).icon("TuneOutlined"));
+    v.row(route("Advanced", "", S::Advanced).icon("TuneOutlined"));
     v.finish()
+}
+
+/// The data log running now, if one is.
+fn logging_now(snap: &Snapshot) -> String {
+    match snap.datalog.as_ref().and_then(|d| d.running.as_ref()) {
+        Some(r) => format!("Logging {}", r.label),
+        None => String::new(),
+    }
+}
+
+/// carpid offers newer bundled firmware for the RNS-E or the Teensy.
+fn firmware_update(snap: &Snapshot) -> bool {
+    let f = &snap.firmware;
+    f.rnse.update_available() || f.teensy.update_available()
+}
+
+fn firmware_row(snap: &Snapshot, to: S) -> Row {
+    let status = if firmware_update(snap) {
+        "Update available"
+    } else {
+        ""
+    };
+    route("SDLink firmware", status, to)
 }
 
 // ---- Setup (docs/IMAGE-TOOL.md, NVMe and post-setup) ----
 
 /// Rows that open the screens to visit after the first start. Back from each comes here.
 fn setup(snap: &Snapshot) -> View {
-    let mut v = View::new(Layout::List, "Setup", true)
-        .note("After the first start: check each of these once.");
+    let mut v = View::new(Layout::List, "Setup", true);
     let s = snap.settings.as_ref();
     let (zone, to) = match s {
         Some(s) if s.clock.timezone.is_empty() => ("Not set".to_string(), S::Power),
         Some(s) => (
-            s.clock.timezone.replace('_', " "),
+            String::new(),
             if s.clock.timezones.is_empty() {
                 S::Power
             } else {
@@ -270,38 +263,19 @@ fn setup(snap: &Snapshot) -> View {
         None => (String::new(), S::Power),
     };
     v.row(route("Time zone", zone, to).icon("ScheduleOutlined"));
-    let nets = match &snap.wifi.networks {
-        Some(n) => count(n.len(), "saved", "saved"),
-        None => String::new(),
-    };
-    v.row(route("Wi-Fi networks", nets, S::Wifi).icon("WifiOutlined"));
+    v.row(route("Wi-Fi networks", "", S::Wifi).icon("WifiOutlined"));
     v.row(
-        Row::new(
-            RowKind::Route,
-            "Phone connection",
-            "Set up wireless Android Auto / CarPlay",
-        )
-        .icon("wirelessAa")
-        .act(Act::PhoneSettings),
+        Row::new(RowKind::Route, "Phone connection", "")
+            .icon("wirelessAa")
+            .act(Act::PhoneSettings),
     );
     v.row(Row::new(
         RowKind::Info,
         "Wireless CarPlay requires supported authentication hardware.",
         "",
     ));
-    let cluster = match s {
-        Some(s) if s.dis.enabled => "On",
-        Some(_) => "Off",
-        None => "",
-    };
-    v.row(route("Cluster display", cluster, S::Cluster).icon("SpeedOutlined"));
-    let vnc = match s {
-        Some(s) if !s.remote.vnc_installed => "VNC not installed",
-        Some(s) if s.remote.vnc_at_boot => "VNC on at startup",
-        Some(_) => "VNC off at startup",
-        None => "",
-    };
-    v.row(route("Remote access", vnc, S::Remote).icon("LanOutlined"));
+    v.row(route("Cluster display", "", S::Cluster).icon("SpeedOutlined"));
+    v.row(route("Remote access", "", S::Remote).icon("LanOutlined"));
     if snap.storage.can_move() {
         let value = if snap.storage.job.running() {
             "Moving"
@@ -311,12 +285,8 @@ fn setup(snap: &Snapshot) -> View {
         v.row(route("Move to NVMe", value, S::Nvme).icon("MemoryOutlined"));
     }
     v.row(
-        Row::new(
-            RowKind::Button,
-            "Done, hide this",
-            "Car Integration > Advanced brings it back",
-        )
-        .button("Hide")
+        Row::new(RowKind::Button, "Finish setup", "")
+            .button("Hide")
         .act(Act::SetupDone(true)),
     );
     v.finish()
@@ -386,7 +356,7 @@ fn nvme(snap: &Snapshot, asking: bool) -> View {
     v.row(info("Erases the NVMe", "Everything on it is lost").alert(true));
     v.row(info("Takes a few minutes", "Don't turn the car off meanwhile").dimmed(true));
     let label = if asking {
-        "Push again to erase and start"
+        "Confirm erase"
     } else {
         "Start the move"
     };
@@ -464,13 +434,8 @@ fn status(snap: &Snapshot) -> View {
             dis
         },
     ));
-    v.row(route(
-        "All values",
-        count(snap.values.names().count(), "value", "values"),
-        S::AllValues,
-    ));
-    let n = snap.buses.as_ref().map_or(0, Vec::len);
-    v.row(route("Buses", count(n, "bus", "buses"), S::Buses));
+    v.row(route("All values", "", S::AllValues));
+    v.row(route("Buses", "", S::Buses));
     v.finish()
 }
 
@@ -536,10 +501,6 @@ fn buses(snap: &Snapshot) -> View {
 
 // ---- Cluster display ----
 
-const CLAIMS: [(DisClaim, &str); 2] = [
-    (DisClaim::Always, "Always"),
-    (DisClaim::Tab, "From the cluster menu"),
-];
 const START: [(DisPage, &str); 3] = [
     (DisPage::Readings, "Readings"),
     (DisPage::Accel, "Accel"),
@@ -549,53 +510,33 @@ const START: [(DisPage, &str); 3] = [
 fn cluster(snap: &Snapshot) -> View {
     with_settings(snap, "Cluster display", |v, s| {
         let d = &s.dis;
-        v.row(
-            toggle(
-                "Show on the cluster",
-                d.enabled,
-                set(SettingsPatch {
-                    dis_enabled: Some(!d.enabled),
-                    ..Default::default()
-                }),
-            )
-            .tap(|r| {
-                r.value = if d.enabled {
-                    dis_state(snap)
-                } else {
-                    String::new()
-                }
+        v.row(toggle(
+            "Enabled",
+            d.enabled,
+            set(SettingsPatch {
+                dis_enabled: Some(!d.enabled),
+                ..Default::default()
             }),
-        );
+        ));
         if !d.enabled {
             return;
         }
-        v.row(choice("Our screen shows", &CLAIMS, d.claim, |c| {
-            dis(DisPatch {
-                claim: Some(c),
-                ..Default::default()
-            })
-        }));
+        let always = d.claim == DisClaim::Always;
+        dis_toggle(v, "Auto claim", always, |x| DisPatch {
+            claim: Some(if x { DisClaim::Always } else { DisClaim::Tab }),
+            ..Default::default()
+        });
         v.row(choice("Start page", &START, d.default_page, |p| {
             dis(DisPatch {
                 default_page: Some(p),
                 ..Default::default()
             })
         }));
-        let n = cfg::dis_pages(d).len();
-        v.row(route(
-            "Readings pages",
-            count(n, "page", "pages"),
-            S::ReadingPages,
-        ));
-        let look = match d.nav_style {
-            DisNavStyle::Fancy => "Ours",
-            DisNavStyle::Stock => "Stock",
-        };
-        v.row(route("Accel test", d.accel.join("  "), S::Accel));
-        v.row(route("Navigation", look, S::Nav));
-        let takes = |on: bool| if on { "Takes over" } else { "Stays put" };
-        v.row(route("Calls", takes(d.claim_phone), S::Calls));
-        v.row(route("Media", takes(d.claim_media), S::Media));
+        v.row(route("Readings", "", S::ReadingPages));
+        v.row(route("Accel", "", S::Accel));
+        v.row(route("Navigation", "", S::Nav));
+        v.row(route("Calls", "", S::Calls));
+        v.row(route("Media", "", S::Media));
     })
 }
 
@@ -625,7 +566,7 @@ const ACCEL_PRESETS: &[&str] = &[
 ];
 
 fn accel(snap: &Snapshot) -> View {
-    with_settings(snap, "Accel test", |v, s| {
+    with_settings(snap, "Accel", |v, s| {
         let lines = &s.dis.accel;
         for i in 0..4 {
             let now = lines.get(i).map(String::as_str).unwrap_or("");
@@ -660,13 +601,6 @@ fn accel(snap: &Snapshot) -> View {
                     .side(with(opts[(at + n - 1) % n]), with(opts[(at + 1) % n])),
             );
         }
-        v.row(
-            info(
-                "Push to type one, Prev/Next held for presets",
-                "0-60mph · 1/4mi · 100m · speed",
-            )
-            .dimmed(true),
-        );
     })
 }
 
@@ -678,25 +612,23 @@ fn dis_toggle(v: &mut View, label: &str, on: bool, p: impl Fn(bool) -> DisPatch)
 fn nav(snap: &Snapshot) -> View {
     with_settings(snap, "Navigation", |v, s| {
         let d = &s.dis;
-        dis_toggle(v, "Take over when a route starts", d.claim_nav, |x| {
-            DisPatch {
-                claim_nav: Some(x),
-                ..Default::default()
-            }
+        dis_toggle(v, "Auto claim", d.claim_nav, |x| DisPatch {
+            claim_nav: Some(x),
+            ..Default::default()
         });
-        dis_toggle(v, "Give back when it ends", d.release_nav, |x| DisPatch {
+        dis_toggle(v, "Auto release", d.release_nav, |x| DisPatch {
             release_nav: Some(x),
             ..Default::default()
         });
         const LOOKS: [(DisNavStyle, &str); 2] =
-            [(DisNavStyle::Fancy, "Ours"), (DisNavStyle::Stock, "Stock")];
-        v.row(choice("Look", &LOOKS, d.nav_style, |x| {
+            [(DisNavStyle::Fancy, "Fancy"), (DisNavStyle::Stock, "Stock")];
+        v.row(choice("Style", &LOOKS, d.nav_style, |x| {
             dis(DisPatch {
                 nav_style: Some(x),
                 ..Default::default()
             })
         }));
-        dis_toggle(v, "Distance to the turn", d.nav_distance, |x| DisPatch {
+        dis_toggle(v, "Turn distance", d.nav_distance, |x| DisPatch {
             nav_distance: Some(x),
             ..Default::default()
         });
@@ -705,15 +637,15 @@ fn nav(snap: &Snapshot) -> View {
             ..Default::default()
         });
         if d.nav_pocket {
-            dis_toggle(v, "Trip info: ETA", d.nav_eta, |x| DisPatch {
+            dis_toggle(v, "ETA", d.nav_eta, |x| DisPatch {
                 nav_eta: Some(x),
                 ..Default::default()
             });
-            dis_toggle(v, "Trip info: time left", d.nav_time_left, |x| DisPatch {
+            dis_toggle(v, "Time left", d.nav_time_left, |x| DisPatch {
                 nav_time_left: Some(x),
                 ..Default::default()
             });
-            dis_toggle(v, "Trip info: distance left", d.nav_dest_distance, |x| {
+            dis_toggle(v, "Distance left", d.nav_dest_distance, |x| {
                 DisPatch {
                     nav_dest_distance: Some(x),
                     ..Default::default()
@@ -722,8 +654,8 @@ fn nav(snap: &Snapshot) -> View {
         }
         const LANES: [(DisLanes, &str); 3] = [
             (DisLanes::Off, "Off"),
-            (DisLanes::Swap, "Instead of the road"),
-            (DisLanes::Flip, "Alternate with the road"),
+            (DisLanes::Swap, "Replace road"),
+            (DisLanes::Flip, "Alternate"),
         ];
         v.row(choice("Lanes", &LANES, d.nav_lanes, |x| {
             dis(DisPatch {
@@ -732,7 +664,7 @@ fn nav(snap: &Snapshot) -> View {
             })
         }));
         const UNITS: [(DisUnits, &str); 3] = [
-            (DisUnits::Auto, "As the phone"),
+            (DisUnits::Auto, "Phone"),
             (DisUnits::Metric, "Metric"),
             (DisUnits::Imperial, "Imperial"),
         ];
@@ -743,11 +675,11 @@ fn nav(snap: &Snapshot) -> View {
             })
         }));
         const CLOCKS: [(DisClock, &str); 3] = [
-            (DisClock::Auto, "As the phone"),
+            (DisClock::Auto, "Phone"),
             (DisClock::H12, "12 h"),
             (DisClock::H24, "24 h"),
         ];
-        v.row(choice("ETA clock", &CLOCKS, d.clock, |x| {
+        v.row(choice("Clock", &CLOCKS, d.clock, |x| {
             dis(DisPatch {
                 clock: Some(x),
                 ..Default::default()
@@ -759,11 +691,11 @@ fn nav(snap: &Snapshot) -> View {
 fn calls(snap: &Snapshot) -> View {
     with_settings(snap, "Calls", |v, s| {
         let d = &s.dis;
-        dis_toggle(v, "Take over on a call", d.claim_phone, |x| DisPatch {
+        dis_toggle(v, "Auto claim", d.claim_phone, |x| DisPatch {
             claim_phone: Some(x),
             ..Default::default()
         });
-        dis_toggle(v, "Give back after it", d.release_phone, |x| DisPatch {
+        dis_toggle(v, "Auto release", d.release_phone, |x| DisPatch {
             release_phone: Some(x),
             ..Default::default()
         });
@@ -773,11 +705,11 @@ fn calls(snap: &Snapshot) -> View {
 fn media(snap: &Snapshot) -> View {
     with_settings(snap, "Media", |v, s| {
         let d = &s.dis;
-        dis_toggle(v, "Take over on a new track", d.claim_media, |x| DisPatch {
+        dis_toggle(v, "Auto claim", d.claim_media, |x| DisPatch {
             claim_media: Some(x),
             ..Default::default()
         });
-        dis_toggle(v, "Give back when it stops", d.release_media, |x| {
+        dis_toggle(v, "Auto release", d.release_media, |x| {
             DisPatch {
                 release_media: Some(x),
                 ..Default::default()
@@ -799,7 +731,7 @@ fn media(snap: &Snapshot) -> View {
             format!("{} s", d.cover_flash_s)
         };
         v.row(step(
-            "Cover flash",
+            "Fullscreen cover time",
             shown,
             &cfg::COVER_FLASH,
             d.cover_flash_s,
@@ -820,24 +752,17 @@ fn dis_act(a: DisAct) -> Act {
 }
 
 fn reading_pages(snap: &Snapshot) -> View {
-    with_settings(snap, "Readings pages", |v, s| {
+    with_settings(snap, "Readings", |v, s| {
         let pages = cfg::dis_pages(&s.dis);
         let n = pages.len();
         for (i, p) in pages.iter().enumerate() {
             let left = dis_act(DisAct::MovePage(i, i.saturating_sub(1)));
             let right = dis_act(DisAct::MovePage(i, (i + 1).min(n - 1)));
-            v.row(
-                route(
-                    p.name.clone(),
-                    count(p.cells.len(), "value", "values"),
-                    S::ReadingPage(i),
-                )
-                .side(left, right),
-            );
+            v.row(route(p.name.clone(), "", S::ReadingPage(i)).side(left, right));
         }
         if n < DIS_PAGES {
             v.row(
-                Row::new(RowKind::Button, "Add a page", "")
+                Row::new(RowKind::Button, "Add page", "")
                     .button("Add")
                     .act(dis_act(DisAct::AddPage)),
             );
@@ -906,7 +831,7 @@ fn reading_page(snap: &Snapshot, now: Instant, p: usize, removing: bool) -> View
             );
         }
         if page.cells.len() < DIS_CELLS {
-            v.row(route("Add a value", "", S::CellAdd(p)));
+            v.row(route("Add value", "", S::CellAdd(p)));
         }
         let n = pages.len();
         if n > 1 {
@@ -919,9 +844,9 @@ fn reading_page(snap: &Snapshot, now: Instant, p: usize, removing: bool) -> View
                     ),
             );
             let label = if removing {
-                "Push again to remove it"
+                "Confirm remove"
             } else {
-                "Remove this page"
+                "Remove page"
             };
             v.row(
                 Row::new(RowKind::Button, label, "")
@@ -976,13 +901,9 @@ fn cell(snap: &Snapshot, now: Instant, p: usize, c: usize) -> View {
                     .side(mk(at + n - 1), mk(at + 1)),
             );
         }
-        let icon = cell
-            .icon
-            .as_deref()
-            .map_or_else(|| "Auto".to_string(), capital);
-        v.row(route("Icon", icon, S::CellIcon(p, c)));
+        v.row(route("Icon", "", S::CellIcon(p, c)));
         v.row(
-            Row::new(RowKind::Button, "Remove from the page", "")
+            Row::new(RowKind::Button, "Remove value", "")
                 .button("Remove")
                 .act(dis_act(DisAct::RemoveCell(p, c))),
         );
@@ -996,7 +917,7 @@ fn cell_picker(pages: &Pages, snap: &Snapshot, now: Instant, p: usize, c: Option
         .as_ref()
         .and_then(|s| page_of(s, p))
         .and_then(|pg| c.and_then(|c| pg.cells.get(c).map(|x| x.key.clone())));
-    let title = if c.is_some() { "Value" } else { "Add a value" };
+    let title = if c.is_some() { "Value" } else { "Add value" };
     let mut v = pages.reading.view(
         title,
         current.as_deref(),
@@ -1062,10 +983,7 @@ fn lighting(snap: &Snapshot) -> View {
                     .side(nudge(-(STEP_PCT as i8)), nudge(STEP_PCT as i8)),
             );
         } else if !l.auto_brightness {
-            v.row(info(
-                "Brightness now",
-                format!("{panel}, the car's dimming"),
-            ));
+            v.row(info("Brightness now", panel));
         }
         if !l.auto_brightness {
             v.row(route("Night mode", night_now(snap), S::Night));
@@ -1129,11 +1047,7 @@ fn lighting(snap: &Snapshot) -> View {
                 false,
             ),
         ));
-        v.row(route(
-            "Brightness curve",
-            count(l.manual_curve.len(), "point", "points"),
-            S::Curve,
-        ));
+        v.row(route("Brightness curve", "", S::Curve));
         v.row(route("Night mode", night_now(snap), S::Night));
     })
 }
@@ -1180,7 +1094,7 @@ fn curve(snap: &Snapshot) -> View {
     if let Some(here) = ambient {
         let level = pct.map_or(50, |p| p.round().clamp(0.0, 100.0) as u8);
         v.row(
-            Row::new(RowKind::Button, "Add a point here", format!("{level} %"))
+            Row::new(RowKind::Button, "Add point", format!("{level} %"))
                 .button("Add")
                 .act(light_patch(
                     LightPatch {
@@ -1222,7 +1136,7 @@ fn curve_point(snap: &Snapshot, at: usize) -> View {
         );
         if c.len() > 2 {
             v.row(
-                Row::new(RowKind::Button, "Remove this point", "")
+                Row::new(RowKind::Button, "Remove point", "")
                     .button("Remove")
                     .act(light_patch(
                         LightPatch {
@@ -1253,7 +1167,7 @@ fn night(snap: &Snapshot) -> View {
             (DarkModeSource::Headlights, "Headlights"),
             (DarkModeSource::Ambient, "Light sensor"),
         ];
-        v.row(choice("Decided by", &BY, l.dark_mode_source, |x| {
+        v.row(choice("Source", &BY, l.dark_mode_source, |x| {
             light_patch(
                 LightPatch {
                     dark_mode_source: Some(x),
@@ -1286,7 +1200,7 @@ fn night(snap: &Snapshot) -> View {
             (Some(la), Some(lo)) => {
                 v.row(info("Location", format!("{la:.1}, {lo:.1}")));
                 v.row(
-                    Row::new(RowKind::Button, "Forget the location", "")
+                    Row::new(RowKind::Button, "Forget location", "")
                         .button("Forget")
                         .act(light_patch(
                             LightPatch {
@@ -1312,7 +1226,7 @@ fn night(snap: &Snapshot) -> View {
                     day_from: Some(t),
                     ..Default::default()
                 }));
-                v.row(info("Location", "Not set: sunset times need one").dimmed(true));
+                v.row(info("Location", "Not set").dimmed(true));
             }
         }
     })
@@ -1329,9 +1243,8 @@ fn input(p: InputPatch) -> Act {
 
 fn controls(snap: &Snapshot, prefs: crate::keyboard::Prefs) -> View {
     with_settings(snap, "Controls", |v, s| {
-        let n = |wheel| count(keys::bound(&s.bindings, wheel).len(), "key", "keys");
-        v.row(route("Steering wheel", n(true), S::Wheel));
-        v.row(route("Faceplate", n(false), S::Faceplate));
+        v.row(route("Steering wheel", "", S::Wheel));
+        v.row(route("Faceplate", "", S::Faceplate));
         const LONG: [u32; 13] = [
             200, 250, 300, 350, 400, 440, 500, 600, 700, 800, 1000, 1200, 1500,
         ];
@@ -1349,7 +1262,7 @@ fn controls(snap: &Snapshot, prefs: crate::keyboard::Prefs) -> View {
         ));
         const HELD: [u32; 9] = [3, 4, 5, 6, 8, 10, 12, 15, 20];
         v.row(step(
-            "Hold for system actions",
+            "Extended hold",
             format!("{} s", s.input.extended_s),
             &HELD,
             s.input.extended_s,
@@ -1388,20 +1301,17 @@ fn keyboard_rows(v: &mut View, p: crate::keyboard::Prefs) {
     v.row(choice("On-screen keyboard", &STYLES, p.style, |x| {
         Act::Keyboard(crate::keyboard::Prefs { style: x, ..p })
     }));
-    if p.style == Style::Auto {
-        v.row(info("Auto: Touch if a touch screen is attached, else Knob", "").dimmed(true));
-    }
     if matches!(p.style, Style::Auto | Style::Knob) {
         const ORDERS: [(Order, &str); 2] = [
             (Order::Alphabetical, "Alphabetical"),
             (Order::Qwerty, "QWERTY"),
         ];
-        v.row(choice("Keyboard letters", &ORDERS, p.order, |x| {
+        v.row(choice("Key order", &ORDERS, p.order, |x| {
             Act::Keyboard(crate::keyboard::Prefs { order: x, ..p })
         }));
     }
     v.row(toggle(
-        "Show passwords while typing",
+        "Show passwords",
         p.show_secret,
         Act::Keyboard(crate::keyboard::Prefs {
             show_secret: !p.show_secret,
@@ -1418,12 +1328,7 @@ fn key_list(snap: &Snapshot, wheel: bool) -> View {
             v.row(info("No keys bound", "").dimmed(true));
         }
         for k in list {
-            let rows: Vec<_> = s.bindings.iter().filter(|b| b.key == KEYS[k].key).collect();
-            let value = match rows.as_slice() {
-                [one] => keys::action_label(&one.action),
-                many => format!("{} actions", many.len()),
-            };
-            v.row(route(KEYS[k].label, value, S::Key(k)));
+            v.row(route(KEYS[k].label, "", S::Key(k)));
         }
     })
 }
@@ -1449,11 +1354,22 @@ fn key(snap: &Snapshot, k: usize) -> View {
             if tables > 1 {
                 label = format!("{label}, {}", keys::table_label(&b.table));
             }
-            v.row(route(
-                label,
-                keys::action_label(&b.action),
-                S::Binding(k, i),
-            ));
+            // Push opens the list; the D-pad steps through it in place.
+            let list = cfg::actions(&b.table);
+            let at = list.iter().position(|a| *a == b.action).unwrap_or(0);
+            let n = list.len().max(1);
+            let to = |j: usize| {
+                let a = list.get(j % n).copied().unwrap_or(b.action.as_str());
+                set(SettingsPatch {
+                    bindings: Some(cfg::rebound(&s.bindings, i, a)),
+                    ..Default::default()
+                })
+            };
+            v.row(
+                Row::new(RowKind::Choice, label, keys::action_label(&b.action))
+                    .act(open(S::Binding(k, i)))
+                    .side(to(at + n - 1), to(at + 1)),
+            );
         }
     })
 }
@@ -1514,14 +1430,7 @@ fn logs_patch(p: LogsPatch) -> Act {
 fn logs(snap: &Snapshot, pages: &Pages) -> View {
     let _ = pages;
     with_settings(snap, "Logging & captures", |v, s| {
-        let logging = match &snap.datalog {
-            Some(st) => match &st.running {
-                Some(r) => format!("Logging {}", r.label),
-                None => count(st.profiles.len(), "profile", "profiles"),
-            },
-            None => String::new(),
-        };
-        v.row(route("Logging", logging, S::Logging));
+        v.row(route("Logging", logging_now(snap), S::Logging));
         if snap.capture == Capture::Saving {
             v.row(info("Capture now", "Saving…").dimmed(true));
         } else if snap.connected {
@@ -1555,8 +1464,8 @@ fn logs(snap: &Snapshot, pages: &Pages) -> View {
         ));
         const PCT: [u8; 15] = [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75];
         v.row(step(
-            "Space for logs",
-            format!("{} % of the disk", s.logs.max_pct),
+            "Log storage",
+            format!("{} %", s.logs.max_pct),
             &PCT,
             s.logs.max_pct,
             |x| {
@@ -1565,13 +1474,6 @@ fn logs(snap: &Snapshot, pages: &Pages) -> View {
                     ..Default::default()
                 })
             },
-        ));
-        v.row(info(
-            "On your phone",
-            s.portal
-                .address
-                .clone()
-                .unwrap_or_else(|| "The portal is off".into()),
         ));
     })
 }
@@ -1596,7 +1498,7 @@ fn power(snap: &Snapshot) -> View {
     with_settings(snap, "Power & clock", |v, s| {
         let p = &s.power;
         v.row(toggle(
-            "Shut down when the car is off",
+            "Auto shutdown",
             p.shutdown,
             power_patch(PowerPatch {
                 shutdown: Some(!p.shutdown),
@@ -1606,7 +1508,7 @@ fn power(snap: &Snapshot) -> View {
         if p.shutdown {
             const SILENT: [u32; 9] = [15, 30, 45, 60, 90, 120, 180, 300, 600];
             v.row(step(
-                "Wait after the car goes quiet",
+                "Shutdown delay",
                 format!("{} s", p.silent_s),
                 &SILENT,
                 p.silent_s,
@@ -1624,7 +1526,7 @@ fn power(snap: &Snapshot) -> View {
                 format!("{} min", p.radio_hold_min)
             };
             v.row(step(
-                "Stay on while the radio plays",
+                "Radio hold",
                 shown,
                 &HOLD,
                 p.radio_hold_min,
@@ -1638,7 +1540,7 @@ fn power(snap: &Snapshot) -> View {
         }
         let c = &s.clock;
         v.row(toggle(
-            "Set the clock from the car",
+            "Clock from car",
             c.set_from_car,
             clock_patch(ClockPatch {
                 set_from_car: Some(!c.set_from_car),
@@ -1653,7 +1555,7 @@ fn power(snap: &Snapshot) -> View {
         if c.timezones.is_empty() {
             v.row(info("Time zone", zone));
         } else {
-            v.row(route("Time zone", zone, S::Zones));
+            v.row(route("Time zone", "", S::Zones));
         }
     })
 }
@@ -1661,8 +1563,8 @@ fn power(snap: &Snapshot) -> View {
 fn zones(snap: &Snapshot) -> View {
     with_settings(snap, "Time zone", |v, s| {
         let now = s.clock.timezone.split('/').next().unwrap_or("");
-        for (i, (region, list)) in cfg::zone_regions(&s.clock.timezones).iter().enumerate() {
-            let at = v.row(route(region.clone(), list.len().to_string(), S::Zone(i)));
+        for (i, (region, _)) in cfg::zone_regions(&s.clock.timezones).iter().enumerate() {
+            let at = v.row(route(region.clone(), "", S::Zone(i)));
             if region == now {
                 v.start = at;
             }
@@ -1764,7 +1666,7 @@ fn avsd(snap: &Snapshot, now: Instant) -> View {
     with_settings(snap, "A/V over SD", |v, s| {
         v.row(info("RNS-E firmware", snap.firmware.rnse.installed.label()));
         v.row(info("SDLink protocol", snap.firmware.protocol.label()));
-        v.row(route("SDLink firmware", "RNS-E / Teensy", S::AvsdFirmware));
+        v.row(firmware_row(snap, S::AvsdFirmware));
         let decoder = &snap.decoder;
         let reading = decoder.running();
         let result = match &decoder.finished {
@@ -1808,14 +1710,10 @@ fn avsd(snap: &Snapshot, now: Instant) -> View {
         }
         let n = s.avsd.ranges.iter().filter(|r| r.key != GAIN).count();
         if n > 0 {
-            v.row(route(
-                "Picture",
-                count(n, "setting", "settings"),
-                S::Picture,
-            ));
+            v.row(route("Picture", "", S::Picture));
         }
         v.row(
-            Row::new(RowKind::Button, "Restart the stream", "")
+            Row::new(RowKind::Button, "Restart stream", "")
                 .button("Restart")
                 .act(set(SettingsPatch {
                     avsd: Some(AvsdPatch {
@@ -1848,60 +1746,13 @@ fn remote_patch(p: carpi_proto::RemotePatch) -> Act {
 fn remote(snap: &Snapshot) -> View {
     with_settings(snap, "Remote access", |v, s| {
         v.row(info(
-            "File portal",
-            s.portal
-                .address
-                .clone()
-                .unwrap_or_else(|| "The portal is off".into()),
+            "Portal",
+            s.portal.address.clone().unwrap_or_else(|| "Off".into()),
         ));
-        v.row(info("ssh", "Always on"));
-        let r = &s.remote;
-        if !r.vnc_installed {
-            v.row(info("VNC", "Not installed").dimmed(true));
-            return;
-        }
-        v.row(toggle(
-            "VNC now",
-            r.vnc_running,
-            remote_patch(carpi_proto::RemotePatch {
-                vnc_running: Some(!r.vnc_running),
-                ..Default::default()
-            }),
-        ));
-        v.row(toggle(
-            "VNC at startup",
-            r.vnc_at_boot,
-            remote_patch(carpi_proto::RemotePatch {
-                vnc_at_boot: Some(!r.vnc_at_boot),
-                ..Default::default()
-            }),
-        ));
-        v.row(
-            info(
-                "Off at startup boots faster",
-                "Turn it on here when you need it",
-            )
-            .dimmed(true),
-        );
-    })
-}
-
-// ---- Phone portal ----
-
-fn portal(snap: &Snapshot) -> View {
-    with_settings(snap, "Phone portal", |v, s| {
-        v.row(info(
-            "Address",
-            s.portal
-                .address
-                .clone()
-                .unwrap_or_else(|| "The portal is off".into()),
-        ));
-        let pin = if s.portal_pin_set { "Set" } else { "Not set" };
-        v.row(route("PIN", pin, S::Pin));
+        v.row(route("PIN", "", S::Pin));
         if s.portal_pin_set {
             v.row(
-                Row::new(RowKind::Button, "Clear the PIN", "")
+                Row::new(RowKind::Button, "Clear PIN", "")
                     .button("Clear")
                     .act(set(SettingsPatch {
                         portal_pin: Some(PinChange::Clear),
@@ -1909,7 +1760,7 @@ fn portal(snap: &Snapshot) -> View {
                     })),
             );
             v.row(toggle(
-                "Downloads need the PIN",
+                "PIN for downloads",
                 s.portal.protect_downloads,
                 set(SettingsPatch {
                     portal: Some(PortalPatch {
@@ -1919,27 +1770,49 @@ fn portal(snap: &Snapshot) -> View {
                 }),
             ));
         }
+        v.row(info("SSH", "Always on"));
+        let r = &s.remote;
+        if !r.vnc_installed {
+            v.row(info("VNC", "Not installed").dimmed(true));
+            return;
+        }
+        v.row(toggle(
+            "VNC",
+            r.vnc_running,
+            remote_patch(carpi_proto::RemotePatch {
+                vnc_running: Some(!r.vnc_running),
+                ..Default::default()
+            }),
+        ));
+        v.row(toggle(
+            "VNC at boot",
+            r.vnc_at_boot,
+            remote_patch(carpi_proto::RemotePatch {
+                vnc_at_boot: Some(!r.vnc_at_boot),
+                ..Default::default()
+            }),
+        ));
     })
 }
 
 fn pin_entry(snap: &Snapshot, pin: &str) -> View {
     let mut v = View::new(Layout::List, "New PIN", true).note(settings_note(snap));
     let shown = if pin.is_empty() {
-        "push digits below".to_string()
+        String::new()
     } else {
         "•".repeat(pin.len())
     };
     v.row(info("New PIN", shown).dimmed(pin.is_empty()));
     if !pin.is_empty() && snap.connected {
         v.row(
-            Row::new(RowKind::Button, "Save this PIN", "")
+            Row::new(RowKind::Button, "Save PIN", "")
                 .button("Save")
                 .act(Act::PinSave),
         );
     }
     if !pin.is_empty() {
         v.row(
-            Row::new(RowKind::Button, "Delete the last digit", "")
+            Row::new(RowKind::Button, "Delete digit", "")
                 .button("Delete")
                 .act(Act::PinDelete),
         );
@@ -1976,7 +1849,7 @@ fn updates(snap: &Snapshot) -> View {
             .as_ref()
             .and_then(|s| s.current.clone())
             .unwrap_or(version);
-        v.row(info("This version", version));
+        v.row(info("Version", version));
         // One row for how the last update went: this session's attempt if there was one, else
         // what carpi-update recorded.
         let job = &snap.update;
@@ -2038,16 +1911,12 @@ fn updates(snap: &Snapshot) -> View {
             };
             v.row(info("Updating", format!("{stage}{pct}")));
         } else if snap.update_recovering {
-            v.row(info("Update status", "Checking update status"));
+            v.row(info("Status", "Checking"));
         } else {
-            v.row(route("Check and install", "", S::UpdateConfirm));
+            v.row(route("Install", "", S::UpdateConfirm));
         }
-        let nets = match &snap.wifi.networks {
-            Some(n) => count(n.len(), "saved", "saved"),
-            None => String::new(),
-        };
-        v.row(route("Wi-Fi networks", nets, S::Wifi).icon("WifiOutlined"));
-        v.row(route("SDLink firmware", "RNS-E / Teensy", S::Firmware));
+        v.row(route("Wi-Fi networks", "", S::Wifi).icon("WifiOutlined"));
+        v.row(firmware_row(snap, S::Firmware));
     })
 }
 
@@ -2069,8 +1938,7 @@ fn wifi_job_row(v: &mut View, snap: &Snapshot, what: &str) {
 }
 
 fn wifi(snap: &Snapshot) -> View {
-    let mut v = View::new(Layout::List, "Wi-Fi networks", true)
-        .note("Updates join one of these while the hotspot is off.");
+    let mut v = View::new(Layout::List, "Wi-Fi networks", true);
     if let Some(n) = &snap.wifi.note {
         v.row(info("Problem", n.clone()).alert(true));
     }
@@ -2080,18 +1948,19 @@ fn wifi(snap: &Snapshot) -> View {
         }
         Some(nets) => {
             for (i, n) in nets.iter().enumerate() {
-                let mut value = if n.secured { "Password" } else { "Open" }.to_string();
-                if snap.wifi.connected.as_deref() == Some(n.ssid.as_str()) {
-                    value = "Connected".into();
-                }
+                let value = if snap.wifi.connected.as_deref() == Some(n.ssid.as_str()) {
+                    "Connected"
+                } else {
+                    ""
+                };
                 v.row(route(n.ssid.clone(), value, S::WifiNet(i)).icon("WifiOutlined"));
             }
             if nets.is_empty() {
-                v.row(info("None saved yet", "").dimmed(true));
+                v.row(info("None saved", "").dimmed(true));
             }
         }
     }
-    v.row(route("Add a network", "", S::WifiAdd));
+    v.row(route("Add network", "", S::WifiAdd));
     wifi_job_row(&mut v, snap, "Last test");
     v.finish()
 }
@@ -2111,29 +1980,23 @@ fn wifi_net(snap: &Snapshot, i: usize, forgetting: bool) -> View {
         v.row(info("Hidden", "Yes"));
     }
     v.row(
-        Row::new(RowKind::Button, "Test it", "")
+        Row::new(RowKind::Button, "Test", "")
+            .tag("Drops hotspot")
             .button("Test")
             .act(Act::Wifi(WifiAct::Test(n.ssid.clone()))),
-    );
-    v.row(
-        info(
-            "The hotspot goes off while it tests",
-            "The phone link drops",
-        )
-        .dimmed(true),
     );
     wifi_job_row(&mut v, snap, "Test");
     if n.secured {
         v.row(
-            Row::new(RowKind::Button, "New password", "")
+            Row::new(RowKind::Button, "Change password", "")
                 .button("Type")
                 .act(Act::Type(TypeFor::WifiPassword(n.ssid.clone()))),
         );
     }
     let label = if forgetting {
-        "Push again to forget it"
+        "Confirm forget"
     } else {
-        "Forget this network"
+        "Forget"
     };
     v.row(
         Row::new(RowKind::Button, label, "")
@@ -2145,18 +2008,12 @@ fn wifi_net(snap: &Snapshot, i: usize, forgetting: bool) -> View {
 }
 
 fn wifi_add(snap: &Snapshot) -> View {
-    let mut v = View::new(Layout::List, "Add a network", true);
+    let mut v = View::new(Layout::List, "Add network", true);
     v.row(
-        Row::new(RowKind::Button, "Look for networks", "")
+        Row::new(RowKind::Button, "Scan", "")
+            .tag("Drops hotspot ~10 s")
             .button("Scan")
             .act(Act::Wifi(WifiAct::Scan)),
-    );
-    v.row(
-        info(
-            "The hotspot goes off for about 10 s",
-            "The phone link drops",
-        )
-        .dimmed(true),
     );
     wifi_job_row(&mut v, snap, "Scan");
     if let Some(seen) = &snap.wifi.seen {
@@ -2175,22 +2032,22 @@ fn wifi_add(snap: &Snapshot) -> View {
         }
     }
     v.row(
-        Row::new(RowKind::Route, "Hidden network", "Type its name")
+        Row::new(RowKind::Route, "Hidden network", "")
             .act(Act::Type(TypeFor::WifiName)),
     );
     v.finish()
 }
 
 fn update_confirm(snap: &Snapshot) -> View {
-    let mut v = View::new(Layout::List, "Check and install", true).note(settings_note(snap));
-    v.row(info("The hotspot drops while it downloads", ""));
+    let mut v = View::new(Layout::List, "Install", true).note(settings_note(snap));
+    v.row(info("Hotspot drops during download", ""));
     let at = v.row(
-        Row::new(RowKind::Button, "Check and install now", "")
-            .button("Start")
+        Row::new(RowKind::Button, "Install", "")
+            .button("Install")
             .act(Act::Update),
     );
     v.row(
-        Row::new(RowKind::Button, "Not now", "")
+        Row::new(RowKind::Button, "Cancel", "")
             .button("Cancel")
             .act(Act::Back),
     );
@@ -2208,28 +2065,21 @@ fn advanced(pages: &Pages, snap: &Snapshot) -> View {
         }
         if pages.setup_done() {
             v.row(
-                Row::new(RowKind::Button, "Show Setup again", "")
+                Row::new(RowKind::Button, "Show Setup", "")
                     .button("Show")
                     .act(Act::SetupDone(false)),
             );
         }
-        v.row(
-            toggle(
-                "Send to the car",
-                s.tx_enabled,
-                set(SettingsPatch {
-                    tx_enabled: Some(!s.tx_enabled),
-                    ..Default::default()
-                }),
-            )
-            .tap(|r| {
-                if !s.tx_enabled {
-                    r.value = "Log only".into();
-                }
-            }),
-        );
         v.row(toggle(
-            "Keys to LIVI",
+            "CAN transmit",
+            s.tx_enabled,
+            set(SettingsPatch {
+                tx_enabled: Some(!s.tx_enabled),
+                ..Default::default()
+            }),
+        ));
+        v.row(toggle(
+            "Key input",
             s.input.uinput,
             input(InputPatch {
                 uinput: Some(!s.input.uinput),
@@ -2603,12 +2453,12 @@ mod tests {
         });
         let v = updates(&s);
         assert_eq!(
-            v.rows[find(&v, "This version")].value,
+            v.rows[find(&v, "Version")].value,
             "beta-20261109-5e0cf2c"
         );
         assert_eq!(v.rows[find(&v, "Last update")].value, "Succeeded");
         assert!(!v.rows[find(&v, "Last update")].alert);
-        assert!(v.rows[find(&v, "Check and install")].value.is_empty());
+        assert!(v.rows[find(&v, "Install")].value.is_empty());
         // A refused update doesn't sit beside an old "Succeeded".
         s.update.finished = Some((false, "needs OS profile 2, Pi has 1".into()));
         let v = updates(&s);
@@ -2622,7 +2472,7 @@ mod tests {
                 .count(),
             0
         );
-        assert!(v.rows[find(&v, "Check and install")].value.is_empty());
+        assert!(v.rows[find(&v, "Install")].value.is_empty());
     }
 
     #[test]
@@ -2631,10 +2481,10 @@ mod tests {
         s.update_recovering = true;
         let v = updates(&s);
         assert_eq!(
-            v.rows[find(&v, "Update status")].value,
-            "Checking update status"
+            v.rows[find(&v, "Status")].value,
+            "Checking"
         );
-        assert!(!v.rows[find(&v, "Update status")].alert);
+        assert!(!v.rows[find(&v, "Status")].alert);
         assert!(!v.rows.iter().any(|r| r.label == "Updating"));
         assert!(!s.update.running());
     }
@@ -2726,7 +2576,6 @@ mod tests {
             S::Zone(0),
             S::Avsd,
             S::Picture,
-            S::Portal,
             S::Pin,
             S::Updates,
             S::Firmware,
@@ -2767,30 +2616,33 @@ mod tests {
     }
 
     #[test]
-    fn cluster_rows_say_what_happens() {
+    fn cluster_rows_are_terse_and_routes_show_no_setting() {
         let mut p = Pages::new(Saved::default(), None);
         let v = at(&mut p, S::Cluster);
-        let claim = find(&v, "Our screen shows");
-        assert_eq!(v.rows[claim].value, "Always");
+        let claim = &v.rows[find(&v, "Auto claim")];
+        assert!(claim.checked);
         assert_eq!(
-            patch_of(v.side_act(Some(&Hit::Row(claim)), 1))
-                .dis
-                .unwrap()
-                .claim,
+            patch_of(Some(&claim.act)).dis.unwrap().claim,
             Some(DisClaim::Tab)
         );
+        for r in v.rows.iter().filter(|r| r.kind == RowKind::Route) {
+            assert!(r.value.is_empty(), "{}: {}", r.label, r.value);
+        }
+        for (screen, flag) in [(S::Nav, 0), (S::Calls, 1), (S::Media, 2)] {
+            let v = at(&mut p, screen);
+            let take = &v.rows[find(&v, "Auto claim")];
+            assert!(take.checked);
+            let d = patch_of(Some(&take.act)).dis.unwrap();
+            let got = [d.claim_nav, d.claim_phone, d.claim_media][flag];
+            assert_eq!(got, Some(false), "{screen:?}");
+            find(&v, "Auto release");
+        }
         let v = at(&mut p, S::Nav);
-        let take = &v.rows[find(&v, "Take over when a route starts")];
-        assert!(take.checked);
-        assert_eq!(
-            patch_of(Some(&take.act)).dis.unwrap().claim_nav,
-            Some(false)
-        );
-        assert!(v.rows.iter().any(|r| r.label == "Trip info: ETA"));
-        let lanes = find(&v, "Lanes");
-        assert_eq!(v.rows[lanes].value, "Alternate with the road");
+        assert_eq!(v.rows[find(&v, "Style")].value, "Fancy");
+        find(&v, "ETA");
+        assert_eq!(v.rows[find(&v, "Lanes")].value, "Alternate");
         let v = at(&mut p, S::Media);
-        let flash = find(&v, "Cover flash");
+        let flash = find(&v, "Fullscreen cover time");
         assert_eq!(v.rows[flash].value, "4 s");
         assert_eq!(
             patch_of(Some(&v.rows[flash].act))
@@ -2814,7 +2666,7 @@ mod tests {
         let s = client.snapshot().clone();
         let v = view(&p, &s, Instant::now());
         assert_eq!(v.title, "Readings");
-        let add = find(&v, "Add a value");
+        let add = find(&v, "Add value");
         let m = p.press(crate::PageId::Car, &v, &Hit::Row(add), 3, &client);
         assert_eq!((m, p.car), (Moved::Opened, S::CellAdd(0)));
         let m = p.run(
@@ -2964,7 +2816,7 @@ mod tests {
         assert_eq!(p.flashing(), None);
         client.snapshot().firmware_job = Default::default();
         press(&mut p, "Install update", 0);
-        assert_eq!(press(&mut p, "Push again to install", 0), Moved::Stay);
+        assert_eq!(press(&mut p, "Confirm install", 0), Moved::Stay);
         assert_eq!(p.flashing(), None);
         assert_eq!(
             client.snapshot().firmware_job.action,
@@ -3044,7 +2896,7 @@ mod tests {
         // No NVMe reported: no move row.
         assert!(!v.rows.iter().any(|r| r.label == "Move to NVMe"));
         let remote = find(&v, "Remote access");
-        assert_eq!(v.rows[remote].value, "VNC not installed");
+        assert!(v.rows[remote].value.is_empty());
         p.press(crate::PageId::Car, &v, &Hit::Row(remote), 4, &client);
         assert_eq!(p.car, S::Remote);
         assert_eq!(p.depth(crate::PageId::Car), 2);
@@ -3071,7 +2923,7 @@ mod tests {
         // Hide persists the main Settings preference; Advanced brings it back.
         p.goto(S::Setup);
         let v = view(&p, &s, Instant::now());
-        let hide = find(&v, "Done, hide this");
+        let hide = find(&v, "Finish setup");
         p.press(crate::PageId::Car, &v, &Hit::Row(hide), 0, &client);
         assert_eq!(p.car, S::Root);
         assert!(p.setup_done());
@@ -3079,7 +2931,7 @@ mod tests {
         assert!(!v.rows.iter().any(|r| r.label == "Setup"));
         p.goto(S::Advanced);
         let v = view(&p, &s, Instant::now());
-        let show = find(&v, "Show Setup again");
+        let show = find(&v, "Show Setup");
         p.press(crate::PageId::Car, &v, &Hit::Row(show), 0, &client);
         assert!(!p.setup_done());
     }
@@ -3120,7 +2972,7 @@ mod tests {
             "not on the first push"
         );
         let v = view(&p, &s, Instant::now());
-        let again = find(&v, "Push again to erase and start");
+        let again = find(&v, "Confirm erase");
         p.press(crate::PageId::Car, &v, &Hit::Row(again), 0, &client);
         assert!(!p.moving());
         // Offline, so the ask comes straight back refused.

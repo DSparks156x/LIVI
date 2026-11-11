@@ -185,8 +185,7 @@ pub enum CarScreen {
     Zone(usize),
     Avsd,
     Picture,
-    Portal,
-    /// The portal's address, VNC now and at startup.
+    /// The portal (address, PIN), ssh and VNC.
     Remote,
     /// Entering a new portal PIN.
     Pin,
@@ -228,7 +227,7 @@ impl CarScreen {
             S::Zone(_) => S::Zones,
             S::Picture => S::Avsd,
             S::AvsdFirmware => S::Avsd,
-            S::Pin => S::Portal,
+            S::Pin => S::Remote,
             S::UpdateConfirm | S::Wifi | S::Firmware => S::Updates,
             S::WifiNet(_) | S::WifiAdd => S::Wifi,
             S::Nvme => S::Advanced,

@@ -767,7 +767,7 @@ impl Editor {
             let mut row = Row::new(
                 RowKind::Button,
                 if self.removing {
-                    "Push again to remove it"
+                    "Confirm remove"
                 } else {
                     "Remove this page"
                 },
@@ -1153,7 +1153,7 @@ mod tests {
         e.apply(&SlotAct::PageRemove, &mut b, &mut recent, &DATA);
         assert_eq!(b.pages.len(), 5);
         let v = e.view(&b, &recent, &s, now, &DATA);
-        assert!(v.rows.iter().any(|r| r.label == "Push again to remove it"));
+        assert!(v.rows.iter().any(|r| r.label == "Confirm remove"));
         e.apply(&SlotAct::PageRemove, &mut b, &mut recent, &DATA);
         assert_eq!(b.pages.len(), 4);
         assert_eq!(b.pages[0].name, "Boost");

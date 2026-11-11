@@ -446,7 +446,7 @@ pub fn profile(state: &Logging, snap: &Snapshot) -> View {
     let mut row = Row::new(
         RowKind::Button,
         if state.removing {
-            "Push again to remove it"
+            "Confirm remove"
         } else {
             "Remove this profile"
         },
@@ -727,7 +727,7 @@ pub(crate) mod tests {
         assert!(
             v.rows
                 .iter()
-                .any(|r| r.label == "Push again to remove it" && r.alert)
+                .any(|r| r.label == "Confirm remove" && r.alert)
         );
         assert_eq!(l.apply(&LogAct::Remove, Some(&st), &client), Done::Back);
         assert!(l.open.is_none());

@@ -95,6 +95,12 @@ pub fn decide(code: &str, ctx: Context, config: &Value) -> Outcome {
     let right = is("right", "ArrowRight") || knob("knobRight");
     let up = is("up", "ArrowUp") || knob("knobUp");
     let down = is("down", "ArrowDown") || knob("knobDown");
+    // carpi fork: a knob of its own never leaves a page by turning (as in AA/CarPlay, where the
+    // focus stops at the ends); Back leaves. The D-pad still steps out past the first element.
+    let turned = knob("knobLeft") || knob("knobRight") || knob("knobUp");
+    // carpi fork: walking a list, the knob goes as in the RNS-E's own menus: clockwise up.
+    // Adjusting a value and paging keep clockwise = more / next, as AA does.
+    let walk = |delta: i32| if turned { -delta } else { delta };
     let back = (!b("back").is_empty() && code == b("back")) || code == "Escape";
     let enter = code == "Enter" || code == "NumpadEnter";
     let select_down = !b("selectDown").is_empty() && code == b("selectDown");
@@ -114,7 +120,7 @@ pub fn decide(code: &str, ctx: Context, config: &Value) -> Outcome {
     if ctx.telemetry && !in_nav && !form {
         if left {
             return if ctx.first && !ctx.repeat {
-                Outcome::ToNav
+                if turned { Outcome::Ignore } else { Outcome::ToNav }
             } else {
                 Outcome::Pager(-1)
             };
@@ -176,10 +182,10 @@ pub fn decide(code: &str, ctx: Context, config: &Value) -> Outcome {
             };
         }
         if left || up {
-            return Outcome::NavStep(-1);
+            return Outcome::NavStep(walk(-1));
         }
         if right || down {
-            return Outcome::NavStep(1);
+            return Outcome::NavStep(walk(1));
         }
         if select_down {
             return Outcome::NavOpen {
@@ -237,14 +243,15 @@ pub fn decide(code: &str, ctx: Context, config: &Value) -> Outcome {
                     Outcome::Ignore
                 }
             }
-            _ if delta < 0 && ctx.first && !ctx.repeat => {
+            _ if walk(delta) < 0 && ctx.first && turned => Outcome::Ignore,
+            _ if delta < 0 && ctx.first && !ctx.repeat && !turned => {
                 if ctx.settings_depth > 0 {
                     Outcome::SettingsBack
                 } else {
                     Outcome::ToNav
                 }
             }
-            _ => Outcome::MainStep(delta),
+            _ => Outcome::MainStep(walk(delta)),
         };
     }
 
@@ -342,24 +349,31 @@ mod tests {
         );
         assert_eq!(
             decide("PageDown", ctx(Zone::Nav), &config),
-            Outcome::NavStep(1)
+            Outcome::NavStep(-1)
         );
     }
 
     #[test]
-    fn the_knob_moves_like_the_arrows() {
+    fn the_knob_walks_lists_clockwise_up() {
         let mut config = config();
         config["bindings"]["knobLeft"] = json!("KeyQ");
         config["bindings"]["knobRight"] = json!("KeyE");
         config["bindings"]["knobDown"] = json!("KeyX");
         assert_eq!(
             decide("KeyQ", ctx(Zone::Nav), &config),
-            Outcome::NavStep(-1)
+            Outcome::NavStep(1)
         );
         assert_eq!(
             decide("KeyE", ctx(Zone::Main), &config),
-            Outcome::MainStep(1)
+            Outcome::MainStep(-1)
         );
+        let mut slider = ctx(Zone::Main);
+        slider.focused = Focused::Slider;
+        slider.editing = true;
+        assert_eq!(decide("KeyE", slider, &config), Outcome::Adjust(1));
+        let mut dash = ctx(Zone::Main);
+        dash.telemetry = true;
+        assert_eq!(decide("KeyE", dash, &config), Outcome::Pager(1));
         assert_eq!(decide("KeyX", ctx(Zone::None), &config), Outcome::EnterMain);
         let mut c = ctx(Zone::Main);
         c.projection = true;
@@ -391,6 +405,25 @@ mod tests {
         c.focused = Focused::Slider;
         c.editing = true;
         assert_eq!(decide("ArrowLeft", c, &config()), Outcome::Adjust(-1));
+    }
+
+    #[test]
+    fn the_knob_stops_at_the_first_element() {
+        let mut config = config();
+        config["bindings"]["knobLeft"] = json!("PageUp");
+        config["bindings"]["knobRight"] = json!("PageDown");
+        let mut c = ctx(Zone::Main);
+        c.first = true;
+        assert_eq!(decide("PageDown", c, &config), Outcome::Ignore);
+        assert_eq!(decide("PageUp", c, &config), Outcome::MainStep(1));
+        assert_eq!(decide("ArrowLeft", c, &config), Outcome::ToNav);
+        c.settings_depth = 1;
+        assert_eq!(decide("PageDown", c, &config), Outcome::Ignore);
+        c.settings_depth = 0;
+        c.telemetry = true;
+        assert_eq!(decide("PageUp", c, &config), Outcome::Ignore);
+        c.first = false;
+        assert_eq!(decide("PageUp", c, &config), Outcome::Pager(-1));
     }
 
     #[test]

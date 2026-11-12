@@ -61,6 +61,8 @@ pub struct Pages {
     clearing: Vec<u8>,
     /// The module group last asked for, so it's asked once.
     asked: Option<(u8, u8)>,
+    /// Sync-point groups a Forks widget has asked for (TP2, group), once each.
+    synced: std::collections::BTreeSet<(u8, u8)>,
     /// The Data page's tab.
     tab: DataTab,
     /// The module open on the Faults tab.
@@ -121,6 +123,7 @@ impl Pages {
             clear_all: false,
             clearing: Vec::new(),
             asked: None,
+            synced: Default::default(),
             tab: DataTab::Panels,
             module: None,
             car: CarScreen::Root,

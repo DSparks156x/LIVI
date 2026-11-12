@@ -243,6 +243,12 @@ fn widget(w: &livi_carpi_ui::panels::WidgetDraw) -> CarpiWidget {
                     frac: i.frac,
                     on: i.on,
                     state: i.state,
+                    lo: i.lo.as_str().into(),
+                    hi: i.hi.as_str().into(),
+                    sync_lo: i.sync_lo,
+                    sync_hi: i.sync_hi,
+                    zero: i.zero,
+                    side: i.side,
                 })
                 .collect::<Vec<_>>(),
         )),

@@ -805,7 +805,7 @@ mod link {
         PathBuf::from(dir).join("carpid.sock")
     }
 
-    #[derive(Debug, Clone, Copy, PartialEq)]
+    #[derive(Debug, Clone, PartialEq)]
     enum Pending {
         Hello,
         Values,
@@ -868,7 +868,7 @@ mod link {
                 if s.capture == Capture::Saving {
                     s.captured(Err("carpid went away".into()));
                 }
-                if let Some(crate::diag::Job::Running { action, .. }) = s.diag.job {
+                if let Some(crate::diag::Job::Running { action, .. }) = s.diag.job.clone() {
                     s.diag.refused(action, "carpid went away".into());
                 }
             }
@@ -1152,7 +1152,12 @@ mod link {
                         self.send(&Request::Light { action }, Pending::Light)
                     }
                     Ok(Ev::Ask(Ask::Diag(action))) => {
-                        self.send(&Request::Diag { action }, Pending::Diag(action))
+                        self.send(
+                            &Request::Diag {
+                                action: action.clone(),
+                            },
+                            Pending::Diag(action),
+                        )
                     }
                     Ok(Ev::Ask(Ask::Datalog(action))) => self.datalog(action),
                     Ok(Ev::Ask(Ask::Update(action, and_apply))) => {
@@ -2530,7 +2535,7 @@ mod tests {
         assert!(wait(&client, |s| s
             .toast
             .as_ref()
-            .is_some_and(|t| t.text == "Capture 2026-11-08 #03")));
+            .is_some_and(|t| t.text == "Debug logs 2026-11-08 #03")));
         drop(s);
         assert!(wait(&client, |s| !s.connected));
         let _ = std::fs::remove_dir_all(&dir);

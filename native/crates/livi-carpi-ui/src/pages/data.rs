@@ -169,6 +169,26 @@ impl Pages {
                 module: m.module.tp2,
                 group: g,
             });
+            return;
+        }
+        // A Forks widget on screen: its sync points, read once each.
+        let forks = self.tab == DataTab::Panels
+            && self.panels.panel().widgets.iter().any(|w| w.style == Style::Forks);
+        if forks {
+            for (addr, g) in crate::panels::FORK_SYNC {
+                let Some(m) = snap.diag.modules().into_iter().find(|m| m.module.address == addr)
+                else {
+                    continue;
+                };
+                let key = (m.module.tp2, g);
+                if !snap.diag.groups.contains_key(&key) && self.synced.insert(key) {
+                    client.diag(DiagAction::ReadGroup {
+                        module: key.0,
+                        group: g,
+                    });
+                    return;
+                }
+            }
         }
     }
 
@@ -681,11 +701,7 @@ impl Pages {
         }
         match (target, name) {
             (Target::Cell(c, r), Some(n)) => {
-                let style = if n == "trans.selector" {
-                    Style::Selector
-                } else {
-                    Style::Number
-                };
+                let style = Style::Number;
                 self.panels
                     .panel_mut()
                     .widgets
@@ -916,7 +932,7 @@ impl Pages {
         let numeric = matches!(defs::describe(first).kind, defs::Kind::Num(_));
         let s = panels::scale_of(w, first, snap, &mem, now);
         let fmt = |x: f64| crate::values::number(x, if s.major < 1.0 { 2 } else { 0 });
-        if numeric && w.style != Style::Selector {
+        if numeric && w.style != Style::Forks {
             if absolute_pressure(first) {
                 let rel = if w.opts.relative { "Relative" } else { "Absolute" };
                 v.row(choice("Pressure", rel, |_| PanelAct::Relative(i)));
@@ -971,7 +987,7 @@ impl Pages {
                 let r = if w.opts.diff_pct { "%" } else { "Absolute" };
                 v.row(choice("Difference", r, |_| PanelAct::DiffPct(i)));
             }
-            Style::Set | Style::Selector => {}
+            Style::Set | Style::Forks => {}
         }
         v.section("");
         let mut rm = Row::new(

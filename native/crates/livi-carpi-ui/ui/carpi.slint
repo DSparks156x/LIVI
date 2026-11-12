@@ -82,6 +82,12 @@ export struct CarpiItem {
     frac: float,
     on: bool,
     state: int,
+    lo: string,
+    hi: string,
+    sync-lo: float,
+    sync-hi: float,
+    zero: float,
+    side: int,
 }
 
 export struct CarpiWidget {
@@ -656,7 +662,7 @@ component WidgetView inherits Rectangle {
             num := Text {
                 text: w.value;
                 color: root.state-ink;
-                font-size: min(root.height * 0.5, (root.width - 40px) / max(2, w.value.character-count + w.unit.character-count * 0.45) * 1.6);
+                font-size: min(root.height * 0.42, (root.width - 40px) / max(5, w.value.character-count + w.unit.character-count * 0.45) * 1.6);
                 vertical-alignment: bottom;
             }
             Text {
@@ -698,7 +704,7 @@ component WidgetView inherits Rectangle {
             viewbox-width: 1000;
             viewbox-height: 1000;
             commands: w.red-off;
-            stroke: P.red.with-alpha(0.35);
+            stroke: P.red.with-alpha(0.6);
             stroke-width: max(1.5px, parent.width / 140);
             stroke-line-cap: round;
         }
@@ -759,12 +765,22 @@ component WidgetView inherits Rectangle {
             color: root.state-ink;
             font-size: min(parent.width * 0.19, parent.width * 0.62 / max(3, w.value.character-count) * 1.5);
         }
-        Caption {
+        gc := Caption {
             u: root.u;
+            x: parent.width * 0.24;
             y: gv.y + gv.height;
-            width: parent.width;
+            width: parent.width * 0.52;
             horizontal-alignment: center;
-            text: w.unit == "" ? w.label : w.label + " · " + w.unit;
+            text: w.label;
+        }
+        Text {
+            x: gc.x;
+            y: gc.y + gc.height + 2px;
+            width: gc.width;
+            horizontal-alignment: center;
+            text: w.unit;
+            color: P.label;
+            font-size: max(11px, parent.width / 22);
         }
         if w.sub != "": Text {
             y: parent.height * 0.84;
@@ -815,23 +831,57 @@ component WidgetView inherits Rectangle {
         spacing: 6 * root.u;
         HorizontalLayout {
             spacing: 16 * root.u;
-            for l in w.lines: Text {
-                text: l.label;
-                color: l.color == 0 ? Theme.primary : (l.color == 1 ? Theme.text-secondary : P.amber);
-                font-size: max(12px, 14 * root.u);
-                overflow: elide;
+            for l in w.lines: HorizontalLayout {
+                spacing: 6px;
+                Rectangle {
+                    width: 12px;
+                    Rectangle {
+                        y: (parent.height - self.height) / 2;
+                        height: 3px;
+                        border-radius: 1.5px;
+                        background: l.color == 0 ? Theme.primary : (l.color == 1 ? Theme.text-secondary : P.amber);
+                    }
+                }
+                Text {
+                    text: l.label;
+                    color: Theme.text-secondary;
+                    font-size: 15px;
+                    overflow: elide;
+                }
             }
             Rectangle { horizontal-stretch: 1; }
         }
         area := Rectangle {
             vertical-stretch: 1;
-            for f in [0.25, 0.5, 0.75]: Rectangle {
-                y: parent.height * f;
+            property <length> gutter: 40px;
+            for t in w.labels: Rectangle {
+                x: area.gutter;
+                width: parent.width - area.gutter;
+                y: parent.height * t.y;
                 height: 1px;
                 background: P.hair;
             }
+            for t in w.labels: Text {
+                x: 0;
+                width: area.gutter - 6px;
+                horizontal-alignment: right;
+                y: t.y * parent.height - self.height / 2;
+                text: t.label;
+                color: Theme.text-disabled;
+                font-size: 12px;
+            }
+            Text {
+                x: 0;
+                width: area.gutter - 6px;
+                horizontal-alignment: right;
+                y: parent.height - self.height;
+                text: w.sub;
+                color: Theme.text-disabled;
+                font-size: 12px;
+            }
             for l in w.lines: Path {
-                width: parent.width;
+                x: area.gutter;
+                width: parent.width - area.gutter;
                 height: parent.height;
                 viewbox-width: 1000;
                 viewbox-height: 1000;
@@ -843,7 +893,7 @@ component WidgetView inherits Rectangle {
                 fill: transparent;
             }
             for m in w.marks: Rectangle {
-                x: m.x * parent.width;
+                x: area.gutter + m.x * (parent.width - area.gutter);
                 width: 1px;
                 background: Theme.text.with-alpha(0.45);
                 Rectangle {
@@ -865,35 +915,33 @@ component WidgetView inherits Rectangle {
         }
     }
 
-    // Pair: actual in teal, specified in white, the difference under.
+    // Pair: the shared caption, then each value under its own word; the difference under.
     if w.style == 4: VerticalLayout {
         padding: 12 * root.u;
         alignment: center;
         spacing: 6 * root.u;
-        Caption { u: root.u; text: w.label + "  /  " + w.label2; }
+        Caption { u: root.u; text: w.unit == "" ? w.label : w.label + " · " + w.unit; }
         HorizontalLayout {
-            spacing: 18 * root.u;
+            spacing: 22 * root.u;
             alignment: start;
-            Text {
-                text: w.value;
-                color: w.stale ? Theme.text-disabled : Theme.primary;
-                font-size: min(root.height * 0.42, (root.width - 60px) / max(4, w.value.character-count + w.value2.character-count) * 1.5);
-            }
-            Text {
-                text: w.value2;
-                color: root.ink;
-                font-size: min(root.height * 0.42, (root.width - 60px) / max(4, w.value.character-count + w.value2.character-count) * 1.5);
-            }
-            Text {
-                text: w.unit;
-                color: P.label;
-                font-size: max(13px, 16 * root.u);
-                vertical-alignment: bottom;
+            for it[k] in w.items: VerticalLayout {
+                spacing: 2px;
+                Text {
+                    text: it.value;
+                    color: w.stale ? Theme.text-disabled : (k == 0 ? Theme.primary : Theme.text);
+                    font-size: min(root.height * 0.36, (root.width - 60px) / max(8, w.value.character-count + w.value2.character-count) * 1.6);
+                }
+                Text {
+                    text: it.label;
+                    color: P.label;
+                    font-size: max(11px, 13 * root.u);
+                    overflow: elide;
+                }
             }
         }
         if w.sub != "": Text {
-            text: w.sub;
-            color: P.label;
+            text: "Δ " + w.sub;
+            color: Theme.text-secondary;
             font-size: max(12px, 15 * root.u);
         }
     }
@@ -935,43 +983,98 @@ component WidgetView inherits Rectangle {
         }
     }
 
-    // Selector: P R N D S, the position lit; the big value for tiptronic gears.
+    // Forks: a rail per fork, its gears at the ends; neutral and the sync points marked; the
+    // fork a dot, teal and its gear lit once engaged. Engaged gears big at the top.
     if w.style == 6: VerticalLayout {
         padding: 12 * root.u;
-        alignment: center;
-        spacing: 8 * root.u;
-        Caption { u: root.u; text: w.label; horizontal-alignment: center; }
+        spacing: 6 * root.u;
         HorizontalLayout {
-            alignment: center;
-            spacing: 14 * root.u;
-            for it in w.items: Rectangle {
-                width: sel.font-size * 1.25;
-                height: sel.font-size * 1.3;
-                border-radius: 8px;
-                background: it.on ? Theme.highlight : transparent;
-                sel := Text {
-                    text: it.label;
-                    color: it.on ? #ffffff : P.dim-tick.with-alpha(0.6);
-                    font-size: min(root.height * 0.32, root.width / 9);
-                    font-weight: it.on ? 700 : 400;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
+            Caption { u: root.u; text: w.label; vertical-alignment: bottom; }
+            Text {
+                text: w.value;
+                color: root.ink;
+                font-size: max(18px, 30 * root.u);
+                horizontal-alignment: right;
+                vertical-alignment: bottom;
             }
         }
-        if w.value != "P" && w.value != "R" && w.value != "N" && w.value != "D" && w.value != "S": Text {
-            text: w.value;
-            color: root.ink;
-            horizontal-alignment: center;
-            font-size: max(14px, 24 * root.u);
-        }
-        Text {
-            text: w.sub;
-            color: Theme.primary;
-            horizontal-alignment: center;
-            font-size: max(11px, 13 * root.u);
-            letter-spacing: 1.5px;
-            font-weight: 500;
+        for it in w.items: Rectangle {
+            vertical-stretch: 1;
+            property <length> gear-w: max(22px, 30 * root.u);
+            property <length> fs: clamp(self.height * 0.5, 13px, 30px);
+            property <length> track-x: self.gear-w;
+            property <length> track-w: self.width - 2 * self.gear-w;
+            property <length> dot: clamp(self.height * 0.34, 8px, 18px);
+            Text {
+                x: 0;
+                width: parent.gear-w;
+                height: parent.height;
+                text: it.lo;
+                horizontal-alignment: left;
+                vertical-alignment: center;
+                font-size: parent.fs;
+                font-weight: it.side == -1 ? 700 : 400;
+                color: it.side == -1 ? Theme.text : Theme.text-disabled;
+            }
+            Text {
+                x: parent.width - parent.gear-w;
+                width: parent.gear-w;
+                height: parent.height;
+                text: it.hi;
+                horizontal-alignment: right;
+                vertical-alignment: center;
+                font-size: parent.fs;
+                font-weight: it.side == 1 ? 700 : 400;
+                color: it.side == 1 ? Theme.text : Theme.text-disabled;
+            }
+            // The rail.
+            Rectangle {
+                x: parent.track-x;
+                y: (parent.height - self.height) / 2;
+                width: parent.track-w;
+                height: 2px;
+                background: P.dim-tick;
+            }
+            // Neutral.
+            Rectangle {
+                x: parent.track-x + parent.track-w * it.zero - 1px;
+                y: (parent.height - self.height) / 2;
+                width: 2px;
+                height: parent.dot * 1.2;
+                background: Theme.text.with-alpha(0.3);
+            }
+            // Sync points.
+            if it.sync-lo >= 0: Rectangle {
+                x: parent.track-x + parent.track-w * it.sync-lo - 1px;
+                y: (parent.height - self.height) / 2;
+                width: 2px;
+                height: parent.dot * 0.8;
+                background: Theme.primary.with-alpha(0.6);
+            }
+            if it.sync-hi >= 0: Rectangle {
+                x: parent.track-x + parent.track-w * it.sync-hi - 1px;
+                y: (parent.height - self.height) / 2;
+                width: 2px;
+                height: parent.dot * 0.8;
+                background: Theme.primary.with-alpha(0.6);
+            }
+            // From neutral to the fork.
+            if it.frac >= 0: Rectangle {
+                x: parent.track-x + parent.track-w * min(it.frac, it.zero);
+                y: (parent.height - self.height) / 2;
+                width: parent.track-w * abs(it.frac - it.zero);
+                height: 4px;
+                border-radius: 2px;
+                background: it.side != 0 ? Theme.primary : Theme.text.with-alpha(0.45);
+            }
+            if it.frac >= 0: Rectangle {
+                x: parent.track-x + parent.track-w * it.frac - self.width / 2;
+                y: (parent.height - self.height) / 2;
+                width: parent.dot;
+                height: parent.dot;
+                border-radius: self.width / 2;
+                background: w.stale ? Theme.text-disabled : (it.side != 0 ? Theme.primary : Theme.text);
+            }
         }
     }
 
@@ -982,11 +1085,13 @@ component WidgetView inherits Rectangle {
 
 component PanelView inherits Rectangle {
     in property <int> focus-index;
+    // Full screen: the header's hidden, the name and log hint go in the footer.
+    in property <bool> bare;
     property <bool> edit: CarpiState.panel-edit;
     property <length> gap: root.edit ? 8px : 0;
     property <int> cols: max(1, CarpiState.panel-cols);
     property <int> rows: max(1, CarpiState.panel-rows);
-    property <length> foot: CarpiState.panel-dots > 1 ? 22px : 0;
+    property <length> foot: CarpiState.panel-dots > 1 || root.bare ? 22px : 0;
     property <length> cw: (root.width - (root.cols - 1) * root.gap) / root.cols;
     property <length> ch: (root.height - root.foot - (root.rows - 1) * root.gap) / root.rows;
 
@@ -1017,15 +1122,15 @@ component PanelView inherits Rectangle {
         // Hairlines between widgets while viewing.
         if !root.edit && w.col > 0: Rectangle {
             x: 0;
-            y: 10px;
+            y: w.row == 0 ? 8px : 0;
             width: 1px;
-            height: parent.height - 20px;
+            height: parent.height - (w.row == 0 ? 8px : 0) - (w.row + w.h >= root.rows ? 8px : 0);
             background: P.hair;
         }
         if !root.edit && w.row > 0: Rectangle {
-            x: 10px;
+            x: w.col == 0 ? 8px : 0;
             y: 0;
-            width: parent.width - 20px;
+            width: parent.width - (w.col == 0 ? 8px : 0) - (w.col + w.w >= root.cols ? 8px : 0);
             height: 1px;
             background: P.hair;
         }
@@ -1046,6 +1151,26 @@ component PanelView inherits Rectangle {
     }
     if CarpiState.panel-hint != "" && !root.edit: TouchArea {
         clicked => { CarpiState.panel(0); }
+    }
+    if root.foot > 0 && root.bare: Text {
+        x: 4px;
+        y: root.height - 18px;
+        height: 18px;
+        vertical-alignment: center;
+        text: CarpiState.title;
+        color: Theme.text-disabled;
+        font-size: 13px;
+        font-weight: 500;
+    }
+    if root.bare && CarpiState.hint != "": Text {
+        x: root.width - self.width - 4px;
+        y: root.height - 18px;
+        height: 18px;
+        vertical-alignment: center;
+        text: CarpiState.hint;
+        color: P.red;
+        font-size: 13px;
+        font-weight: 500;
     }
     if root.foot > 0: Rectangle {
         y: root.height - 16px;
@@ -1075,6 +1200,9 @@ export component CarpiView inherits Rectangle {
 
     property <int> focus-index: Focus.zone == FocusZone.main ? Focus.main-index : -1;
     property <bool> has-grid: CarpiState.cells.length > 0;
+    // A panel being viewed fills the screen; the header comes back with focus on the tabs.
+    property <bool> bare: CarpiState.layout == CarpiLayout.panel && !CarpiState.panel-edit
+        && root.focus-index >= CarpiState.pills.length;
 
     // Keeps the focused row in the middle third.
     changed focus-index => {
@@ -1099,13 +1227,13 @@ export component CarpiView inherits Rectangle {
     VerticalLayout {
         padding-left: M.pad-x;
         padding-right: M.pad-x;
-        padding-top: 8px;
-        padding-bottom: 12px;
+        padding-top: root.bare ? 6px : 8px;
+        padding-bottom: root.bare ? 4px : 12px;
         spacing: 8px;
 
-        Header { }
+        if !root.bare: Header { }
 
-        if CarpiState.note != "": Text {
+        if CarpiState.note != "" && !root.bare: Text {
             text: CarpiState.note;
             color: Theme.text-secondary;
             font-size: M.small;
@@ -1169,6 +1297,7 @@ export component CarpiView inherits Rectangle {
                 width: parent.width;
                 height: parent.height;
                 focus-index: root.focus-index;
+                bare: root.bare;
             }
         }
     }

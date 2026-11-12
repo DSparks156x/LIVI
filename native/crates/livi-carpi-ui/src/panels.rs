@@ -4,7 +4,7 @@
 //! Data panels (docs/PAGES.md 5c): pages of widgets on a small grid, and how each widget draws.
 //!
 //! A panel is a grid (1×1 up to 4×4) and widgets that cover one or more of its cells. A widget
-//! is a style (number, gauge, bar, graph, pair, set, selector), its values and a few options;
+//! is a style (number, gauge, bar, graph, pair, set, forks), its values and a few options;
 //! anything left unset comes from [`scale`], the catalog's range and limits for the value.
 //! Drawing is plain data ([`PanelDraw`]): Slint only places it. Gauge ticks and graph lines are
 //! SVG path commands in a 1000×1000 box.
@@ -21,6 +21,17 @@ use crate::values::{self, Freshness, NONE};
 
 /// How much history a graph keeps.
 pub const HISTORY: Duration = Duration::from_secs(62);
+/// DSG (02E) fork positions, 02 group 15: 1-3, 2-4, 5-N, 6-R. A Forks widget's default values.
+pub const FORKS: [&str; 4] = ["diag.02.15.1", "diag.02.15.2", "diag.02.15.3", "diag.02.15.4"];
+/// Each fork's gears and where 02 groups 17/18 keep their learned sync points.
+const FORK_GEARS: [[(&str, u8, u8); 2]; 4] = [
+    [("1", 18, 1), ("3", 17, 1)],
+    [("2", 17, 2), ("4", 18, 2)],
+    [("5", 18, 3), ("N", 17, 3)],
+    [("6", 18, 4), ("R", 17, 4)],
+];
+/// The groups a Forks widget reads once for its sync points: (VCDS address, group).
+pub const FORK_SYNC: [(u8, u8); 2] = [(0x02, 17), (0x02, 18)];
 /// The atmosphere when nothing says otherwise.
 const ATM_MBAR: f64 = 1013.25;
 
@@ -101,7 +112,9 @@ pub enum Style {
     Graph,
     Pair,
     Set,
-    Selector,
+    /// DSG selector forks: four rails, gear at each end.
+    #[serde(alias = "selector")]
+    Forks,
 }
 
 impl Style {
@@ -112,7 +125,7 @@ impl Style {
         Style::Graph,
         Style::Pair,
         Style::Set,
-        Style::Selector,
+        Style::Forks,
     ];
 
     pub fn label(self) -> &'static str {
@@ -123,7 +136,7 @@ impl Style {
             Style::Graph => "Graph",
             Style::Pair => "Pair",
             Style::Set => "Set",
-            Style::Selector => "Selector",
+            Style::Forks => "Forks",
         }
     }
 
@@ -133,6 +146,7 @@ impl Style {
             Style::Graph => (1, 3),
             Style::Pair => (2, 2),
             Style::Set => (1, 4),
+            Style::Forks => (4, 4),
             _ => (1, 1),
         }
     }
@@ -262,6 +276,9 @@ impl Widget {
         }
         if style != Style::Pair {
             o.diff_pct = false;
+        }
+        if style == Style::Forks && self.style != Style::Forks {
+            self.values = FORKS.iter().map(|n| (*n).to_string()).collect();
         }
         let (_, most) = style.takes();
         self.values.truncate(most);
@@ -700,17 +717,25 @@ pub struct Line {
     pub label: String,
 }
 
-/// One part of a set or selector.
+/// One part of a set, pair or forks.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Item {
     pub label: String,
     pub value: String,
     /// 0..1, or below 0 for none.
     pub frac: f32,
-    /// Lit: the current selector position, an open door.
+    /// Lit: an open door, an engaged fork.
     pub on: bool,
     /// 0 normal, 1 warn, 2 limit.
     pub state: i32,
+    /// Forks: the gears at each end, their sync points (0..1, below 0 unknown), neutral, and
+    /// which end is engaged (-1, 0, 1).
+    pub lo: String,
+    pub hi: String,
+    pub sync_lo: f32,
+    pub sync_hi: f32,
+    pub zero: f32,
+    pub side: i32,
 }
 
 /// A labelled tick of a gauge: where (0..1 of the box), and the number.
@@ -950,10 +975,15 @@ fn gauge(d: &mut WidgetDraw, x: Option<f64>, s: &Scale, peak: Option<f64>, dp: u
     const R: f64 = 400.0;
     let red_from = s.limit.or(s.warn).map(|r| frac(r, s) as f64);
     let at = x.map(|x| frac(x, s) as f64);
+    // Lit from zero where the scale spans it (boost: vacuum lights down, boost up).
+    let from = if s.min < 0.0 && s.max > 0.0 { frac(0.0, s) as f64 } else { 0.0 };
     for i in 0..=TICKS {
         let f = i as f64 / TICKS as f64;
         let red = red_from.is_some_and(|r| f >= r - 1e-9);
-        let lit = at.is_some_and(|a| f <= a + 1e-9);
+        let lit = at.is_some_and(|a| {
+            let (lo, hi) = if a < from { (a, from) } else { (from, a) };
+            f >= lo - 1e-9 && f <= hi + 1e-9
+        });
         let path = match (red, lit) {
             (true, true) => &mut d.red_on,
             (true, false) => &mut d.red_off,
@@ -1173,6 +1203,22 @@ pub fn draw(w: &Widget, snap: &Snapshot, mem: &Memory, now: Instant) -> WidgetDr
                     label: format!("{} {}", rn.label, rn.text),
                 });
             }
+            // Grid lines on round values, three or four of them.
+            let step = nice((s.max - s.min) / 4.0);
+            let ldp = if step < 0.1 { 2 } else if step < 1.0 { 1 } else { 0 };
+            let mut v = (s.min / step).ceil() * step;
+            while v <= s.max + 1e-9 && d.labels.len() < 6 {
+                let y = 1.0 - frac(v, &s);
+                if y > 0.04 && y < 0.96 {
+                    d.labels.push(Tick {
+                        x: 0.0,
+                        y,
+                        label: values::number(if v.abs() < step * 1e-6 { 0.0 } else { v }, ldp),
+                    });
+                }
+                v += step;
+            }
+            d.sub = format!("{} s", window.as_secs());
             let span = window.as_secs_f64();
             for (n, t) in &mem.marks {
                 let age = now.saturating_duration_since(*t).as_secs_f64();
@@ -1188,14 +1234,30 @@ pub fn draw(w: &Widget, snap: &Snapshot, mem: &Memory, now: Instant) -> WidgetDr
         Style::Pair => {
             if let Some(second) = w.values.get(1) {
                 let r2 = read(w, second, snap, now, atm);
+                // "Boost actual" / "Boost specified": caption "Boost", items "actual", "specified".
+                let common = shared(&[r.label.clone(), r2.label.clone()]);
+                let rest = |l: &str| {
+                    let t = l.strip_prefix(common.as_str()).unwrap_or(l).trim();
+                    if t.is_empty() || t == l { l.to_string() } else { t.to_string() }
+                };
+                if w.opts.label.is_none() && common != r.label {
+                    d.label = common.clone();
+                }
+                for (rd, l) in [(&r, rest(&r.label)), (&r2, rest(&r2.label))] {
+                    d.items.push(Item {
+                        label: l,
+                        value: rd.text.clone(),
+                        frac: -1.0,
+                        ..Item::default()
+                    });
+                }
                 d.label2 = r2.label.clone();
                 d.value2 = r2.text.clone();
                 if let (Some(a), Some(b)) = (r.x, r2.x) {
                     d.sub = if w.opts.diff_pct && b != 0.0 {
                         format!("{:+.0} %", (a - b) / b.abs() * 100.0)
                     } else {
-                        format!("{:+} {}", values::number(a - b, r.dp), r.unit)
-                            .replace("+-", "−")
+                        format!("{:+}", values::number(a - b, r.dp)).replace("+-", "−")
                     };
                 }
             }
@@ -1219,32 +1281,92 @@ pub fn draw(w: &Widget, snap: &Snapshot, mem: &Memory, now: Instant) -> WidgetDr
                     frac: rn.x.map_or(-1.0, |x| frac(x, &sn)),
                     on,
                     state: state_of(rn.x, &sn),
-                });
-            }
-        }
-        Style::Selector => {
-            let code = raw(snap, first, now);
-            let now_at = code.map(defs::selector).unwrap_or_default();
-            for p in ["P", "R", "N", "D", "S"] {
-                d.items.push(Item {
-                    label: p.into(),
-                    on: now_at == p,
-                    frac: -1.0,
                     ..Item::default()
                 });
             }
-            // Tiptronic gears and the rest show as the big value.
-            d.value = now_at.clone();
-            d.unit.clear();
-            let shifting = matches!(
-                snap.values.get("trans.shifting").and_then(|s| s.value.as_ref()),
-                Some(Value::Bool(true))
-            );
-            d.sub = if shifting { "SHIFTING".into() } else { String::new() };
-            d.sub_hi = shifting;
         }
+        Style::Forks => forks(&mut d, w, snap, mem, now),
     }
     d
+}
+
+/// A learned sync point: polled if something polls it, else the last read of its group.
+fn sync_point(snap: &Snapshot, now: Instant, group: u8, field: u8) -> Option<f64> {
+    raw(snap, &defs::module_group_name(0x02, group, field), now).or_else(|| {
+        let m = snap.diag.modules().into_iter().find(|m| m.module.address == 0x02)?;
+        snap.diag.groups.get(&(m.module.tp2, group))?.get(usize::from(field) - 1)?.value
+    })
+}
+
+/// Forks: each fork a rail from one gear to the other, neutral between, the learned sync points
+/// marked; past a sync point the gear is engaged. The big value is what's engaged ("3 · 4").
+fn forks(d: &mut WidgetDraw, w: &Widget, snap: &Snapshot, mem: &Memory, now: Instant) {
+    if w.opts.label.is_none() {
+        d.label = "Forks".into();
+    }
+    d.unit.clear();
+    let mut engaged = Vec::new();
+    let mut stale = true;
+    for (i, [a, b]) in FORK_GEARS.iter().enumerate() {
+        let name = w.values.get(i).cloned().unwrap_or_else(|| FORKS[i].to_string());
+        let x = raw(snap, &name, now);
+        stale &= values::show(&name, snap.values.get(&name), now).freshness.dim();
+        let (sa, sb) = (sync_point(snap, now, a.1, a.2), sync_point(snap, now, b.1, b.2));
+        // The gear with the lower sync point goes left; unknown, as named.
+        let (lo, hi, s_lo, s_hi) = match (sa, sb) {
+            (Some(p), Some(q)) if p > q => (b.0, a.0, Some(q), Some(p)),
+            _ => (a.0, b.0, sa, sb),
+        };
+        let zero = match (s_lo, s_hi) {
+            (Some(p), Some(q)) => (p + q) / 2.0,
+            _ => 0.0,
+        };
+        // Wide enough for the sync points, and everything seen.
+        let mut r: f64 = 4.0;
+        for v in [s_lo, s_hi].into_iter().flatten() {
+            r = r.max((v - zero).abs() * 1.5);
+        }
+        for v in [x, mem.lows.get(&name).copied(), mem.peaks.get(&name).map(|p| p.0)]
+            .into_iter()
+            .flatten()
+        {
+            r = r.max((v - zero).abs() * 1.08);
+        }
+        let sc = Scale {
+            min: zero - r,
+            max: zero + r,
+            warn: None,
+            limit: None,
+            major: r,
+        };
+        let side = match x {
+            Some(x) if x <= s_lo.unwrap_or(zero - r * 0.6) => -1,
+            Some(x) if x >= s_hi.unwrap_or(zero + r * 0.6) => 1,
+            _ => 0,
+        };
+        match side {
+            -1 => engaged.push(lo),
+            1 => engaged.push(hi),
+            _ => {}
+        }
+        d.items.push(Item {
+            label: format!("{}-{}", a.0, b.0),
+            value: x.map_or(NONE.to_string(), |x| values::number(x, 1)),
+            frac: x.map_or(-1.0, |x| frac(x, &sc)),
+            on: side != 0,
+            state: 0,
+            lo: lo.into(),
+            hi: hi.into(),
+            sync_lo: s_lo.map_or(-1.0, |p| frac(p, &sc)),
+            sync_hi: s_hi.map_or(-1.0, |p| frac(p, &sc)),
+            zero: frac(zero, &sc),
+            side,
+        });
+    }
+    d.stale = stale;
+    engaged.retain(|g| *g != "N");
+    engaged.sort_by_key(|g| g.parse::<u8>().unwrap_or(9));
+    d.value = if engaged.is_empty() { "N".into() } else { engaged.join(" · ") };
 }
 
 /// The words a set's labels start with: "Retard cyl 1".."4" share "Retard cyl" -> "Retard".
@@ -1601,12 +1723,29 @@ mod tests {
     }
 
     #[test]
-    fn selectors_light_the_position() {
-        let s = snap(&[("trans.selector", 5.0)]);
-        let w = Widget::new(0, 0, Style::Selector, &["trans.selector"]);
+    fn forks_light_past_the_sync_point() {
+        let s = snap(&[
+            ("diag.02.15.1", 7.9),
+            ("diag.02.15.2", -8.1),
+            ("diag.02.15.3", 0.1),
+            ("diag.02.15.4", 0.0),
+            ("diag.02.17.1", 4.0),
+            ("diag.02.18.1", -4.2),
+            ("diag.02.17.2", -4.1),
+            ("diag.02.18.2", 4.3),
+        ]);
+        let mut w = Widget::new(0, 0, Style::Number, &["engine.rpm"]);
+        w.restyle(Style::Forks);
+        assert_eq!(w.values, FORKS);
         let d = draw(&w, &s, &Memory::default(), Instant::now());
-        let lit: Vec<&str> = d.items.iter().filter(|i| i.on).map(|i| i.label.as_str()).collect();
-        assert_eq!(lit, ["D"]);
-        assert_eq!(d.value, "D");
+        // 1-3: 1st's sync point is lower, so 1 is left; 7.9 is past 3rd's.
+        assert_eq!((d.items[0].lo.as_str(), d.items[0].hi.as_str()), ("1", "3"));
+        assert_eq!(d.items[0].side, 1);
+        assert_eq!(d.items[1].side, -1);
+        assert_eq!(d.items[1].lo, "2");
+        assert_eq!(d.items[2].side, 0);
+        assert_eq!(d.value, "2 · 3");
+        assert!(d.items[0].sync_hi > 0.5 && d.items[0].sync_lo < 0.5);
     }
+
 }

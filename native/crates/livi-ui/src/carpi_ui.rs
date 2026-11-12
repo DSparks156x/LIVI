@@ -217,6 +217,12 @@ pub fn wire(ui: &AppWindow) {
         }
     });
     let weak = ui.as_weak();
+    st.on_panel_flip(move |d| {
+        if let Some(ui) = weak.upgrade() {
+            act(&ui, |o, id, _view, from| o.pages.flip(id, d, from, &o.client));
+        }
+    });
+    let weak = ui.as_weak();
     ui.global::<SettingsState>().on_color_hex_edit(move || {
         if let Some(ui) = weak.upgrade() {
             start_editing(&ui)

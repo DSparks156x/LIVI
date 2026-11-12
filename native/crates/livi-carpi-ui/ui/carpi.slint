@@ -173,6 +173,8 @@ export global CarpiState {
     callback row(int);
     callback cell(int);
     callback panel(int);
+    // Touch: flip the viewed panel by this many (a swipe, a tapped page dot).
+    callback panel-flip(int);
 }
 
 // 0 info, 1 warn, 2 error.
@@ -1087,6 +1089,8 @@ component PanelView inherits Rectangle {
     in property <int> focus-index;
     // Full screen: the header's hidden, the name and log hint go in the footer.
     in property <bool> bare;
+    // The panel fills the page (not beside rows): swipes flip it.
+    in property <bool> swipe;
     property <bool> edit: CarpiState.panel-edit;
     property <length> gap: root.edit ? 8px : 0;
     property <int> cols: max(1, CarpiState.panel-cols);
@@ -1095,101 +1099,125 @@ component PanelView inherits Rectangle {
     property <length> cw: (root.width - (root.cols - 1) * root.gap) / root.cols;
     property <length> ch: (root.height - root.foot - (root.rows - 1) * root.gap) / root.rows;
 
-    for e[i] in CarpiState.panel-empties: Rectangle {
-        x: e.col * (root.cw + root.gap);
-        y: e.row * (root.ch + root.gap);
-        width: root.cw;
-        height: root.ch;
-        border-radius: 10px;
-        border-width: root.focus-index == e.focus-at ? 3px : 1.5px;
-        border-color: root.focus-index == e.focus-at ? Theme.primary : Theme.divider;
-        Text {
-            text: "+";
-            color: root.focus-index == e.focus-at ? Theme.primary : Theme.text-disabled;
-            font-size: 34px;
-            horizontal-alignment: center;
-            vertical-alignment: center;
-        }
-        TouchArea {
-            clicked => { CarpiState.panel(CarpiState.panel-widgets.length + i); }
-        }
-    }
-    for w[i] in CarpiState.panel-widgets: Rectangle {
-        x: w.col * (root.cw + root.gap);
-        y: w.row * (root.ch + root.gap);
-        width: w.w * root.cw + (w.w - 1) * root.gap;
-        height: w.h * root.ch + (w.h - 1) * root.gap;
-        // Hairlines between widgets while viewing.
-        if !root.edit && w.col > 0: Rectangle {
-            x: 0;
-            y: w.row == 0 ? 8px : 0;
-            width: 1px;
-            height: parent.height - (w.row == 0 ? 8px : 0) - (w.row + w.h >= root.rows ? 8px : 0);
-            background: P.hair;
-        }
-        if !root.edit && w.row > 0: Rectangle {
-            x: w.col == 0 ? 8px : 0;
-            y: 0;
-            width: parent.width - (w.col == 0 ? 8px : 0) - (w.col + w.w >= root.cols ? 8px : 0);
-            height: 1px;
-            background: P.hair;
-        }
-        WidgetView {
-            w: w;
-            edit: root.edit;
-            focused: w.focus-at >= 0 && root.focus-index == w.focus-at;
-            pushed => { CarpiState.panel(root.edit ? i : 0); }
-        }
-    }
-    if CarpiState.panel-hint != "": Text {
-        y: (root.height - root.foot - self.height) / 2;
+    // Swipe left or right flips panels while viewing; taps go through to the widgets.
+    SwipeGestureHandler {
         width: root.width;
-        horizontal-alignment: center;
-        text: CarpiState.panel-hint;
-        color: Theme.text-disabled;
-        font-size: 22px;
-    }
-    if CarpiState.panel-hint != "" && !root.edit: TouchArea {
-        clicked => { CarpiState.panel(0); }
-    }
-    if root.foot > 0 && root.bare: Text {
-        x: 4px;
-        y: root.height - 18px;
-        height: 18px;
-        vertical-alignment: center;
-        text: CarpiState.title;
-        color: Theme.text-disabled;
-        font-size: 13px;
-        font-weight: 500;
-    }
-    if root.bare && CarpiState.hint != "": Text {
-        x: root.width - self.width - 4px;
-        y: root.height - 18px;
-        height: 18px;
-        vertical-alignment: center;
-        text: CarpiState.hint;
-        color: P.red;
-        font-size: 13px;
-        font-weight: 500;
-    }
-    if root.foot > 0: Rectangle {
-        y: root.height - 16px;
-        x: (root.width - self.width) / 2;
-        height: 16px;
-        width: CarpiState.panel-dots * 15px + 14px;
-        border-radius: 8px;
-        background: Theme.text.with-alpha(0.08);
-        HorizontalLayout {
-            padding-left: 7px;
-            padding-right: 7px;
-            spacing: 7px;
-            alignment: center;
-            for d in CarpiState.panel-dots: Rectangle {
-                y: (parent.height - self.height) / 2;
-                width: 8px;
-                height: 8px;
-                border-radius: 4px;
-                background: d == CarpiState.panel-at ? Theme.primary : Theme.text.with-alpha(0.35);
+        height: root.height;
+        enabled: root.swipe && !root.edit;
+        handle-swipe-left: true;
+        handle-swipe-right: true;
+        swiped => {
+            if (self.current-position.x < self.pressed-position.x) {
+                CarpiState.panel-flip(1);
+            } else {
+                CarpiState.panel-flip(-1);
+            }
+        }
+
+        for e[i] in CarpiState.panel-empties: Rectangle {
+            x: e.col * (root.cw + root.gap);
+            y: e.row * (root.ch + root.gap);
+            width: root.cw;
+            height: root.ch;
+            border-radius: 10px;
+            border-width: root.focus-index == e.focus-at ? 3px : 1.5px;
+            border-color: root.focus-index == e.focus-at ? Theme.primary : Theme.divider;
+            Text {
+                text: "+";
+                color: root.focus-index == e.focus-at ? Theme.primary : Theme.text-disabled;
+                font-size: 34px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            TouchArea {
+                clicked => { CarpiState.panel(CarpiState.panel-widgets.length + i); }
+            }
+        }
+        for w[i] in CarpiState.panel-widgets: Rectangle {
+            x: w.col * (root.cw + root.gap);
+            y: w.row * (root.ch + root.gap);
+            width: w.w * root.cw + (w.w - 1) * root.gap;
+            height: w.h * root.ch + (w.h - 1) * root.gap;
+            // Hairlines between widgets while viewing.
+            if !root.edit && w.col > 0: Rectangle {
+                x: 0;
+                y: w.row == 0 ? 8px : 0;
+                width: 1px;
+                height: parent.height - (w.row == 0 ? 8px : 0) - (w.row + w.h >= root.rows ? 8px : 0);
+                background: P.hair;
+            }
+            if !root.edit && w.row > 0: Rectangle {
+                x: w.col == 0 ? 8px : 0;
+                y: 0;
+                width: parent.width - (w.col == 0 ? 8px : 0) - (w.col + w.w >= root.cols ? 8px : 0);
+                height: 1px;
+                background: P.hair;
+            }
+            WidgetView {
+                w: w;
+                edit: root.edit;
+                focused: w.focus-at >= 0 && root.focus-index == w.focus-at;
+                pushed => { CarpiState.panel(root.edit ? i : 0); }
+            }
+        }
+        if CarpiState.panel-hint != "": Text {
+            y: (root.height - root.foot - self.height) / 2;
+            width: root.width;
+            horizontal-alignment: center;
+            text: CarpiState.panel-hint;
+            color: Theme.text-disabled;
+            font-size: 22px;
+        }
+        if CarpiState.panel-hint != "" && !root.edit: TouchArea {
+            clicked => { CarpiState.panel(0); }
+        }
+        if root.foot > 0 && root.bare: Text {
+            x: 4px;
+            y: root.height - 18px;
+            height: 18px;
+            vertical-alignment: center;
+            text: CarpiState.title;
+            color: Theme.text-disabled;
+            font-size: 13px;
+            font-weight: 500;
+        }
+        if root.bare && CarpiState.hint != "": Text {
+            x: root.width - self.width - 4px;
+            y: root.height - 18px;
+            height: 18px;
+            vertical-alignment: center;
+            text: CarpiState.hint;
+            color: P.red;
+            font-size: 13px;
+            font-weight: 500;
+        }
+        if root.foot > 0: Rectangle {
+            y: root.height - 16px;
+            x: (root.width - self.width) / 2;
+            height: 16px;
+            width: CarpiState.panel-dots * 15px + 14px;
+            border-radius: 8px;
+            background: Theme.text.with-alpha(0.08);
+            HorizontalLayout {
+                padding-left: 7px;
+                padding-right: 7px;
+                spacing: 7px;
+                alignment: center;
+                for d in CarpiState.panel-dots: Rectangle {
+                    y: (parent.height - self.height) / 2;
+                    width: 8px;
+                    height: 8px;
+                    border-radius: 4px;
+                    background: d == CarpiState.panel-at ? Theme.primary : Theme.text.with-alpha(0.35);
+                    // A finger-sized target round the dot.
+                    TouchArea {
+                        x: -12px;
+                        y: -16px;
+                        width: 32px;
+                        height: 40px;
+                        clicked => { CarpiState.panel-flip(d - CarpiState.panel-at); }
+                    }
+                }
             }
         }
     }
@@ -1298,6 +1326,7 @@ export component CarpiView inherits Rectangle {
                 height: parent.height;
                 focus-index: root.focus-index;
                 bare: root.bare;
+                swipe: true;
             }
         }
     }

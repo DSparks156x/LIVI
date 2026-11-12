@@ -369,6 +369,23 @@ impl Pages {
         self.panels.shown = i.min(self.panels.panels.len() - 1);
     }
 
+    /// Touch: a swipe or a tapped page dot flips the panel being viewed by `d`, as the knob does.
+    pub fn flip(&mut self, page: PageId, d: i32, focus: i32, client: &Client) -> Moved {
+        if page != PageId::Data
+            || self.tab != DataTab::Panels
+            || self.panel != crate::panels::PanelScreen::View
+            || d == 0
+        {
+            return Moved::Stay;
+        }
+        self.run(
+            page,
+            Act::Panel(crate::panels::PanelAct::Step(d)),
+            focus,
+            client,
+        )
+    }
+
     /// A log mark, for graphs.
     pub fn mark(&mut self, n: u32, at: Instant) {
         self.mem.get_mut().marks.push((n, at));
@@ -1385,6 +1402,24 @@ mod tests {
         assert_eq!(p.panels().panel().name, "Daily");
         assert_eq!(p.panels().panel().widgets.len(), 1);
         assert!(p.panels().panels.last().unwrap().widgets.is_empty());
+    }
+
+    #[test]
+    fn touch_flips_panels_only_while_viewing() {
+        let client = Client::offline("test");
+        let mut p = Pages::new(Saved::default(), None);
+        let n = p.panels().panels.len();
+        assert!(n > 1);
+        assert_eq!(p.panels().shown, 0);
+        p.flip(PageId::Data, 1, 0, &client);
+        assert_eq!(p.panels().shown, 1);
+        p.flip(PageId::Data, 10, 0, &client);
+        assert_eq!(p.panels().shown, n - 1);
+        p.flip(PageId::Car, -1, 0, &client);
+        assert_eq!(p.panels().shown, n - 1);
+        p.panel = crate::panels::PanelScreen::Menu;
+        p.flip(PageId::Data, -1, 0, &client);
+        assert_eq!(p.panels().shown, n - 1);
     }
 
     #[test]

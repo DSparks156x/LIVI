@@ -250,6 +250,7 @@ fn main() {
     shots.save("01-panel-daily");
     shots.show(&v, v.start, false);
     shots.save("02-panel-daily-day");
+    touch_check(&shots);
     pages.set_shown(1);
     let v = view(&pages);
     shots.show(&v, v.start, true);
@@ -558,4 +559,60 @@ fn datalog() -> carpi_proto::DatalogStatus {
             marks: 0,
         }),
     }
+}
+
+/// A swipe and a tapped page dot reach `panel-flip`, as a finger would send them.
+fn touch_check(shots: &Shots) {
+    use slint::platform::{PointerEventButton, WindowEvent};
+    use slint::LogicalPosition;
+    let got = Rc::new(StdCell::new(Vec::<i32>::new()));
+    let g = got.clone();
+    shots.ui.global::<CarpiState>().on_panel_flip(move |d| {
+        let mut v = g.take();
+        v.push(d);
+        g.set(v);
+    });
+    let w = shots.window.clone();
+    let ev = |e: WindowEvent| w.dispatch_event(e);
+    let step = || {
+        NOW.set(NOW.get() + Duration::from_millis(16));
+        slint::platform::update_timers_and_animations();
+    };
+    // Swipe left across the panel: the next one.
+    let at = |x: f32| LogicalPosition::new(x, 240.0);
+    ev(WindowEvent::PointerPressed { position: at(600.0), button: PointerEventButton::Left });
+    for i in 1..=12 {
+        step();
+        ev(WindowEvent::PointerMoved { position: at(600.0 - 30.0 * i as f32) });
+    }
+    ev(WindowEvent::PointerReleased { position: at(240.0), button: PointerEventButton::Left });
+    step();
+    // Swipe right: the one before.
+    ev(WindowEvent::PointerPressed { position: at(200.0), button: PointerEventButton::Left });
+    for i in 1..=12 {
+        step();
+        ev(WindowEvent::PointerMoved { position: at(200.0 + 30.0 * i as f32) });
+    }
+    ev(WindowEvent::PointerReleased { position: at(560.0), button: PointerEventButton::Left });
+    step();
+    // A tap on a widget is not a swipe.
+    ev(WindowEvent::PointerPressed { position: at(300.0), button: PointerEventButton::Left });
+    step();
+    ev(WindowEvent::PointerReleased { position: at(300.0), button: PointerEventButton::Left });
+    step();
+    let swipes = got.take();
+    assert_eq!(swipes, vec![1, -1], "swipes");
+    // The third page dot: dots sit centred at the bottom, 15 px apart.
+    let st = shots.ui.global::<CarpiState>();
+    let n = st.get_panel_dots() as f32;
+    let width = n * 15.0 + 14.0;
+    let left = 56.0 + 16.0 + (744.0 - 32.0 - width) / 2.0;
+    let dot = LogicalPosition::new(left + 7.0 + 2.0 * 15.0 + 4.0, 480.0 - 4.0 - 8.0);
+    ev(WindowEvent::PointerPressed { position: dot, button: PointerEventButton::Left });
+    step();
+    ev(WindowEvent::PointerReleased { position: dot, button: PointerEventButton::Left });
+    step();
+    let taps = got.take();
+    assert_eq!(taps, vec![2 - st.get_panel_at()], "dot tap");
+    println!("touch: swipes {swipes:?}, dot {taps:?}");
 }

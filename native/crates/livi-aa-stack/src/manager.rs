@@ -215,6 +215,8 @@ struct Manager<M: AaMedia> {
     attached: bool,
     cluster_stream_active: bool,
     night_mode: Option<bool>,
+    /// The night mode last sent, from the config or the car: a new session gets it at once.
+    night: Option<bool>,
 }
 
 pub fn start<M: AaMedia>(
@@ -260,6 +262,7 @@ async fn run<M: AaMedia>(
         attached: true,
         cluster_stream_active: true,
         night_mode,
+        night: night_mode,
     };
     let mut feed = Some(m.helper.subscribe(HELPER_RESUBSCRIBE));
     println!("[AaManager] Android Auto sessions come from the helper");
@@ -375,6 +378,9 @@ impl<M: AaMedia> Manager<M> {
         let id = self.next_id;
         self.next_id += 1;
         let (cmds, cmd_rx) = mpsc::unbounded_channel();
+        if let Some(night) = self.night {
+            let _ = cmds.send(SessionCmd::Sensor(Sensor::NightMode(night)));
+        }
         self.sessions.insert(
             id,
             Entry {
@@ -441,6 +447,7 @@ impl<M: AaMedia> Manager<M> {
         self.night_mode = night;
         detail!("[AaManager] nightMode={night:?}");
         if let Some(night) = night {
+            self.night = Some(night);
             self.each(SessionCmd::Sensor(Sensor::NightMode(night)));
         }
     }
@@ -459,7 +466,12 @@ impl<M: AaMedia> Manager<M> {
                     let _ = entry.cmds.send(cmd);
                 }
             }
-            AaCmd::Sensor(s) => self.each(SessionCmd::Sensor(s)),
+            AaCmd::Sensor(s) => {
+                if let Sensor::NightMode(night) = s {
+                    self.night = Some(night);
+                }
+                self.each(SessionCmd::Sensor(s));
+            }
             AaCmd::ClusterActive(active) => {
                 self.cluster_stream_active = active;
                 self.each(SessionCmd::ClusterActive(active));

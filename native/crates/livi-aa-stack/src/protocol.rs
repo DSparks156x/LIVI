@@ -253,6 +253,9 @@ pub struct Session {
     cluster_focus_pending: bool,
     cluster_stream_wanted: bool,
     shutdowns_waiting: u32,
+    /// The last night mode handed in, before the session runs too: the phone asks for the
+    /// night sensor while the channels open, and this answers it ahead of the config's.
+    night: Option<bool>,
 }
 
 impl Session {
@@ -293,6 +296,7 @@ impl Session {
             cluster_focus_pending: false,
             cluster_stream_wanted: true,
             shutdowns_waiting: 0,
+            night: None,
         };
         (session, vec![Out::After(WATCHDOG, Timer::Watchdog)])
     }
@@ -1020,7 +1024,7 @@ impl Session {
                 [0x6a, 0x02, 0x08, 0x00],
             );
         } else if sensor_type == 10 {
-            let night = self.config.borrow().initial_night_mode == Some(true);
+            let night = self.night.or(self.config.borrow().initial_night_mode) == Some(true);
             self.send_to(
                 out,
                 ch::SENSOR,
@@ -1148,6 +1152,9 @@ impl Session {
 
     pub fn send_sensor(&mut self, sensor: &Sensor) -> Vec<Out> {
         let mut out = Vec::new();
+        if let Sensor::NightMode(night) = sensor {
+            self.night = Some(*night);
+        }
         if self.state != State::Running {
             return out;
         }
@@ -1557,6 +1564,17 @@ pub(crate) mod tests {
         );
         tx.send_modify(|c| c.video_width = Some(1920));
         assert_eq!(s.geometry().tier_width, 1280);
+    }
+
+    #[test]
+    fn the_night_sensor_answers_with_the_cars_night_before_the_session_runs() {
+        // Appearance auto (no config night), the car already says night: the phone's
+        // night sensor request during setup gets night, not day.
+        let (mut s, _tx) = session(AaConfig::default());
+        s.on_link_control(&serde_json::json!({ "type": "ready" }));
+        assert!(s.send_sensor(&Sensor::NightMode(true)).is_empty());
+        let out = s.on_message(ch::SENSOR, sensor_msg::REQUEST, &[0x08, 0x0a]);
+        assert_eq!(frames(&out)[1].payload, [0x52, 0x02, 0x08, 0x01]);
     }
 
     #[test]

@@ -1328,6 +1328,9 @@ mod tests {
         p.press(PageId::Data, &v, &Hit::Row(find(&v, "Engine")), 0, &client);
         assert_eq!(p.depth(PageId::Data), 3);
         let v = p.view(PageId::Data, &s, now);
+        p.press(PageId::Data, &v, &Hit::Row(find(&v, "Basics")), 0, &client);
+        assert_eq!(p.depth(PageId::Data), 4);
+        let v = p.view(PageId::Data, &s, now);
         let at = v
             .rows
             .iter()
@@ -1384,6 +1387,8 @@ mod tests {
         let v = p.view(PageId::Data, &s, now);
         assert_eq!(v.title, "Add value");
         p.press(PageId::Data, &v, &Hit::Row(find(&v, "Engine")), 0, &client);
+        let v = p.view(PageId::Data, &s, now);
+        p.press(PageId::Data, &v, &Hit::Row(find(&v, "Basics")), 0, &client);
         let v = p.view(PageId::Data, &s, now);
         let at = v
             .rows
@@ -1688,6 +1693,9 @@ mod tests {
         let v = p.view(PageId::Data, &s, now);
         p.press(PageId::Data, &v, &Hit::Row(find(&v, "Driving")), 0, &client);
         assert_eq!(p.depth(PageId::Data), 5);
+        let v = p.view(PageId::Data, &s, now);
+        p.press(PageId::Data, &v, &Hit::Row(find(&v, "Speed")), 0, &client);
+        assert_eq!(p.depth(PageId::Data), 6);
         let v = p.view(PageId::Data, &s, now);
         let speed = v
             .rows

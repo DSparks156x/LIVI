@@ -223,7 +223,8 @@ pub enum SlotAct {
     PickAll(Vec<String>),
     /// The module group shown, one up or down.
     GroupStep(i32),
-    ShowAll,
+    /// Picker level 2 of a category with sub-groups: open this one.
+    Sub(String),
 }
 
 fn act(a: SlotAct) -> Act {
@@ -239,10 +240,33 @@ pub fn polled(name: &str) -> bool {
         .unwrap_or_else(|| MEASURED.iter().any(|m| m.0 == name && m.1 != NO_POLL))
 }
 
-/// Whether the picker shows `name` without "Show unavailable": carpid sent it, or it's polled on
-/// demand.
-fn available(name: &str, snap: &Snapshot) -> bool {
-    snap.values.get(name).is_some() || polled(name)
+/// "3 live · 2 diag": how many of `names` carpid sent, and how many more it polls on demand.
+fn count<'a>(names: impl Iterator<Item = &'a str>, snap: &Snapshot) -> (String, bool) {
+    let (mut live, mut diag) = (0, 0);
+    for n in names {
+        if snap.values.get(n).is_some() {
+            live += 1;
+        } else if polled(n) {
+            diag += 1;
+        }
+    }
+    let text = match (live, diag) {
+        (0, 0) => "none live".to_string(),
+        (l, 0) => format!("{l} live"),
+        (0, d) => format!("{d} diag"),
+        (l, d) => format!("{l} live · {d} diag"),
+    };
+    (text, live + diag > 0)
+}
+
+/// A category's sub-groups, in member order.
+fn subs(list: &[(String, String)]) -> Vec<String> {
+    list.iter().fold(Vec::new(), |mut out, (s, _)| {
+        if !s.is_empty() && !out.contains(s) {
+            out.push(s.clone());
+        }
+        out
+    })
 }
 
 /// The names of a category, in picker order: the catalog's, then anything else carpid has that
@@ -299,7 +323,8 @@ pub fn members(cat: &str, snap: &Snapshot) -> Vec<(String, String)> {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Picker {
     pub cat: Option<Cat>,
-    pub all: bool,
+    /// The sub-group open within `cat`.
+    pub sub: Option<String>,
     /// The group on a module's screen.
     pub group: u8,
 }
@@ -342,7 +367,7 @@ impl Picker {
                     self.group = 1;
                 }
                 self.cat = Some(*c);
-                self.all = false;
+                self.sub = None;
                 Picked::Moved
             }
             SlotAct::CatStep(d) => {
@@ -352,12 +377,12 @@ impl Picker {
                 };
                 let n = order.len() as i32;
                 self.cat = Some(order[(now as i32 + d).rem_euclid(n) as usize]);
-                self.all = false;
+                self.sub = None;
                 Picked::Moved
             }
-            SlotAct::ShowAll => {
-                self.all = !self.all;
-                Picked::Stay
+            SlotAct::Sub(s) => {
+                self.sub = Some(s.clone());
+                Picked::Moved
             }
             _ => Picked::Stay,
         }
@@ -365,7 +390,9 @@ impl Picker {
 
     /// One level up; false on level 1, where back leaves the picker.
     pub fn back(&mut self) -> bool {
-        self.all = false;
+        if self.sub.take().is_some() {
+            return true;
+        }
         if matches!(self.cat, Some(Cat::Module(_))) {
             self.cat = Some(Cat::Modules);
             return true;
@@ -373,11 +400,12 @@ impl Picker {
         self.cat.take().is_some()
     }
 
-    /// Levels below the first: 0, 1, or 2 on a module's groups.
+    /// Levels below the first: 0, 1, or 2 on a module's groups or a sub-group.
     pub fn level(&self) -> usize {
         match self.cat {
             None => 0,
             Some(Cat::Module(_)) => 2,
+            Some(_) if self.sub.is_some() => 2,
             Some(_) => 1,
         }
     }
@@ -494,6 +522,36 @@ impl Picker {
             Cat::Modules | Cat::Module(_) => "Module groups",
             Cat::Of(id) => crate::defs::category(id).map_or(id, |c| c.label),
         };
+        let list: Vec<(String, String)> = match cat {
+            Cat::Recent => recent.iter().map(|r| (String::new(), r.clone())).collect(),
+            Cat::Modules | Cat::Module(_) => Vec::new(),
+            Cat::Of(id) => members(id, snap),
+        };
+        let groups = subs(&list);
+        if let Some(sub) = self.sub.as_ref().filter(|s| groups.contains(s)) {
+            // One sub-group: the D-pad steps its siblings.
+            let at = groups.iter().position(|g| g == sub).unwrap_or(0);
+            let n = groups.len();
+            let mut v = View::new(Layout::List, sub.clone(), true);
+            if n > 1 {
+                let prev = &groups[(at + n - 1) % n];
+                let next = &groups[(at + 1) % n];
+                v.hint = format!("◀ {prev}    {next} ▶");
+                v.side = Some((
+                    act(SlotAct::Sub(prev.clone())),
+                    act(SlotAct::Sub(next.clone())),
+                ));
+            }
+            let mut start = -1;
+            for (_, name) in list.iter().filter(|(g, _)| g == sub) {
+                let at = v.row(pick_row(name, current, snap, now));
+                if current == Some(name.as_str()) {
+                    start = at;
+                }
+            }
+            v.start = start;
+            return v.finish();
+        }
         let mut v = View::new(Layout::List, name_of(cat), true);
         if n > 1 {
             v.hint = format!(
@@ -503,43 +561,46 @@ impl Picker {
             );
         }
         v.side = Some((act(SlotAct::CatStep(-1)), act(SlotAct::CatStep(1))));
-        let list: Vec<(String, String)> = match cat {
-            Cat::Recent => recent.iter().map(|r| (String::new(), r.clone())).collect(),
-            Cat::Modules | Cat::Module(_) => Vec::new(),
-            Cat::Of(id) => members(id, snap),
-        };
-        let mut sub = None;
-        let mut hidden_n = 0;
         let mut start = -1;
-        for (group, name) in &list {
-            let shown = cat == Cat::Recent || available(name, snap);
-            if !shown && !self.all {
-                hidden_n += 1;
-                continue;
+        let mut rows = |v: &mut View, names: &mut dyn Iterator<Item = &String>| {
+            for name in names {
+                let at = v.row(pick_row(name, current, snap, now));
+                if current == Some(name.as_str()) {
+                    start = at;
+                }
             }
-            if !shown {
-                hidden_n += 1;
+        };
+        if groups.len() > 1 {
+            // Sub-groups as their own screens; anything without one lists after them.
+            let here = current.and_then(|c| list.iter().find(|(_, n)| n == c).map(|(g, _)| g));
+            let mut sub_at = -1;
+            for g in &groups {
+                let names = list.iter().filter(|(x, _)| x == g).map(|(_, n)| n.as_str());
+                let (text, any) = count(names, snap);
+                let at = v.row(
+                    Row::new(RowKind::Route, g.clone(), text)
+                        .act(act(SlotAct::Sub(g.clone())))
+                        .dimmed(!any),
+                );
+                if here == Some(g) {
+                    sub_at = at;
+                }
             }
-            if !group.is_empty() && sub.as_deref() != Some(group.as_str()) {
-                v.section(group.clone());
-                sub = Some(group.clone());
+            if list.iter().any(|(g, _)| g.is_empty()) {
+                v.section("");
+                rows(
+                    &mut v,
+                    &mut list.iter().filter(|(g, _)| g.is_empty()).map(|(_, n)| n),
+                );
             }
-            let at = v.row(pick_row(name, current, snap, now));
-            if current == Some(name.as_str()) {
-                start = at;
+            if sub_at >= 0 {
+                start = sub_at;
             }
+        } else {
+            rows(&mut v, &mut list.iter().map(|(_, n)| n));
         }
-        if list.is_empty() || (hidden_n == list.len() && !self.all) {
-            v.row(Row::new(RowKind::Info, "Nothing here the car sends yet", "").dimmed(true));
-        }
-        if hidden_n > 0 {
-            let label = if self.all {
-                "Hide unavailable"
-            } else {
-                "Show unavailable"
-            };
-            v.section("");
-            v.row(Row::new(RowKind::Route, label, hidden_n.to_string()).act(act(SlotAct::ShowAll)));
+        if list.is_empty() {
+            v.row(Row::new(RowKind::Info, "Nothing here yet", "").dimmed(true));
         }
         v.start = start;
         v.finish()
@@ -629,27 +690,14 @@ fn level1(
     v.section("Categories");
     for c in spec.categories() {
         let names = members(c.id, snap);
-        let live = names
-            .iter()
-            .filter(|(_, n)| snap.values.get(n).is_some())
-            .count();
-        let diag = names
-            .iter()
-            .filter(|(_, n)| polled(n) && snap.values.get(n).is_none())
-            .count();
         if names.is_empty() {
             continue;
         }
-        let count = match (live, diag) {
-            (0, 0) => "none live".to_string(),
-            (l, 0) => format!("{l} live"),
-            (0, d) => format!("{d} diag"),
-            (l, d) => format!("{l} live · {d} diag"),
-        };
+        let (text, any) = count(names.iter().map(|(_, n)| n.as_str()), snap);
         let at = v.row(
-            Row::new(RowKind::Route, c.label, count)
+            Row::new(RowKind::Route, c.label, text)
                 .act(act(SlotAct::Cat(Cat::Of(c.id))))
-                .dimmed(live + diag == 0),
+                .dimmed(!any),
         );
         if here == Some(c.id) && v.start == empty {
             v.start = at;
@@ -1192,7 +1240,7 @@ mod tests {
     }
 
     #[test]
-    fn level_two_hides_the_unseen_and_steps_categories() {
+    fn level_two_lists_sub_groups_and_steps_categories() {
         let s = snap(&["vehicle.speed_kmh", "steering.angle_deg"]);
         let mut p = Picker::default();
         let recent = vec!["engine.rpm".to_string()];
@@ -1204,25 +1252,30 @@ mod tests {
         let v = p.view("t", Some("steering.angle_deg"), &recent, &s, now, &DATA);
         assert_eq!(v.title, "Driving");
         assert_eq!(v.hint, "◀ Engine    Haldex ▶");
-        let labels: Vec<&str> = v.rows.iter().map(|r| r.label.as_str()).collect();
-        assert_eq!(
-            labels,
-            [
-                "Speed",
-                "Speed",
-                "Steering",
-                "Steering angle",
-                "",
-                "Show unavailable"
-            ]
-        );
+        let speed = v.rows.iter().find(|r| r.label == "Speed").unwrap();
+        assert_eq!(speed.act, act(SlotAct::Sub("Speed".into())));
+        assert_eq!(speed.value, "1 live");
+        assert!(v.rows.iter().any(|r| r.label == "Wheels"));
+        assert!(!v.rows.iter().any(|r| r.label == "Steering angle"));
         let Some(Hit::Row(i)) = v.hit(v.start) else {
             panic!()
         };
-        assert!(v.rows[i].checked && v.rows[i].label == "Steering angle");
-        p.apply(&SlotAct::ShowAll, &DATA, &recent);
+        assert_eq!(v.rows[i].label, "Steering");
+
+        // A sub-group: every value, unseen ones dimmed; the D-pad steps sub-groups.
+        assert_eq!(
+            p.apply(&SlotAct::Sub("Wheels".into()), &DATA, &recent),
+            Picked::Moved
+        );
+        assert_eq!(p.level(), 2);
         let v = p.view("t", None, &recent, &s, now, &DATA);
+        assert_eq!(v.title, "Wheels");
         assert!(v.rows.iter().any(|r| r.label == "Pulses FL" && r.dimmed));
+        assert!(!v.rows.iter().any(|r| r.label == "Speed"));
+        assert!(v.side.is_some());
+        assert!(p.back());
+        assert_eq!((p.cat, p.sub.as_deref()), (Some(Cat::Of("driving")), None));
+
         // Wraps from the first category to Recent and on to the last.
         p.cat = Some(Cat::Of("engine"));
         p.apply(&SlotAct::CatStep(-1), &DATA, &recent);
@@ -1230,7 +1283,7 @@ mod tests {
         p.apply(&SlotAct::CatStep(-1), &DATA, &recent);
         assert_eq!(p.cat, Some(Cat::Of(crate::defs::OTHER)));
         let v = p.view("t", None, &recent, &s, now, &DATA);
-        assert_eq!(v.rows[0].label, "Nothing here the car sends yet");
+        assert_eq!(v.rows[0].label, "Nothing here yet");
     }
 
     #[test]
@@ -1238,7 +1291,7 @@ mod tests {
         let s = snap(&[]);
         let p = Picker {
             cat: Some(Cat::Of("haldex")),
-            all: false,
+            sub: Some("Temps".into()),
             group: 0,
         };
         let v = p.view("t", None, &[], &s, Instant::now(), &DATA);
@@ -1422,11 +1475,18 @@ mod group_tests {
         let s = Snapshot::default();
         let mut p = Picker::default();
         let v = p.view("Add value", None, &[], &s, Instant::now(), &DATA);
-        let at = v.rows.iter().position(|r| r.label == "Module groups").unwrap();
+        let at = v
+            .rows
+            .iter()
+            .position(|r| r.label == "Module groups")
+            .unwrap();
         assert_eq!(v.rows[at].act, Act::Slots(SlotAct::Cat(Cat::Modules)));
         p.apply(&SlotAct::Cat(Cat::Modules), &DATA, &[]);
         let v = p.view("Add value", None, &[], &s, Instant::now(), &DATA);
-        assert!(v.rows.iter().all(|r| !r.label.starts_with("03")), "never ABS");
+        assert!(
+            v.rows.iter().all(|r| !r.label.starts_with("03")),
+            "never ABS"
+        );
         p.apply(&SlotAct::Cat(Cat::Module(0x01)), &DATA, &[]);
         assert_eq!(p.level(), 2);
         p.apply(&SlotAct::GroupStep(-1), &DATA, &[]);

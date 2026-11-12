@@ -299,9 +299,7 @@ impl Diag {
             Job::Running { action, stage, .. } if stage.is_empty() => {
                 (action, format!("{}…", doing(action)))
             }
-            Job::Running { action, stage, .. } => {
-                (action, format!("{}: {stage}…", doing(action)))
-            }
+            Job::Running { action, stage, .. } => (action, format!("{}: {stage}…", doing(action))),
             Job::Done {
                 action,
                 ok: true,

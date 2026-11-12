@@ -132,7 +132,12 @@ impl Pages {
     pub fn tick(&mut self, client: &Client) {
         let snap = client.snapshot().clone();
         for ((tp2, g), fields) in &snap.diag.groups {
-            let Some(m) = snap.diag.modules().into_iter().find(|m| m.module.tp2 == *tp2) else {
+            let Some(m) = snap
+                .diag
+                .modules()
+                .into_iter()
+                .find(|m| m.module.tp2 == *tp2)
+            else {
                 continue;
             };
             for (f, x) in fields.iter().enumerate().take(4) {
@@ -160,7 +165,11 @@ impl Pages {
             .chain(self.log.editor.picker.as_ref())
             .find_map(|p| p.group_names());
         if let Some((addr, g, _)) = shown
-            && let Some(m) = snap.diag.modules().into_iter().find(|m| m.module.address == addr)
+            && let Some(m) = snap
+                .diag
+                .modules()
+                .into_iter()
+                .find(|m| m.module.address == addr)
             && !snap.diag.groups.contains_key(&(m.module.tp2, g))
             && self.asked != Some((m.module.tp2, g))
         {
@@ -173,10 +182,19 @@ impl Pages {
         }
         // A Forks widget on screen: its sync points, read once each.
         let forks = self.tab == DataTab::Panels
-            && self.panels.panel().widgets.iter().any(|w| w.style == Style::Forks);
+            && self
+                .panels
+                .panel()
+                .widgets
+                .iter()
+                .any(|w| w.style == Style::Forks);
         if forks {
             for (addr, g) in crate::panels::FORK_SYNC {
-                let Some(m) = snap.diag.modules().into_iter().find(|m| m.module.address == addr)
+                let Some(m) = snap
+                    .diag
+                    .modules()
+                    .into_iter()
+                    .find(|m| m.module.address == addr)
                 else {
                     continue;
                 };
@@ -258,7 +276,10 @@ impl Pages {
                 if *a == logging::LogAct::Mark
                     && let Some(r) = st.as_ref().and_then(|d| d.running.as_ref())
                 {
-                    self.mem.borrow_mut().marks.push((r.marks + 1, Instant::now()));
+                    self.mem
+                        .borrow_mut()
+                        .marks
+                        .push((r.marks + 1, Instant::now()));
                 }
                 Some(match self.log.apply(a, st.as_ref(), client) {
                     logging::Done::Stay => Moved::Stay,
@@ -454,7 +475,11 @@ impl Pages {
                     let all = units_for(base);
                     if !all.is_empty() {
                         let now_u = w.opts.unit.clone().unwrap_or_else(|| base.to_string());
-                        let next = cycle(all, all.iter().copied().find(|u| *u == now_u).unwrap_or(base), *d);
+                        let next = cycle(
+                            all,
+                            all.iter().copied().find(|u| *u == now_u).unwrap_or(base),
+                            *d,
+                        );
                         w.opts.unit = (next != base).then(|| next.to_string());
                         w.opts.decimals = None;
                         w.opts.range = None;
@@ -588,7 +613,10 @@ impl Pages {
                 if let Some(p) = self.panels.panels.get_mut(*i) {
                     let all = panels::NAMES;
                     let len = all.len() as i32;
-                    let from = all.iter().position(|n| *n == p.name).map_or(if *d > 0 { -1 } else { 0 }, |x| x as i32);
+                    let from = all
+                        .iter()
+                        .position(|n| *n == p.name)
+                        .map_or(if *d > 0 { -1 } else { 0 }, |x| x as i32);
                     for k in 1..=len {
                         let next = all[(from + d * k).rem_euclid(len) as usize];
                         if !taken.iter().any(|t| t == next) {
@@ -776,9 +804,7 @@ impl Pages {
 
     fn panels_view(&self, snap: &Snapshot, now: Instant) -> View {
         let p = self.panels.panel();
-        self.mem
-            .borrow_mut()
-            .sample(&panels::sampled(p), snap, now);
+        self.mem.borrow_mut().sample(&panels::sampled(p), snap, now);
         let mem = self.mem.borrow();
         let mut v = match self.panel {
             PanelScreen::View => {
@@ -809,11 +835,19 @@ impl Pages {
                     _ => None,
                 };
                 let title = match t {
-                    Target::Value(w, k) if p.widgets.get(w).is_some_and(|x| k < x.values.len()) => "Value",
+                    Target::Value(w, k) if p.widgets.get(w).is_some_and(|x| k < x.values.len()) => {
+                        "Value"
+                    }
                     _ => "Add value",
                 };
-                self.pick
-                    .view(title, current.as_deref(), self.recent(), snap, now, &slots::DATA)
+                self.pick.view(
+                    title,
+                    current.as_deref(),
+                    self.recent(),
+                    snap,
+                    now,
+                    &slots::DATA,
+                )
             }
             PanelScreen::List => self.list(),
             PanelScreen::Settings(i) => self.settings(i),
@@ -829,7 +863,11 @@ impl Pages {
         let mut v = View::new(Layout::List, p.name.clone(), true);
         let free = self.panels.free_name().is_some();
         if p.scratch {
-            v.row(Row::new(RowKind::Button, "Add value", "").button("Add").act(pa(PanelAct::Add)));
+            v.row(
+                Row::new(RowKind::Button, "Add value", "")
+                    .button("Add")
+                    .act(pa(PanelAct::Add)),
+            );
             if !p.widgets.is_empty() && free {
                 v.row(
                     Row::new(RowKind::Button, "Save as panel", "")
@@ -842,11 +880,23 @@ impl Pages {
         }
         let running = snap.datalog.as_ref().is_some_and(|d| d.running.is_some());
         if !p.widgets.is_empty() && snap.connected && !running {
-            v.row(Row::new(RowKind::Button, "Log this panel", "").button("Start").act(Act::LogPanel));
+            v.row(
+                Row::new(RowKind::Button, "Log this panel", "")
+                    .button("Start")
+                    .act(Act::LogPanel),
+            );
         }
-        v.row(Row::new(RowKind::Button, "Reset peaks", "").button("Reset").act(pa(PanelAct::ResetPeaks)));
+        v.row(
+            Row::new(RowKind::Button, "Reset peaks", "")
+                .button("Reset")
+                .act(pa(PanelAct::ResetPeaks)),
+        );
         if free {
-            v.row(Row::new(RowKind::Button, "New panel", "").button("New").act(pa(PanelAct::New)));
+            v.row(
+                Row::new(RowKind::Button, "New panel", "")
+                    .button("New")
+                    .act(pa(PanelAct::New)),
+            );
         }
         v.row(Row::new(RowKind::Route, "Panels", "").act(pa(PanelAct::List)));
         v
@@ -855,8 +905,12 @@ impl Pages {
     fn editor(&self, snap: &Snapshot, now: Instant) -> View {
         let p = self.panels.panel();
         let mut v = View::new(Layout::Panel, format!("Edit · {}", p.name), true);
-        v.pill(format!("Grid {}", p.grid.label()), false, pa(PanelAct::Grid(1))).side =
-            sides(PanelAct::Grid(-1), PanelAct::Grid(1));
+        v.pill(
+            format!("Grid {}", p.grid.label()),
+            false,
+            pa(PanelAct::Grid(1)),
+        )
+        .side = sides(PanelAct::Grid(-1), PanelAct::Grid(1));
         let mem = self.mem.borrow();
         let mut d = panels::view(p, snap, &mem, now);
         d.edit = true;
@@ -900,19 +954,30 @@ impl Pages {
         if let Some(x) = d.widgets.get_mut(i) {
             x.picked = true;
         }
-        let label = d.widgets.get(i).map_or_else(String::new, |x| x.label.clone());
+        let label = d
+            .widgets
+            .get(i)
+            .map_or_else(String::new, |x| x.label.clone());
         let mut v = View::new(Layout::List, label, true);
         v.panel = Some(d);
 
         let (_, most) = w.style.takes();
         if most == 1 {
-            let name = w.values.first().map(|n| crate::slots::label(n)).unwrap_or_default();
+            let name = w
+                .values
+                .first()
+                .map(|n| crate::slots::label(n))
+                .unwrap_or_default();
             v.row(Row::new(RowKind::Route, "Value", name).act(pa(PanelAct::Value(i, 0))));
         } else {
             for (k, n) in w.values.iter().enumerate() {
                 v.row(
-                    Row::new(RowKind::Route, format!("Value {}", k + 1), crate::slots::label(n))
-                        .act(pa(PanelAct::Value(i, k))),
+                    Row::new(
+                        RowKind::Route,
+                        format!("Value {}", k + 1),
+                        crate::slots::label(n),
+                    )
+                    .act(pa(PanelAct::Value(i, k))),
                 );
             }
             if w.values.len() < most {
@@ -934,7 +999,11 @@ impl Pages {
         let fmt = |x: f64| crate::values::number(x, if s.major < 1.0 { 2 } else { 0 });
         if numeric && w.style != Style::Forks {
             if absolute_pressure(first) {
-                let rel = if w.opts.relative { "Relative" } else { "Absolute" };
+                let rel = if w.opts.relative {
+                    "Relative"
+                } else {
+                    "Absolute"
+                };
                 v.row(choice("Pressure", rel, |_| PanelAct::Relative(i)));
             }
             if !units_for(base).is_empty() {
@@ -942,7 +1011,9 @@ impl Pages {
                 v.row(choice("Unit", u, |d| PanelAct::Unit(i, d)));
             }
             let dp = d_dp(&v, i);
-            v.row(step("Decimals", dp.to_string(), |d| PanelAct::Decimals(i, d)));
+            v.row(step("Decimals", dp.to_string(), |d| {
+                PanelAct::Decimals(i, d)
+            }));
         }
         match w.style {
             Style::Number => {
@@ -968,10 +1039,16 @@ impl Pages {
             Style::Bar => {
                 v.row(step("Low", fmt(s.min), |d| PanelAct::Low(i, d)));
                 v.row(step("High", fmt(s.max), |d| PanelAct::High(i, d)));
-                v.row(step("Warn from", s.warn.map_or("Off".into(), fmt), |d| PanelAct::Warn(i, d)));
-                v.row(step("Limit from", s.limit.map_or("Off".into(), fmt), |d| PanelAct::Limit(i, d)));
+                v.row(step("Warn from", s.warn.map_or("Off".into(), fmt), |d| {
+                    PanelAct::Warn(i, d)
+                }));
+                v.row(step("Limit from", s.limit.map_or("Off".into(), fmt), |d| {
+                    PanelAct::Limit(i, d)
+                }));
                 let n = w.opts.segments.unwrap_or(10);
-                v.row(step("Segments", n.to_string(), |d| PanelAct::Segments(i, d)));
+                v.row(step("Segments", n.to_string(), |d| {
+                    PanelAct::Segments(i, d)
+                }));
             }
             Style::Graph => {
                 let win = format!("{} s", w.opts.window.unwrap_or(30));
@@ -992,7 +1069,11 @@ impl Pages {
         v.section("");
         let mut rm = Row::new(
             RowKind::Button,
-            if self.dropping { "Confirm remove" } else { "Remove" },
+            if self.dropping {
+                "Confirm remove"
+            } else {
+                "Remove"
+            },
             "",
         )
         .button("Remove")
@@ -1017,7 +1098,11 @@ impl Pages {
             }
         }
         if self.panels.free_name().is_some() {
-            v.row(Row::new(RowKind::Button, "New panel", "").button("New").act(pa(PanelAct::New)));
+            v.row(
+                Row::new(RowKind::Button, "New panel", "")
+                    .button("New")
+                    .act(pa(PanelAct::New)),
+            );
         }
         v
     }
@@ -1028,12 +1113,22 @@ impl Pages {
         };
         let mut v = View::new(Layout::List, p.name.clone(), true);
         v.row(choice("Name", p.name.clone(), |d| PanelAct::Name(i, d)));
-        v.row(choice("Grid", p.grid.label(), |d| PanelAct::PanelGrid(i, d)));
-        v.row(Row::new(RowKind::Button, "Show", "").button("Show").act(pa(PanelAct::Show(i))));
+        v.row(choice("Grid", p.grid.label(), |d| {
+            PanelAct::PanelGrid(i, d)
+        }));
+        v.row(
+            Row::new(RowKind::Button, "Show", "")
+                .button("Show")
+                .act(pa(PanelAct::Show(i))),
+        );
         v.section("");
         let mut rm = Row::new(
             RowKind::Button,
-            if self.dropping { "Confirm remove" } else { "Remove" },
+            if self.dropping {
+                "Confirm remove"
+            } else {
+                "Remove"
+            },
             "",
         )
         .button("Remove")

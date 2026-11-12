@@ -200,7 +200,11 @@ fn root(_pages: &Pages, snap: &Snapshot) -> View {
     };
     v.row(route("Screen & lighting", light, S::Lighting).icon("Brightness6Outlined"));
     v.row(route("Controls", "", S::Controls).icon("KeyboardOutlined"));
-    let debug = if snap.capture == Capture::Saving { "Collecting…" } else { "" };
+    let debug = if snap.capture == Capture::Saving {
+        "Collecting…"
+    } else {
+        ""
+    };
     v.row(route("Debug logs", debug, S::Logs).icon("ArticleOutlined"));
     v.row(route("Power & clock", "", S::Power).icon("PowerSettingsNewOutlined"));
     let avsd = match s {
@@ -277,7 +281,7 @@ fn setup(snap: &Snapshot) -> View {
     v.row(
         Row::new(RowKind::Button, "Finish setup", "")
             .button("Hide")
-        .act(Act::SetupDone(true)),
+            .act(Act::SetupDone(true)),
     );
     v.finish()
 }
@@ -635,11 +639,9 @@ fn nav(snap: &Snapshot) -> View {
                 nav_time_left: Some(x),
                 ..Default::default()
             });
-            dis_toggle(v, "Distance left", d.nav_dest_distance, |x| {
-                DisPatch {
-                    nav_dest_distance: Some(x),
-                    ..Default::default()
-                }
+            dis_toggle(v, "Distance left", d.nav_dest_distance, |x| DisPatch {
+                nav_dest_distance: Some(x),
+                ..Default::default()
             });
         }
         const LANES: [(DisLanes, &str); 3] = [
@@ -699,11 +701,9 @@ fn media(snap: &Snapshot) -> View {
             claim_media: Some(x),
             ..Default::default()
         });
-        dis_toggle(v, "Auto release", d.release_media, |x| {
-            DisPatch {
-                release_media: Some(x),
-                ..Default::default()
-            }
+        dis_toggle(v, "Auto release", d.release_media, |x| DisPatch {
+            release_media: Some(x),
+            ..Default::default()
         });
         const LAYOUTS: [(DisMediaLayout, &str); 2] = [
             (DisMediaLayout::Stack, "Text"),
@@ -1514,18 +1514,12 @@ fn power(snap: &Snapshot) -> View {
             } else {
                 format!("{} min", p.radio_hold_min)
             };
-            v.row(step(
-                "Radio hold",
-                shown,
-                &HOLD,
-                p.radio_hold_min,
-                |x| {
-                    power_patch(PowerPatch {
-                        radio_hold_min: Some(x),
-                        ..Default::default()
-                    })
-                },
-            ));
+            v.row(step("Radio hold", shown, &HOLD, p.radio_hold_min, |x| {
+                power_patch(PowerPatch {
+                    radio_hold_min: Some(x),
+                    ..Default::default()
+                })
+            }));
         }
         let c = &s.clock;
         v.row(toggle(
@@ -2020,10 +2014,7 @@ fn wifi_add(snap: &Snapshot) -> View {
             );
         }
     }
-    v.row(
-        Row::new(RowKind::Route, "Hidden network", "")
-            .act(Act::Type(TypeFor::WifiName)),
-    );
+    v.row(Row::new(RowKind::Route, "Hidden network", "").act(Act::Type(TypeFor::WifiName)));
     v.finish()
 }
 
@@ -2442,10 +2433,7 @@ mod tests {
             ..Default::default()
         });
         let v = updates(&s);
-        assert_eq!(
-            v.rows[find(&v, "Version")].value,
-            "beta-20261109-5e0cf2c"
-        );
+        assert_eq!(v.rows[find(&v, "Version")].value, "beta-20261109-5e0cf2c");
         assert_eq!(v.rows[find(&v, "Last update")].value, "Succeeded");
         assert!(!v.rows[find(&v, "Last update")].alert);
         assert!(v.rows[find(&v, "Install")].value.is_empty());
@@ -2470,10 +2458,7 @@ mod tests {
         let mut s = snap();
         s.update_recovering = true;
         let v = updates(&s);
-        assert_eq!(
-            v.rows[find(&v, "Status")].value,
-            "Checking"
-        );
+        assert_eq!(v.rows[find(&v, "Status")].value, "Checking");
         assert!(!v.rows[find(&v, "Status")].alert);
         assert!(!v.rows.iter().any(|r| r.label == "Updating"));
         assert!(!s.update.running());

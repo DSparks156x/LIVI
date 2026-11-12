@@ -603,7 +603,9 @@ impl Client {
     /// Starts a diag job; its events land in [`Snapshot::diag`].
     pub fn diag(&self, action: DiagAction) {
         if self.asks.is_none() {
-            self.snapshot().diag.refused(action.clone(), "not connected".into());
+            self.snapshot()
+                .diag
+                .refused(action.clone(), "not connected".into());
         }
         self.ask(Ask::Diag(action));
     }
@@ -1151,14 +1153,12 @@ mod link {
                     Ok(Ev::Ask(Ask::Light(action))) => {
                         self.send(&Request::Light { action }, Pending::Light)
                     }
-                    Ok(Ev::Ask(Ask::Diag(action))) => {
-                        self.send(
-                            &Request::Diag {
-                                action: action.clone(),
-                            },
-                            Pending::Diag(action),
-                        )
-                    }
+                    Ok(Ev::Ask(Ask::Diag(action))) => self.send(
+                        &Request::Diag {
+                            action: action.clone(),
+                        },
+                        Pending::Diag(action),
+                    ),
                     Ok(Ev::Ask(Ask::Datalog(action))) => self.datalog(action),
                     Ok(Ev::Ask(Ask::Update(action, and_apply))) => {
                         self.send(&Request::Update { action, and_apply }, Pending::Update)

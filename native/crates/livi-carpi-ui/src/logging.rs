@@ -806,10 +806,7 @@ pub(crate) mod tests {
         let client = Client::offline("test");
         let mut l = Logging::default();
         let mut st = status();
-        assert_eq!(
-            l.apply(&LogAct::Add, Some(&st), &client),
-            Done::Opened
-        );
+        assert_eq!(l.apply(&LogAct::Add, Some(&st), &client), Done::Opened);
         assert_eq!(l.screen, LogScreen::Profile);
         // Engine is the first free name.
         let (at, p) = l.open.clone().unwrap();

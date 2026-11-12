@@ -374,7 +374,12 @@ pub const DEFS: &[Def] = &[
     flag(RNSE, "rnse.on_tv", "RNS-E on TV", YES),
     // A/V over SD, from carpid's read of the chain.
     text(AVSD, "avsd.state", "Stream"),
-    flag(AVSD, "avsd.teensy", "Teensy", ("Connected", "Not connected")),
+    flag(
+        AVSD,
+        "avsd.teensy",
+        "Teensy",
+        ("Connected", "Not connected"),
+    ),
     num(AVSD, "avsd.fps", "Frame rate", "fps", 1),
     num(AVSD, "avsd.link_kbs", "Link", "kB/s", 0),
     num(AVSD, "avsd.cap_kbs", "Link cap", "kB/s", 0),
@@ -477,8 +482,7 @@ pub fn describe(name: &str) -> Described {
     let entry = crate::catalog::entry(name);
     if let Some(d) = find(name) {
         return Described {
-            label: entry
-                .map_or(Cow::Borrowed(d.label), |e| Cow::Owned(e.label)),
+            label: entry.map_or(Cow::Borrowed(d.label), |e| Cow::Owned(e.label)),
             unit: d.unit,
             kind: d.kind,
         };

@@ -141,8 +141,22 @@ pub(crate) fn sample() {
     set(
         vec!["Engine".into(), "Transmission".into(), "Phone & nav".into()],
         vec![
-            e("engine.rpm", "Engine speed", "rpm", "Engine", "Basics", false),
-            e("trans.oil_temp_c", "ATF temp", "°C", "Transmission", "Temps", true),
+            e(
+                "engine.rpm",
+                "Engine speed",
+                "rpm",
+                "Engine",
+                "Basics",
+                false,
+            ),
+            e(
+                "trans.oil_temp_c",
+                "ATF temp",
+                "°C",
+                "Transmission",
+                "Temps",
+                true,
+            ),
         ],
     );
 }

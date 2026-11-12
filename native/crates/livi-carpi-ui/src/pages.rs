@@ -404,11 +404,12 @@ impl Pages {
         match page {
             PageId::Data => self.data_depth(),
             PageId::Car => {
-                let picking = if matches!(self.car, CarScreen::CellValue(..) | CarScreen::CellAdd(_)) {
-                    self.reading.level()
-                } else {
-                    0
-                };
+                let picking =
+                    if matches!(self.car, CarScreen::CellValue(..) | CarScreen::CellAdd(_)) {
+                        self.reading.level()
+                    } else {
+                        0
+                    };
                 // Under a screen Setup opened, Setup and the first screen are above it.
                 let base = match self.via_setup {
                     Some(v) if self.car == v => 2,
@@ -711,7 +712,6 @@ impl Pages {
             PageId::Car => tab::view(self, snap, now),
         }
     }
-
 }
 
 fn problem(snap: &Snapshot) -> String {
@@ -810,7 +810,11 @@ fn modules(mut v: View, snap: &Snapshot, clear_all: bool, clearing: usize) -> Vi
     } else if any && free {
         let mut row = Row::new(
             RowKind::Button,
-            if clear_all { "Confirm clear all" } else { "Clear all" },
+            if clear_all {
+                "Confirm clear all"
+            } else {
+                "Clear all"
+            },
             "",
         )
         .button("Clear")
@@ -847,7 +851,11 @@ fn module(snap: &Snapshot, now: Instant, i: usize, confirm: Option<u8>) -> View 
         }
         Some(codes) => {
             for c in codes {
-                let mut row = Row::new(RowKind::Info, c.code.clone(), format!("Status {:02X}", c.status));
+                let mut row = Row::new(
+                    RowKind::Info,
+                    c.code.clone(),
+                    format!("Status {:02X}", c.status),
+                );
                 row.alert = true;
                 row.mono = true;
                 v.row(row);
@@ -864,7 +872,11 @@ fn module(snap: &Snapshot, now: Instant, i: usize, confirm: Option<u8>) -> View 
     }
     if diag.dtcs.get(&tp2).is_some_and(|c| !c.is_empty()) {
         let mut row = job_row(
-            if confirm == Some(tp2) { "Confirm clear" } else { "Clear faults" },
+            if confirm == Some(tp2) {
+                "Confirm clear"
+            } else {
+                "Clear faults"
+            },
             "Clear",
             free,
             if confirm == Some(tp2) {
@@ -906,7 +918,11 @@ fn module(snap: &Snapshot, now: Instant, i: usize, confirm: Option<u8>) -> View 
             ));
         }
     }
-    let mut a = Row::new(RowKind::Info, "Address", format!("{addr:02X} · TP2 {tp2:02X}"));
+    let mut a = Row::new(
+        RowKind::Info,
+        "Address",
+        format!("{addr:02X} · TP2 {tp2:02X}"),
+    );
     a.mono = true;
     v.row(a);
     v.finish()
@@ -1106,13 +1122,7 @@ mod tests {
         assert_eq!(p.back(PageId::Car), Some(Moved::Closed(3)));
         assert_eq!(p.back(PageId::Car), Some(Moved::Closed(5)));
         let v = p.view(PageId::Car, &s, now);
-        p.press(
-            PageId::Car,
-            &v,
-            &Hit::Row(find(&v, "Install")),
-            4,
-            &client,
-        );
+        p.press(PageId::Car, &v, &Hit::Row(find(&v, "Install")), 4, &client);
         assert_eq!(
             (p.screen(), p.depth(PageId::Car)),
             (CarScreen::UpdateConfirm, 1)
@@ -1191,10 +1201,7 @@ mod tests {
         s.update = UpdateJob::default();
         s.update_recovering = true;
         let v = p.view(PageId::Car, &s, Instant::now());
-        assert_eq!(
-            v.rows[find(&v, "Status")].value,
-            "Checking"
-        );
+        assert_eq!(v.rows[find(&v, "Status")].value, "Checking");
         assert!(
             !v.rows
                 .iter()
@@ -1263,7 +1270,10 @@ mod tests {
 
         // The D-pad (and the knob, through livi-ui) on the panel flips panels.
         let hit = v.hit(v.flip);
-        assert_eq!(p.side(PageId::Data, &v, hit.as_ref(), 1, 3, &client), Moved::Stay);
+        assert_eq!(
+            p.side(PageId::Data, &v, hit.as_ref(), 1, 3, &client),
+            Moved::Stay
+        );
         assert_eq!(p.panels().shown, 1);
         let v = p.view(PageId::Data, &s, now);
         assert_eq!(v.title, "Drivetrain");
@@ -1312,7 +1322,13 @@ mod tests {
         let v = p.view(PageId::Data, &s, now);
         p.press(PageId::Data, &v, &v.hit(v.flip).unwrap(), 3, &client);
         let v = p.view(PageId::Data, &s, now);
-        p.press(PageId::Data, &v, &Hit::Row(find(&v, "Edit panel")), 0, &client);
+        p.press(
+            PageId::Data,
+            &v,
+            &Hit::Row(find(&v, "Edit panel")),
+            0,
+            &client,
+        );
         let v = p.view(PageId::Data, &s, now);
         assert_eq!(v.title, "Edit · Daily");
         assert_eq!(v.pills[0].label, "Grid 2×1");
@@ -1361,7 +1377,10 @@ mod tests {
         // Remove asks first.
         let v = p.view(PageId::Data, &s, now);
         let rm = find(&v, "Remove");
-        assert_eq!(p.press(PageId::Data, &v, &Hit::Row(rm), 0, &client), Moved::Stay);
+        assert_eq!(
+            p.press(PageId::Data, &v, &Hit::Row(rm), 0, &client),
+            Moved::Stay
+        );
         let v = p.view(PageId::Data, &s, now);
         let rm = find(&v, "Confirm remove");
         assert!(matches!(
@@ -1403,7 +1422,13 @@ mod tests {
         // Save as panel: Scratch empties, the new one is shown.
         p.press(PageId::Data, &v, &v.hit(v.flip).unwrap(), 3, &client);
         let v = p.view(PageId::Data, &s, now);
-        p.press(PageId::Data, &v, &Hit::Row(find(&v, "Save as panel")), 0, &client);
+        p.press(
+            PageId::Data,
+            &v,
+            &Hit::Row(find(&v, "Save as panel")),
+            0,
+            &client,
+        );
         assert_eq!(p.panels().panel().name, "Daily");
         assert_eq!(p.panels().panel().widgets.len(), 1);
         assert!(p.panels().panels.last().unwrap().widgets.is_empty());
@@ -1473,7 +1498,10 @@ mod tests {
             },
         );
         let v = p.view(PageId::Data, &s, now);
-        assert!(v.rows.iter().all(|r| r.label != "Scan"), "no scan while one runs");
+        assert!(
+            v.rows.iter().all(|r| r.label != "Scan"),
+            "no scan while one runs"
+        );
         assert_eq!(v.rows[0].label, "01  Engine");
         assert_eq!(v.rows[0].value, "1 fault");
         assert_eq!(v.rows[find(&v, "22  AWD")].value, "Scanning…");
@@ -1506,7 +1534,10 @@ mod tests {
                 confirm: true
             })
         );
-        assert_eq!(v.rows[find(&v, "Identity")].act, Act::Diag(DiagAction::Identify { module: 1 }));
+        assert_eq!(
+            v.rows[find(&v, "Identity")].act,
+            Act::Diag(DiagAction::Identify { module: 1 })
+        );
         s.diag.identity.insert(
             1,
             crate::diag::Identity {

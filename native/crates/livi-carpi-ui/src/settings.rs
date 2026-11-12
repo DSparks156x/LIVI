@@ -221,12 +221,56 @@ pub fn units_for(own: &str) -> Vec<&'static str> {
 
 /// Icons the cluster draws for a reading (carpi-dis `reading_art::ICONS`).
 pub const CELL_ICONS: &[&str] = &[
-    "oil", "cool", "temperature", "boost", "intake", "air", "engine", "gear", "awd", "ambient",
-    "fuel", "target", "spark", "inject", "valve", "voltage", "steering", "brake", "speed",
-    "lambda", "pressure", "torque", "exhaust", "clutch", "pump", "timing", "distance", "level",
-    "status", "fan", "throttle", "pedal", "sparkplug", "camshaft", "piston", "wheel", "abs",
-    "traction", "compressor", "heater", "door", "hood", "lights", "wiper", "parking", "seatbelt",
-    "rpm", "flow", "ignition", "current",
+    "oil",
+    "cool",
+    "temperature",
+    "boost",
+    "intake",
+    "air",
+    "engine",
+    "gear",
+    "awd",
+    "ambient",
+    "fuel",
+    "target",
+    "spark",
+    "inject",
+    "valve",
+    "voltage",
+    "steering",
+    "brake",
+    "speed",
+    "lambda",
+    "pressure",
+    "torque",
+    "exhaust",
+    "clutch",
+    "pump",
+    "timing",
+    "distance",
+    "level",
+    "status",
+    "fan",
+    "throttle",
+    "pedal",
+    "sparkplug",
+    "camshaft",
+    "piston",
+    "wheel",
+    "abs",
+    "traction",
+    "compressor",
+    "heater",
+    "door",
+    "hood",
+    "lights",
+    "wiper",
+    "parking",
+    "seatbelt",
+    "rpm",
+    "flow",
+    "ignition",
+    "current",
 ];
 
 /// Time zones by region: `America/Denver` is in `America`. Regions in first-seen order of a
@@ -247,12 +291,11 @@ pub fn zone_regions(zones: &[String]) -> Vec<(String, Vec<String>)> {
 /// its neighbour.
 pub fn list_step<T: Copy + PartialOrd>(list: &[T], now: T, d: i32) -> T {
     let at = if d > 0 {
-        list.iter().rposition(|x| *x <= now).map_or(0, |i| i as i32 + d)
-    } else {
         list.iter()
-            .position(|x| *x >= now)
-            .unwrap_or(list.len()) as i32
-            + d
+            .rposition(|x| *x <= now)
+            .map_or(0, |i| i as i32 + d)
+    } else {
+        list.iter().position(|x| *x >= now).unwrap_or(list.len()) as i32 + d
     };
     list[at.clamp(0, list.len() as i32 - 1) as usize]
 }

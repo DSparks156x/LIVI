@@ -22,7 +22,12 @@ use crate::values::{self, Freshness, NONE};
 /// How much history a graph keeps.
 pub const HISTORY: Duration = Duration::from_secs(62);
 /// DSG (02E) fork positions, 02 group 15: 1-3, 2-4, 5-N, 6-R. A Forks widget's default values.
-pub const FORKS: [&str; 4] = ["diag.02.15.1", "diag.02.15.2", "diag.02.15.3", "diag.02.15.4"];
+pub const FORKS: [&str; 4] = [
+    "diag.02.15.1",
+    "diag.02.15.2",
+    "diag.02.15.3",
+    "diag.02.15.4",
+];
 /// Each fork's gears and where 02 groups 17/18 keep their learned sync points.
 const FORK_GEARS: [[(&str, u8, u8); 2]; 4] = [
     [("1", 18, 1), ("3", 17, 1)],
@@ -362,7 +367,10 @@ impl Panel {
         let mut kept: Vec<Widget> = Vec::new();
         for w in self.widgets.drain(..) {
             let clash = kept.iter().any(|k| {
-                w.col < k.col + k.w && k.col < w.col + w.w && w.row < k.row + k.h && k.row < w.row + w.h
+                w.col < k.col + k.w
+                    && k.col < w.col + w.w
+                    && w.row < k.row + k.h
+                    && k.row < w.row + w.h
             });
             if !clash {
                 kept.push(w);
@@ -486,7 +494,15 @@ impl Panels {
 
 /// Panel names on the head unit; the portal sets others.
 pub const NAMES: &[&str] = &[
-    "Daily", "Engine", "Boost", "Haldex", "Electrical", "Trip", "Custom 1", "Custom 2", "Custom 3",
+    "Daily",
+    "Engine",
+    "Boost",
+    "Haldex",
+    "Electrical",
+    "Trip",
+    "Custom 1",
+    "Custom 2",
+    "Custom 3",
     "Custom 4",
 ];
 
@@ -623,10 +639,15 @@ impl Memory {
         for n in names {
             let Some(x) = raw(snap, n, now) else { continue };
             let q = self.samples.entry(n.clone()).or_default();
-            if q.back().is_none_or(|(t, _)| now.saturating_duration_since(*t) >= Duration::from_millis(80)) {
+            if q.back()
+                .is_none_or(|(t, _)| now.saturating_duration_since(*t) >= Duration::from_millis(80))
+            {
                 q.push_back((now, x));
             }
-            while q.front().is_some_and(|(t, _)| now.saturating_duration_since(*t) > HISTORY) {
+            while q
+                .front()
+                .is_some_and(|(t, _)| now.saturating_duration_since(*t) > HISTORY)
+            {
                 q.pop_front();
             }
             let p = self.peaks.entry(n.clone()).or_insert((x, now));
@@ -652,7 +673,9 @@ impl Memory {
         match hold {
             Peak::Off => None,
             Peak::Hold => Some(x),
-            Peak::Hold10s if now.saturating_duration_since(at) <= Duration::from_secs(10) => Some(x),
+            Peak::Hold10s if now.saturating_duration_since(at) <= Duration::from_secs(10) => {
+                Some(x)
+            }
             Peak::Hold10s => self.window_max(name, now, Duration::from_secs(10)),
         }
     }
@@ -840,10 +863,14 @@ fn read(w: &Widget, name: &str, snap: &Snapshot, now: Instant, atm: f64) -> Read
         .clone()
         .filter(|u| units_for(base_unit).contains(&u.as_str()))
         .unwrap_or_else(|| base_unit.to_string());
-    let dp = w.opts.decimals.or_else(|| unit_dp(&unit).filter(|_| unit != base_unit)).unwrap_or(match d.kind {
-        Kind::Num(dp) => dp,
-        _ => 0,
-    });
+    let dp = w
+        .opts
+        .decimals
+        .or_else(|| unit_dp(&unit).filter(|_| unit != base_unit))
+        .unwrap_or(match d.kind {
+            Kind::Num(dp) => dp,
+            _ => 0,
+        });
     let x = num.map(|n| {
         let n = if relative { n - atm } else { n };
         convert(n, base_unit, &unit, relative)
@@ -856,7 +883,11 @@ fn read(w: &Widget, name: &str, snap: &Snapshot, now: Instant, atm: f64) -> Read
     Read {
         x,
         text,
-        unit: if num.is_some() { unit } else { shown.unit.clone() },
+        unit: if num.is_some() {
+            unit
+        } else {
+            shown.unit.clone()
+        },
         label: shown.label,
         stale: shown.freshness.dim(),
         dp,
@@ -976,7 +1007,11 @@ fn gauge(d: &mut WidgetDraw, x: Option<f64>, s: &Scale, peak: Option<f64>, dp: u
     let red_from = s.limit.or(s.warn).map(|r| frac(r, s) as f64);
     let at = x.map(|x| frac(x, s) as f64);
     // Lit from zero where the scale spans it (boost: vacuum lights down, boost up).
-    let from = if s.min < 0.0 && s.max > 0.0 { frac(0.0, s) as f64 } else { 0.0 };
+    let from = if s.min < 0.0 && s.max > 0.0 {
+        frac(0.0, s) as f64
+    } else {
+        0.0
+    };
     for i in 0..=TICKS {
         let f = i as f64 / TICKS as f64;
         let red = red_from.is_some_and(|r| f >= r - 1e-9);
@@ -1026,7 +1061,14 @@ fn bar(d: &mut WidgetDraw, x: Option<f64>, s: &Scale, segments: u8) {
 }
 
 /// A graph line through the samples of the last `window`, in the box: x by time, y by `s`.
-fn trace(mem: &Memory, name: &str, window: Duration, now: Instant, s: &Scale, conv: &dyn Fn(f64) -> f64) -> String {
+fn trace(
+    mem: &Memory,
+    name: &str,
+    window: Duration,
+    now: Instant,
+    s: &Scale,
+    conv: &dyn Fn(f64) -> f64,
+) -> String {
     let mut path = String::new();
     let span = window.as_secs_f64();
     for (t, x) in mem.series(name) {
@@ -1063,7 +1105,12 @@ fn dashed(path: &str) -> String {
         let mut t = 0.0;
         while t < len {
             let cycle = phase % (on + off);
-            let step = if cycle < on { on - cycle } else { on + off - cycle }.min(len - t);
+            let step = if cycle < on {
+                on - cycle
+            } else {
+                on + off - cycle
+            }
+            .min(len - t);
             if cycle < on {
                 let a = t / len;
                 let b = (t + step) / len;
@@ -1106,7 +1153,10 @@ pub fn draw(w: &Widget, snap: &Snapshot, mem: &Memory, now: Instant) -> WidgetDr
     let r = read(w, first, snap, now, atm);
     d.label = w.opts.label.clone().unwrap_or_else(|| r.label.clone());
     if w.opts.relative && absolute_pressure(first) && w.opts.label.is_none() {
-        d.label = d.label.replace(" actual", "").replace("Boost act.", "Boost");
+        d.label = d
+            .label
+            .replace(" actual", "")
+            .replace("Boost act.", "Boost");
     }
     d.value = r.text.clone();
     d.unit = r.unit.clone();
@@ -1199,13 +1249,25 @@ pub fn draw(w: &Widget, snap: &Snapshot, mem: &Memory, now: Instant) -> WidgetDr
                 let rn = read(w, n, snap, now, atm);
                 d.lines.push(Line {
                     path: if spec { dashed(&path) } else { path },
-                    color: if spec { 1 } else if i == 0 { 0 } else { 2 },
+                    color: if spec {
+                        1
+                    } else if i == 0 {
+                        0
+                    } else {
+                        2
+                    },
                     label: format!("{} {}", rn.label, rn.text),
                 });
             }
             // Grid lines on round values, three or four of them.
             let step = nice((s.max - s.min) / 4.0);
-            let ldp = if step < 0.1 { 2 } else if step < 1.0 { 1 } else { 0 };
+            let ldp = if step < 0.1 {
+                2
+            } else if step < 1.0 {
+                1
+            } else {
+                0
+            };
             let mut v = (s.min / step).ceil() * step;
             while v <= s.max + 1e-9 && d.labels.len() < 6 {
                 let y = 1.0 - frac(v, &s);
@@ -1238,7 +1300,11 @@ pub fn draw(w: &Widget, snap: &Snapshot, mem: &Memory, now: Instant) -> WidgetDr
                 let common = shared(&[r.label.clone(), r2.label.clone()]);
                 let rest = |l: &str| {
                     let t = l.strip_prefix(common.as_str()).unwrap_or(l).trim();
-                    if t.is_empty() || t == l { l.to_string() } else { t.to_string() }
+                    if t.is_empty() || t == l {
+                        l.to_string()
+                    } else {
+                        t.to_string()
+                    }
                 };
                 if w.opts.label.is_none() && common != r.label {
                     d.label = common.clone();
@@ -1264,8 +1330,11 @@ pub fn draw(w: &Widget, snap: &Snapshot, mem: &Memory, now: Instant) -> WidgetDr
         }
         Style::Set => {
             if w.opts.label.is_none() && w.values.len() > 1 {
-                let labels: Vec<String> =
-                    w.values.iter().map(|n| read(w, n, snap, now, atm).label).collect();
+                let labels: Vec<String> = w
+                    .values
+                    .iter()
+                    .map(|n| read(w, n, snap, now, atm).label)
+                    .collect();
                 d.label = shared(&labels);
             }
             for n in &w.values {
@@ -1293,8 +1362,16 @@ pub fn draw(w: &Widget, snap: &Snapshot, mem: &Memory, now: Instant) -> WidgetDr
 /// A learned sync point: polled if something polls it, else the last read of its group.
 fn sync_point(snap: &Snapshot, now: Instant, group: u8, field: u8) -> Option<f64> {
     raw(snap, &defs::module_group_name(0x02, group, field), now).or_else(|| {
-        let m = snap.diag.modules().into_iter().find(|m| m.module.address == 0x02)?;
-        snap.diag.groups.get(&(m.module.tp2, group))?.get(usize::from(field) - 1)?.value
+        let m = snap
+            .diag
+            .modules()
+            .into_iter()
+            .find(|m| m.module.address == 0x02)?;
+        snap.diag
+            .groups
+            .get(&(m.module.tp2, group))?
+            .get(usize::from(field) - 1)?
+            .value
     })
 }
 
@@ -1308,10 +1385,19 @@ fn forks(d: &mut WidgetDraw, w: &Widget, snap: &Snapshot, mem: &Memory, now: Ins
     let mut engaged = Vec::new();
     let mut stale = true;
     for (i, [a, b]) in FORK_GEARS.iter().enumerate() {
-        let name = w.values.get(i).cloned().unwrap_or_else(|| FORKS[i].to_string());
+        let name = w
+            .values
+            .get(i)
+            .cloned()
+            .unwrap_or_else(|| FORKS[i].to_string());
         let x = raw(snap, &name, now);
-        stale &= values::show(&name, snap.values.get(&name), now).freshness.dim();
-        let (sa, sb) = (sync_point(snap, now, a.1, a.2), sync_point(snap, now, b.1, b.2));
+        stale &= values::show(&name, snap.values.get(&name), now)
+            .freshness
+            .dim();
+        let (sa, sb) = (
+            sync_point(snap, now, a.1, a.2),
+            sync_point(snap, now, b.1, b.2),
+        );
         // The gear with the lower sync point goes left; unknown, as named.
         let (lo, hi, s_lo, s_hi) = match (sa, sb) {
             (Some(p), Some(q)) if p > q => (b.0, a.0, Some(q), Some(p)),
@@ -1326,9 +1412,13 @@ fn forks(d: &mut WidgetDraw, w: &Widget, snap: &Snapshot, mem: &Memory, now: Ins
         for v in [s_lo, s_hi].into_iter().flatten() {
             r = r.max((v - zero).abs() * 1.5);
         }
-        for v in [x, mem.lows.get(&name).copied(), mem.peaks.get(&name).map(|p| p.0)]
-            .into_iter()
-            .flatten()
+        for v in [
+            x,
+            mem.lows.get(&name).copied(),
+            mem.peaks.get(&name).map(|p| p.0),
+        ]
+        .into_iter()
+        .flatten()
         {
             r = r.max((v - zero).abs() * 1.08);
         }
@@ -1366,12 +1456,19 @@ fn forks(d: &mut WidgetDraw, w: &Widget, snap: &Snapshot, mem: &Memory, now: Ins
     d.stale = stale;
     engaged.retain(|g| *g != "N");
     engaged.sort_by_key(|g| g.parse::<u8>().unwrap_or(9));
-    d.value = if engaged.is_empty() { "N".into() } else { engaged.join(" · ") };
+    d.value = if engaged.is_empty() {
+        "N".into()
+    } else {
+        engaged.join(" · ")
+    };
 }
 
 /// The words a set's labels start with: "Retard cyl 1".."4" share "Retard cyl" -> "Retard".
 fn shared(labels: &[String]) -> String {
-    let words: Vec<Vec<&str>> = labels.iter().map(|l| l.split_whitespace().collect()).collect();
+    let words: Vec<Vec<&str>> = labels
+        .iter()
+        .map(|l| l.split_whitespace().collect())
+        .collect();
     let first = &words[0];
     let mut n = first.len();
     for w in &words[1..] {
@@ -1403,8 +1500,7 @@ fn short(label: &str) -> String {
 /// The values a panel's widgets need sampled: every value, and the atmosphere for relative ones.
 pub fn sampled(p: &Panel) -> Vec<String> {
     let mut out = p.values();
-    if p
-        .widgets
+    if p.widgets
         .iter()
         .any(|w| w.opts.relative && w.values.iter().any(|v| absolute_pressure(v)))
     {
@@ -1637,7 +1733,10 @@ mod tests {
         let d = draw(&w, &s, &Memory::default(), now);
         assert_eq!(d.value, "26.8");
         // No ICAN factor: the measuring block's.
-        let s = snap(&[("engine.boost.actual", 800.0), ("engine.atmospheric_mbar", 1000.0)]);
+        let s = snap(&[
+            ("engine.boost.actual", 800.0),
+            ("engine.atmospheric_mbar", 1000.0),
+        ]);
         w.opts.relative = true;
         w.opts.unit = None;
         let d = draw(&w, &s, &Memory::default(), now);
@@ -1683,8 +1782,16 @@ mod tests {
             mem.sample(&names, &s, now - Duration::from_millis(100 * (20 - i)));
         }
         mem.marks.push((3, now - Duration::from_secs(1)));
-        let s = snap(&[("engine.boost.actual", 2000.0), ("engine.boost.specified", 1500.0)]);
-        let w = Widget::new(0, 0, Style::Graph, &["engine.boost.actual", "engine.boost.specified"]);
+        let s = snap(&[
+            ("engine.boost.actual", 2000.0),
+            ("engine.boost.specified", 1500.0),
+        ]);
+        let w = Widget::new(
+            0,
+            0,
+            Style::Graph,
+            &["engine.boost.actual", "engine.boost.specified"],
+        );
         let d = draw(&w, &s, &mem, now);
         assert_eq!(d.lines.len(), 2);
         assert!(d.lines[0].path.starts_with("M "));
@@ -1715,7 +1822,14 @@ mod tests {
         assert_eq!(p.grid, Grid::G2x2);
         assert_eq!((p.widgets[2].col, p.widgets[2].row), (0, 1));
         assert_eq!(p.free(), vec![(1, 1)]);
-        let mut p = Panel::new("x", Grid::G3x2, vec![Widget::new(0, 0, Style::Gauge, &["a"]).size(2, 2), Widget::new(2, 1, Style::Number, &["b"])]);
+        let mut p = Panel::new(
+            "x",
+            Grid::G3x2,
+            vec![
+                Widget::new(0, 0, Style::Gauge, &["a"]).size(2, 2),
+                Widget::new(2, 1, Style::Number, &["b"]),
+            ],
+        );
         p.grid = Grid::G2x1;
         p.clamp();
         assert_eq!(p.widgets.len(), 1);
@@ -1747,5 +1861,4 @@ mod tests {
         assert_eq!(d.value, "2 · 3");
         assert!(d.items[0].sync_hi > 0.5 && d.items[0].sync_lo < 0.5);
     }
-
 }

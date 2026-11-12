@@ -275,12 +275,8 @@ impl Unit {
     /// What the user must know before the second push.
     fn warnings(self) -> &'static [(&'static str, &'static str, bool)] {
         match self {
-            Self::Rnse => &[
-                ("Ignition on, engine off", "Keep power on", true),
-                ("RNS-E screen goes dark", "Restarts when done", false),
-                ("Takes several minutes", "", false),
-            ],
-            Self::Teensy => &[("Video stops briefly", "", false)],
+            Self::Rnse => &[("Ignition on, engine off", "", true)],
+            Self::Teensy => &[],
         }
     }
 }
@@ -371,11 +367,6 @@ pub fn view_dev(
         v.row(info(&format!("{title}{pct}"), String::new()));
         for line in wrap(&capital(&job.job.message), WRAP) {
             v.row(info(&line, String::new()).dimmed(true));
-        }
-        if let Some(unit) = job.installing() {
-            for (label, value, alert) in unit.warnings() {
-                v.row(info(label, (*value).into()).alert(*alert));
-            }
         }
     } else if let Some((ok, m)) = &job.job.finished {
         v.row(
@@ -651,14 +642,11 @@ mod tests {
         let v = view(&status, &FirmwareJob::default(), None);
         assert!(!v.rows.iter().any(|r| r.label == "Ignition on, engine off"));
         let v = view(&status, &FirmwareJob::default(), Some(Unit::Rnse));
-        for label in [
-            "Ignition on, engine off",
-            "RNS-E screen goes dark",
-            "Takes several minutes",
-        ] {
-            assert!(v.rows.iter().any(|r| r.label == label), "{label}");
-        }
-        assert!(v.rows.iter().any(|r| r.value.contains("Keep power on")));
+        assert!(
+            v.rows
+                .iter()
+                .any(|r| r.label == "Ignition on, engine off" && r.alert)
+        );
         assert!(!v.rows.iter().any(|r| r.label == "Video stops briefly"));
         let rows = installs(&v);
         assert_eq!(rows[0].label, "Confirm install");
@@ -666,7 +654,7 @@ mod tests {
         assert_eq!(rows[1].label, "Replace with bundled");
         assert_eq!(v.start, rows[0].focus_at, "focus stays on the armed button");
         let v = view(&status, &FirmwareJob::default(), Some(Unit::Teensy));
-        assert!(v.rows.iter().any(|r| r.label == "Video stops briefly"));
+        assert!(!v.rows.iter().any(|r| r.label == "Ignition on, engine off"));
         assert_eq!(installs(&v)[1].label, "Confirm replace");
     }
 
@@ -688,7 +676,6 @@ mod tests {
         let at = |l: &str| v.rows.iter().position(|r| r.label == l).unwrap();
         assert!(at("RNS-E install · 25 %  (25 of 100)") < at("SDLink protocol"));
         assert!(v.rows.iter().any(|r| r.label == "Writing sector 107"));
-        assert!(v.rows.iter().any(|r| r.label == "Ignition on, engine off"));
         job.job.finished = Some((false, "RNS-E did not reply".into()));
         let v = view(&Status::default(), &job, None);
         let row = v
@@ -787,7 +774,6 @@ mod tests {
         let v = view(&Status::default(), &job, None);
         assert!(v.rows.iter().any(|r| r.label == "Flash Sector · running"));
         assert!(v.rows.iter().any(|r| r.label == "Writing sector 96"));
-        assert!(v.rows.iter().any(|r| r.label == "Ignition on, engine off"));
     }
 
     #[test]

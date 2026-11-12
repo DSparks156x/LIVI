@@ -296,6 +296,37 @@ fn job_title(action: Option<&carpi_proto::FirmwareAction>) -> &'static str {
     }
 }
 
+/// Characters per line that fit a full-width row label at 800x480.
+const WRAP: usize = 64;
+
+/// `text` in lines of at most `width` characters, broken at spaces where it can be.
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        let mut word = word.to_string();
+        while word.chars().count() > width {
+            if !line.is_empty() {
+                lines.push(std::mem::take(&mut line));
+            }
+            let cut: String = word.chars().take(width).collect();
+            word = word.chars().skip(width).collect();
+            lines.push(cut);
+        }
+        if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > width {
+            lines.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(&word);
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
 fn capital(s: &str) -> String {
     match s.get(..1) {
         Some(f) => f.to_uppercase() + &s[1..],
@@ -322,6 +353,42 @@ pub fn view_dev(
     let info = |label: &str, value: String| Row::new(RowKind::Info, label, value);
     let running = job.job.running();
     let busy = status.busy || running;
+    // The job first, where it's seen without scrolling: a headline with the percent, then
+    // the message over as many full-width lines as it needs (a value would be cut off).
+    let title = job_title(job.action.as_ref());
+    if running {
+        let pct = match job.job.progress {
+            Some((done, Some(total))) if total > 0 => {
+                format!(" · {} %  ({done} of {total})", done * 100 / total)
+            }
+            _ => String::new(),
+        };
+        let pct = if pct.is_empty() {
+            " · running".to_string()
+        } else {
+            pct
+        };
+        v.row(info(&format!("{title}{pct}"), String::new()));
+        for line in wrap(&capital(&job.job.message), WRAP) {
+            v.row(info(&line, String::new()).dimmed(true));
+        }
+        if let Some(unit) = job.installing() {
+            for (label, value, alert) in unit.warnings() {
+                v.row(info(label, (*value).into()).alert(*alert));
+            }
+        }
+    } else if let Some((ok, m)) = &job.job.finished {
+        v.row(
+            info(
+                &format!("{title}: {}", if *ok { "Done" } else { "Failed" }),
+                String::new(),
+            )
+            .alert(!ok),
+        );
+        for line in wrap(&capital(m), WRAP) {
+            v.row(info(&line, String::new()).alert(!ok));
+        }
+    }
     v.row(info("SDLink protocol", status.protocol.label()));
     v.row(
         Row::new(
@@ -333,34 +400,15 @@ pub fn view_dev(
         .act(if busy { Act::None } else { Act::FirmwareProbe })
         .dimmed(busy),
     );
-    let title = job_title(job.action.as_ref());
-    if running {
-        let pct = match job.job.progress {
-            Some((done, Some(total))) if total > 0 => format!(" {} %", done * 100 / total),
-            _ => String::new(),
-        };
-        let msg = if job.job.message.is_empty() {
-            "Starting".to_string()
-        } else {
-            capital(&job.job.message)
-        };
-        v.row(info(title, format!("{msg}{pct}")));
-        if let Some(unit) = job.installing() {
-            for (label, value, alert) in unit.warnings() {
-                v.row(info(label, (*value).into()).alert(*alert));
-            }
-        }
-    } else if let Some((ok, m)) = &job.job.finished {
-        let label = format!("{title}: {}", if *ok { "Done" } else { "Failed" });
-        v.row(info(&label, capital(m)).alert(!ok));
-    }
     let mut start = -1;
     for (unit, target) in [(Unit::Rnse, &status.rnse), (Unit::Teensy, &status.teensy)] {
         let name = unit.name();
         v.section(name);
         v.row(info("Installed", target.installed.label()));
         if let Some(detail) = target.detail.as_deref().filter(|d| !d.trim().is_empty()) {
-            v.row(info("Details", detail.into()).dimmed(true));
+            for line in wrap(detail, WRAP) {
+                v.row(info(&line, String::new()).dimmed(true));
+            }
         }
         v.row(info(
             "Bundled",
@@ -371,7 +419,9 @@ pub fn view_dev(
         ));
         v.row(info("Status", target.update_label().into()));
         if let Some(why) = &target.blocked {
-            v.row(info("Can't install", why.clone()).alert(true));
+            for line in wrap(&format!("Can't install: {why}"), WRAP) {
+                v.row(info(&line, String::new()).alert(true));
+            }
         }
         if !target.installable(busy) {
             continue;
@@ -500,18 +550,12 @@ mod tests {
         assert_eq!(target.update_label(), "Update available");
         // Lexicographical and numerical guesses must not override backend evidence.
         target.comparison = Comparison::Older;
-        assert_eq!(
-            target.update_label(),
-            "Newer than bundle"
-        );
+        assert_eq!(target.update_label(), "Newer than bundle");
         target.installed = Installed::Legacy;
         target.comparison = Comparison::Newer;
         assert_eq!(target.update_label(), "Update available");
         target.installed = Installed::Unknown;
-        assert_eq!(
-            target.update_label(),
-            "Installed unknown"
-        );
+        assert_eq!(target.update_label(), "Installed unknown");
         target.bundled = None;
         assert_eq!(target.update_label(), "No bundle");
     }
@@ -587,9 +631,13 @@ mod tests {
             ..Status::default()
         };
         let v = view(&status, &FirmwareJob::default(), None);
-        assert!(v.rows.iter().any(|r| r.value == "Table 3, formats 1"));
-        let blocked = v.rows.iter().find(|r| r.label == "Can't install").unwrap();
-        assert_eq!(blocked.value, "Ignition is off");
+        assert!(v.rows.iter().any(|r| r.label == "Table 3, formats 1"));
+        let blocked = v
+            .rows
+            .iter()
+            .find(|r| r.label == "Can't install: Ignition is off")
+            .unwrap();
+        assert!(blocked.alert);
         assert!(installs(&v).is_empty());
     }
 
@@ -610,11 +658,7 @@ mod tests {
         ] {
             assert!(v.rows.iter().any(|r| r.label == label), "{label}");
         }
-        assert!(
-            v.rows
-                .iter()
-                .any(|r| r.value.contains("Keep power on"))
-        );
+        assert!(v.rows.iter().any(|r| r.value.contains("Keep power on")));
         assert!(!v.rows.iter().any(|r| r.label == "Video stops briefly"));
         let rows = installs(&v);
         assert_eq!(rows[0].label, "Confirm install");
@@ -640,8 +684,10 @@ mod tests {
             ..FirmwareJob::default()
         };
         let v = view(&Status::default(), &job, None);
-        let row = v.rows.iter().find(|r| r.label == "RNS-E install").unwrap();
-        assert_eq!(row.value, "Writing sector 107 25 %");
+        // The headline leads with the percent; it comes before the protocol row.
+        let at = |l: &str| v.rows.iter().position(|r| r.label == l).unwrap();
+        assert!(at("RNS-E install · 25 %  (25 of 100)") < at("SDLink protocol"));
+        assert!(v.rows.iter().any(|r| r.label == "Writing sector 107"));
         assert!(v.rows.iter().any(|r| r.label == "Ignition on, engine off"));
         job.job.finished = Some((false, "RNS-E did not reply".into()));
         let v = view(&Status::default(), &job, None);
@@ -651,7 +697,24 @@ mod tests {
             .find(|r| r.label == "RNS-E install: Failed")
             .unwrap();
         assert!(row.alert);
-        assert_eq!(row.value, "RNS-E did not reply");
+        assert!(
+            v.rows
+                .iter()
+                .any(|r| r.label == "RNS-E did not reply" && r.alert)
+        );
+        // A long reason is all there, over several lines.
+        let long = "the RNS-E didn't answer a read at 806ACC00: no complete reply; is the RNS-E awake? Check it, then run Check versions";
+        job.job.finished = Some((false, long.into()));
+        let v = view(&Status::default(), &job, None);
+        let text: Vec<&str> = v
+            .rows
+            .iter()
+            .filter(|r| r.alert)
+            .map(|r| r.label.as_str())
+            .skip(1)
+            .collect();
+        assert!(text.len() > 1 && text.iter().all(|l| l.chars().count() <= WRAP));
+        assert_eq!(text.join(" "), capital(long));
     }
 
     fn upload(name: &str, sector: u16, problem: Option<&str>) -> Upload {
@@ -722,8 +785,8 @@ mod tests {
             ..FirmwareJob::default()
         };
         let v = view(&Status::default(), &job, None);
-        let row = v.rows.iter().find(|r| r.label == "Flash Sector").unwrap();
-        assert_eq!(row.value, "Writing sector 96");
+        assert!(v.rows.iter().any(|r| r.label == "Flash Sector · running"));
+        assert!(v.rows.iter().any(|r| r.label == "Writing sector 96"));
         assert!(v.rows.iter().any(|r| r.label == "Ignition on, engine off"));
     }
 
@@ -793,10 +856,7 @@ mod tests {
             serde_json::from_str(include_str!("../fixtures/firmware-legacy.json")).unwrap();
         assert_eq!(legacy.firmware.protocol, Protocol::Legacy);
         assert_eq!(legacy.firmware.rnse.installed, Installed::Legacy);
-        assert_eq!(
-            legacy.firmware.rnse.update_label(),
-            "Unknown"
-        );
+        assert_eq!(legacy.firmware.rnse.update_label(), "Unknown");
         assert!(legacy.firmware.teensy.blocked.is_some());
         let v = view(&legacy.firmware, &FirmwareJob::default(), None);
         let rows = installs(&v);

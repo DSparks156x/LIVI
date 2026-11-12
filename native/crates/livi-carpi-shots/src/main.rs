@@ -310,7 +310,11 @@ fn settings(mut s: Settings) -> Settings {
     s.update.version = "carpid 0.1.0, release 2026.11.08 (stable)".into();
     s.power.shutdown = true;
     s.bindings_custom = true;
-    s.remote = carpi_proto::RemoteSettings { vnc_installed: true, vnc_running: true, vnc_at_boot: false };
+    s.remote = carpi_proto::RemoteSettings {
+        vnc_installed: true,
+        vnc_running: true,
+        vnc_at_boot: false,
+    };
     s.dis.accel = ["0-60mph", "50-100kmh", "1/4mi", "speed"]
         .map(String::from)
         .to_vec();
@@ -537,6 +541,43 @@ fn main() {
         let v = pages.view(PageId::Car, &client.snapshot(), now);
         shots.view(&v, None, true, "nvme-moving");
     }
+    // SDLink firmware: an RNS-E install staging, then one that failed with a long reason.
+    let fw_shots: [(&str, bool); 2] = [("firmware-running", true), ("firmware-failed", false)];
+    for (name, running) in fw_shots {
+        if !only.is_empty() && !only.iter().any(|o| o == name) {
+            continue;
+        }
+        {
+            let mut s = client.snapshot();
+            s.firmware = Fixture::read(
+                &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../livi-carpi-ui/fixtures/firmware-newer.json"),
+            )
+            .expect("fixture")
+            .firmware;
+            let j = &mut s.firmware_job;
+            j.action = Some(carpi_proto::FirmwareAction::InstallRnse { confirm: true });
+            j.job = Default::default();
+            j.job.job = Some(7);
+            if running {
+                j.job.stage = "stage".into();
+                j.job.message = "sending the image to the RNS-E (try 1, 26215 frames)".into();
+                j.job.progress = Some((9216, Some(26215)));
+            } else {
+                j.job.finished = Some((
+                    false,
+                    "the RNS-E didn't answer a read at 806ACC00: no complete reply; is the RNS-E awake? Check it, then run Check versions".into(),
+                ));
+            }
+        }
+        pages.goto(S::Firmware);
+        let v = pages.view(PageId::Car, &client.snapshot(), now);
+        shots.view(&v, None, true, name);
+        let last = v.targets() as i32 - 1;
+        if last > v.start {
+            shots.view(&v, Some(last), true, &format!("{name}-end"));
+        }
+    }
     // The on-screen keyboard over the Wi-Fi screen, both layouts.
     use livi_carpi_ui::keyboard::{Input, Keyboard, Prefs, Style};
     let boards = [
@@ -590,6 +631,7 @@ fn datalog() -> carpi_proto::DatalogStatus {
             name: name.into(),
             values: values.iter().map(|v| v.to_string()).collect(),
             rate_hz,
+            labels: Vec::new(),
         },
         load,
     };
@@ -641,6 +683,7 @@ fn datalog() -> carpi_proto::DatalogStatus {
             started: "2026-11-08T09:40:00".into(),
             elapsed_ms: 481_200,
             rows: 4812,
+            marks: 0,
             dir: "/home/pi/logs/2026-11-08/03".into(),
             summary: "8 values, 10 Hz, 4 812 rows".into(),
             error: None,

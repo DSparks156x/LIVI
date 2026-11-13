@@ -218,6 +218,19 @@ fn root(_pages: &Pages, snap: &Snapshot) -> View {
         _ => "",
     };
     v.row(route("Remote access", vnc, S::Remote).icon("LanOutlined"));
+    if let Some(s) = s {
+        v.row(
+            toggle(
+                "Haldex mode switching",
+                s.haldex.enabled,
+                set(SettingsPatch {
+                    haldex_enabled: Some(!s.haldex.enabled),
+                    ..Default::default()
+                }),
+            )
+            .tag("Restores the last confirmed mode at startup"),
+        );
+    }
     v.row(route("Advanced", "", S::Advanced).icon("TuneOutlined"));
     v.finish()
 }
@@ -2391,6 +2404,21 @@ mod tests {
     use super::*;
     use crate::config::Saved;
     use crate::view::Hit;
+
+    #[test]
+    fn haldex_toggle_is_opt_in_on_car_integration() {
+        let mut s = snap();
+        let p = Pages::new(Saved::default(), None);
+        let v = root(&p, &s);
+        let row = &v.rows[find(&v, "Haldex mode switching")];
+        assert_eq!(patch_of(Some(&row.act)).haldex_enabled, Some(true));
+        s.settings.as_mut().unwrap().haldex.enabled = true;
+        let v = root(&p, &s);
+        assert_eq!(
+            patch_of(Some(&v.rows[find(&v, "Haldex mode switching")].act)).haldex_enabled,
+            Some(false)
+        );
+    }
 
     fn snap() -> Snapshot {
         let mut s = Snapshot {

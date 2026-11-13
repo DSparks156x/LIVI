@@ -892,6 +892,32 @@ fn module(snap: &Snapshot, now: Instant, i: usize, confirm: Option<u8>) -> View 
         v.row(row);
     }
 
+    if tp2 == 0x0A && snap.settings.as_ref().is_some_and(|s| s.haldex.enabled) {
+        v.section("Haldex mode");
+        v.row(Row::new(
+            RowKind::Info,
+            "Mode",
+            text_of(snap, "haldex.control.applied").unwrap_or("Unknown"),
+        ));
+        v.row(Row::new(
+            RowKind::Info,
+            "Status",
+            text_of(snap, "haldex.control.status").unwrap_or("Waiting for carpid"),
+        ));
+        let can_switch = free
+            && snap
+                .settings
+                .as_ref()
+                .is_some_and(|s| s.tx_enabled && !s.flashing_mode);
+        for mode in carpi_proto::HaldexMode::ALL {
+            v.row(job_row(
+                mode.name(),
+                "Set",
+                can_switch,
+                Act::Diag(DiagAction::SetHaldexMode { mode }),
+            ));
+        }
+    }
     let _ = now;
     v.section("");
     match diag.identity.get(&tp2) {
@@ -1018,6 +1044,45 @@ mod tests {
 
     use super::*;
     use crate::client::Capture;
+
+    #[test]
+    fn haldex_controls_only_exist_on_enabled_awd_module() {
+        let now = Instant::now();
+        let mut s = snap(&[]);
+        s.settings = Some(crate::settings::sample());
+        let awd = s
+            .diag
+            .modules()
+            .iter()
+            .position(|m| m.module.tp2 == 0x0A)
+            .unwrap();
+        assert!(
+            !module(&s, now, awd, None)
+                .rows
+                .iter()
+                .any(|r| r.label == "Stock")
+        );
+        s.settings.as_mut().unwrap().haldex.enabled = true;
+        s.settings.as_mut().unwrap().tx_enabled = true;
+        let v = module(&s, now, awd, None);
+        for m in carpi_proto::HaldexMode::ALL {
+            let row = &v.rows[find(&v, m.name())];
+            assert_eq!(row.act, Act::Diag(DiagAction::SetHaldexMode { mode: m }));
+        }
+        assert!(
+            !module(&s, now, 0, None)
+                .rows
+                .iter()
+                .any(|r| r.label == "Stock")
+        );
+        s.settings.as_mut().unwrap().haldex.enabled = false;
+        assert!(
+            !module(&s, now, awd, None)
+                .rows
+                .iter()
+                .any(|r| r.label == "Stock")
+        );
+    }
 
     #[test]
     fn sdlink_rows_hold_the_reading_between_normal_status_samples() {

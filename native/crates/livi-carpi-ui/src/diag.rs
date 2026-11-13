@@ -161,6 +161,7 @@ fn module_of(action: &DiagAction) -> Option<u8> {
         | DiagAction::ReadAdaptation { module, .. }
         | DiagAction::WriteCoding { module, .. }
         | DiagAction::WriteAdaptation { module, .. } => Some(*module),
+        DiagAction::SetHaldexMode { .. } => Some(0x0A),
         DiagAction::InstallList | DiagAction::Status | DiagAction::Scan => None,
     }
 }
@@ -177,6 +178,7 @@ fn doing(action: &DiagAction) -> &'static str {
         DiagAction::ReadAdaptation { .. } => "Reading adaptation",
         DiagAction::WriteCoding { .. } => "Writing coding",
         DiagAction::WriteAdaptation { .. } => "Writing adaptation",
+        DiagAction::SetHaldexMode { .. } => "Switching Haldex mode",
     }
 }
 
